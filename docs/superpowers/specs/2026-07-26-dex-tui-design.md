@@ -136,10 +136,26 @@ malformed JSON is reported, not thrown.
 - `DexStoreWatcher` against the real filesystem: fires on write, collapses bursts,
   silent when idle, safety-poll fallback, silent after disposal.
 
-The UI layer is deliberately thin and not unit tested. `--selftest` exercises the
-full data path as plain text. Anything visual must be checked in a real terminal:
-Terminal.Gui negotiates capabilities at startup and renders nothing under a bare
-pty, so automated visual verification is not possible.
+The UI layer is deliberately thin and not unit tested. Two tools cover it instead:
+
+- `--selftest` exercises the full data path (dex → parse → tree → detail) as plain
+  text.
+- `scripts/render-check.sh` renders the real UI inside a tmux pane and prints it,
+  optionally after sending keys. Terminal.Gui renders nothing under a bare pty
+  because its startup capability queries go unanswered, but tmux is a real
+  terminal emulator and works.
+
+The render check earned its place immediately. Four bugs were invisible to both the
+compiler and the test suite, and obvious the moment a pane was captured:
+
+1. The tree loaded fully **collapsed** — the collapse-new-tasks rule applied to
+   first load, where everything is new. Fixed by expanding once at startup.
+2. **Every shortcut was swallowed.** `TreeView.AllowLetterBasedNavigation` defaults
+   to on and eats letters for type-to-jump; and window shortcuts must override
+   `OnKeyDownNotHandled`, since the focused view sees keys first.
+3. The filter label **truncated** in one state, losing its closing bracket, because
+   the variants were not the same width.
+4. The help text was **centred** by `MessageBox`, destroying its column alignment.
 
 ## Out of scope for v1
 
@@ -148,6 +164,7 @@ fine to run from the shell. Current directory's store only.
 
 ## Known follow-ups
 
-- A headless render harness using `Application.ForceDriver` + `TestInputSource`
-  would let the view layer be tested; deferred as undocumented and churn-prone.
+- The render check is manual. Asserting on captured panes in CI would turn it into
+  a real regression suite, at the cost of brittleness against layout changes.
 - Priority editing and blocker management are not exposed; dex supports both.
+- Expand-all / collapse-all keys would help once trees get deep.

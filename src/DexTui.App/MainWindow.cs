@@ -56,7 +56,7 @@ public sealed class MainWindow : Window
         {
             X = 3,
             Y = 0,
-            Width = Dim.Fill(24),
+            Width = Dim.Fill(27),
             Height = 1,
         };
 
@@ -64,9 +64,9 @@ public sealed class MainWindow : Window
 
         _filterLabel = new Label
         {
-            X = Pos.AnchorEnd(22),
+            X = Pos.AnchorEnd(25),
             Y = 0,
-            Width = 21,
+            Width = 24,
             Height = 1,
         };
 
@@ -81,6 +81,12 @@ public sealed class MainWindow : Window
                 childGetter: n => n.Children,
                 canExpand: n => n.Children.Count > 0),
             AspectGetter = Describe,
+
+            // TreeView otherwise consumes every letter for type-to-jump, which
+            // silently swallows all our single-key shortcuts. Searching is the
+            // job of the / box, which filters the whole tree rather than merely
+            // jumping the cursor.
+            AllowLetterBasedNavigation = false,
         };
 
         _detail = new TextView
@@ -115,7 +121,16 @@ public sealed class MainWindow : Window
             }
         };
 
+        // Everything is "new" on first load, and the collapse-new-tasks rule would
+        // otherwise open the app onto a single collapsed root. Expand once up front;
+        // from here on the rule applies and background additions stay collapsed.
+        ExpandEverything();
         Rebuild(preserveSelection: false);
+
+        // The tree must own the keyboard, not the search box. The query field is
+        // added first and would otherwise take initial focus, swallowing every
+        // single-letter shortcut as literal text. Press / to reach the search box.
+        _tree.SetFocus();
 
         // The store is not always ./.dex -- outside a git repo dex uses a global
         // store -- so we watch whatever `dex dir` reported.
@@ -126,6 +141,19 @@ public sealed class MainWindow : Window
 
     private static Dictionary<string, DexTask> Index(IEnumerable<DexTask> tasks)
         => tasks.ToDictionary(t => t.Id, StringComparer.Ordinal);
+
+    /// <summary>Marks every task that has children as expanded.</summary>
+    private void ExpandEverything()
+    {
+        // Built unfiltered: a task should stay expanded after the filter that hid
+        // its children is cleared again.
+        var all = TaskTree.Build(_tasks, null, StatusFilter.All);
+        var ids = TaskTree.Flatten(all)
+            .Where(n => n.Children.Count > 0)
+            .Select(n => n.Id);
+
+        _viewState = _viewState with { ExpandedIds = new HashSet<string>(ids, StringComparer.Ordinal) };
+    }
 
     private static string Describe(TaskNode n)
     {
@@ -220,11 +248,13 @@ public sealed class MainWindow : Window
             _suppressSelectionEvents = false;
         }
 
+        // All three variants are the same width; an over-long one is silently
+        // truncated by the fixed-width label and loses its closing bracket.
         _filterLabel.Text = _filter switch
         {
-            StatusFilter.All => "[ all | pending | ◐ ]".Replace("all", "ALL"),
-            StatusFilter.InProgress => "[ all | pending | ◐* ]",
-            _ => "[ all | PENDING | ◐ ]",
+            StatusFilter.All => "[ ALL  pending  active ]",
+            StatusFilter.InProgress => "[ all  pending  ACTIVE ]",
+            _ => "[ all  PENDING  active ]",
         };
 
         RenderDetail();
@@ -275,9 +305,16 @@ public sealed class MainWindow : Window
 
     // ---------- keys ----------
 
-    protected override bool OnKeyDown(Key key)
+    /// <summary>
+    /// Window-level shortcuts. This must be OnKeyDownNotHandled, not OnKeyDown:
+    /// the focused view sees keys first, so a plain OnKeyDown override never
+    /// receives them while the tree has focus. Using the "not handled" hook also
+    /// means typing in the search box still works normally, because TextField
+    /// consumes printable characters before they can reach here.
+    /// </summary>
+    protected override bool OnKeyDownNotHandled(Key key)
     {
-        // The search box owns ordinary typing; only Esc gets us back out of it.
+        // Esc is the way back out of the search box.
         if (_queryField.HasFocus)
         {
             if (key == Key.Esc)
@@ -286,7 +323,7 @@ public sealed class MainWindow : Window
                 return true;
             }
 
-            return base.OnKeyDown(key);
+            return base.OnKeyDownNotHandled(key);
         }
 
         var selected = _tree.SelectedObject?.Task;
@@ -337,7 +374,7 @@ public sealed class MainWindow : Window
 
         if (selected is null)
         {
-            return base.OnKeyDown(key);
+            return base.OnKeyDownNotHandled(key);
         }
 
         if (key == Key.A)
@@ -370,7 +407,7 @@ public sealed class MainWindow : Window
             return true;
         }
 
-        return base.OnKeyDown(key);
+        return base.OnKeyDownNotHandled(key);
     }
 
     // ---------- actions ----------
@@ -505,24 +542,61 @@ public sealed class MainWindow : Window
 
     private void ShowHelp()
     {
-        _modalOpen = true;
-        MessageBox.Query(
-            _app,
-            "dex-tui",
-            """
-            ↑ ↓        move          s   start task
-            → ←        expand        c   complete (prompts for result)
-            /          search        e   edit name and description
-            f          cycle filter  n   new top-level task
-            F5         refresh       a   new subtask of selection
-            q / Esc    quit          d   delete (with confirmation)
+        // Not MessageBox: it centres every line, which destroys the column
+        // alignment of a key list. A plain dialog with a left-aligned view keeps it.
+        const string HelpText = """
+            ↑ ↓        move            s   start task
+            → ←        expand          c   complete (prompts for result)
+            /          search          e   edit name and description
+            f          cycle filter    n   new top-level task
+            F5         refresh         a   new subtask of selection
+            q / Esc    quit            d   delete (with confirmation)
 
-            The view refreshes itself when the dex store changes.
-            Your selection, expansion and any open dialog are never disturbed.
-            """,
-            "OK");
-        _modalOpen = false;
-        DrainPendingRefresh();
+            The view refreshes itself whenever the dex store changes, including
+            when another process or agent edits it. Your selection, expansion
+            and any dialog you have open are never disturbed.
+            """;
+
+        _modalOpen = true;
+        try
+        {
+            var dialog = new Dialog
+            {
+                Title = "dex-tui",
+                Width = 76,
+                Height = 17,
+            };
+
+            var body = new TextView
+            {
+                X = 1,
+                Y = 0,
+                Width = Dim.Fill(1),
+                Height = Dim.Fill(1),
+                Text = HelpText,
+                ReadOnly = true,
+                WordWrap = false,
+            };
+
+            var ok = new Button { Text = "OK", IsDefault = true };
+            ok.Accepting += (_, e) =>
+            {
+                e.Handled = true;
+                dialog.RequestStop();
+            };
+
+            dialog.AddButton(ok);
+            dialog.Add(body);
+            ok.SetFocus();
+
+            _app.Run(dialog);
+            dialog.Dispose();
+        }
+        finally
+        {
+            _modalOpen = false;
+            DrainPendingRefresh();
+        }
     }
 
     /// <summary>Applies any refresh that arrived while a dialog was open.</summary>
