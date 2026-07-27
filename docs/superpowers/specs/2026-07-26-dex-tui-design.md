@@ -1,7 +1,17 @@
 # dex-tui design
 
 **Date:** 2026-07-26
-**Status:** implemented (v1)
+**Status:** historical — describes the .NET implementation, since replaced
+
+> This is the original design, written for .NET 10 + Terminal.Gui. That version
+> shipped, then was replaced by a Rust/ratatui rewrite; it is preserved at the
+> `v0.1.0-dotnet` tag.
+>
+> **The product decisions below still hold** — the layout, the watcher-triggers/
+> CLI-reads split, the refresh invariant, and every dex quirk carried over
+> unchanged. Only the framework-specific parts (Terminal.Gui types, the
+> `Reconciler`, the C# file layout) no longer describe the code. See
+> [rust-vs-dotnet.md](../../rust-vs-dotnet.md) for what changed and why.
 
 ## Goal
 
