@@ -10,11 +10,14 @@ with a search/filter bar on top.
 dotnet build DexTui.slnx
 dotnet test  DexTui.slnx
 
-# Run against the dex store for the current directory:
-cd ~/some/project && dotnet run --project ~/Developer/DanielCarmingham/dex-tui/src/DexTui.App
+# Run against the dex store for whatever directory you are in.
+# run.sh builds first, then execs the app; it deliberately does NOT cd into the
+# repo, because dex resolves its store from the working directory.
+cd ~/some/project && ~/Developer/DanielCarmingham/dex-tui/run.sh
 
-# Print the whole data pipeline as plain text and exit (no TUI):
-dotnet run --project src/DexTui.App -- --selftest
+./run.sh -n           # skip the build, run the last one
+./run.sh -r           # Release configuration
+./run.sh --selftest   # print the data pipeline as text, no TUI
 ```
 
 `--selftest` resolves the store, lists tasks, builds the tree under every filter,
