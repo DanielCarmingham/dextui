@@ -9,13 +9,11 @@
 #   cd ~/some/project && ~/Developer/DanielCarmingham/dex-tui/run.sh
 #
 # Options:
-#   -n, --no-build   skip the build and run whatever was built last (faster)
-#   -r, --release    build and run the Release configuration
-#   everything else is passed through to the app, e.g. --selftest
+#   -n, --no-build   skip the build and run whatever was built last
+#   -r, --release    build and run the optimised binary
+#   everything else is passed through, e.g. --selftest
 set -euo pipefail
 
-# Resolve the repo from this script's own location, following symlinks, so the
-# script still works when linked into ~/.local/bin.
 SOURCE="${BASH_SOURCE[0]}"
 while [ -L "$SOURCE" ]; do
   DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
@@ -24,24 +22,30 @@ while [ -L "$SOURCE" ]; do
 done
 REPO="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
-CONFIG=Debug
+CARGO="${CARGO:-$HOME/.cargo/bin/cargo}"
+command -v cargo >/dev/null 2>&1 && CARGO=cargo
+
+PROFILE=debug
 BUILD=1
 ARGS=()
 
 for arg in "$@"; do
   case "$arg" in
     -n|--no-build) BUILD=0 ;;
-    -r|--release)  CONFIG=Release ;;
+    -r|--release)  PROFILE=release ;;
     *)             ARGS+=("$arg") ;;
   esac
 done
 
-APP="$REPO/src/DexTui.App/bin/$CONFIG/net10.0/DexTui.App"
+APP="$REPO/target/$PROFILE/dex-tui"
 
 if [ "$BUILD" -eq 1 ]; then
-  # Quiet on success; on failure show the errors and stop before clearing the
-  # screen, otherwise the TUI would wipe them away.
-  if ! BUILD_LOG="$(dotnet build "$REPO/DexTui.slnx" -c "$CONFIG" --nologo -v q 2>&1)"; then
+  # Capture output so a compile error stays readable instead of being wiped
+  # when the TUI clears the screen.
+  FLAGS=(--manifest-path "$REPO/Cargo.toml" --quiet)
+  [ "$PROFILE" = release ] && FLAGS+=(--release)
+
+  if ! BUILD_LOG="$("$CARGO" build "${FLAGS[@]}" 2>&1)"; then
     printf '%s\n' "$BUILD_LOG" >&2
     exit 1
   fi
@@ -57,5 +61,4 @@ if ! command -v dex >/dev/null 2>&1; then
   exit 1
 fi
 
-# exec so the app owns the terminal and signals directly.
 exec "$APP" "${ARGS[@]+"${ARGS[@]}"}"

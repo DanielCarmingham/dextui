@@ -4,9 +4,9 @@
 #
 # Renders dex-tui inside a tmux pane and prints what it actually drew.
 #
-# Terminal.Gui negotiates terminal capabilities at startup, and under a bare pty
-# (`script`, a pipe) nothing answers those queries so it renders no frames at all.
-# tmux is a real terminal emulator, so it renders normally there.
+# ratatui (like most TUI frameworks) needs a real terminal: under a bare pty
+# such as `script` or a plain pipe, capability queries go unanswered and you get
+# no usable frames. tmux is a real terminal emulator, so it renders normally.
 #
 # Optional argument: whitespace-separated tmux key names sent one per second
 # before the capture, e.g. "Down Down", "f", "?".
@@ -16,17 +16,20 @@
 #   scripts/render-check.sh
 #   scripts/render-check.sh "Down Down"
 #   scripts/render-check.sh "f"
+#
+# By default it renders the dex store for your current directory; set
+# DEXTUI_RENDER_CWD to point it somewhere else.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-APP="$REPO/src/DexTui.App/bin/Debug/net10.0/DexTui.App"
+APP="$REPO/target/debug/dex-tui"
 SOCK="dextui-render"
 SESSION="render"
 WORKDIR="${DEXTUI_RENDER_CWD:-$PWD}"
 KEYS="${1:-}"
 
 if [ ! -x "$APP" ]; then
-  echo "build first: dotnet build $REPO/DexTui.slnx" >&2
+  echo "build first: cargo build --manifest-path $REPO/Cargo.toml" >&2
   exit 1
 fi
 
@@ -37,7 +40,7 @@ tmux -L "$SOCK" kill-server 2>/dev/null
 sleep 0.3
 
 tmux -L "$SOCK" new-session -d -s "$SESSION" -x 120 -y 36 -c "$WORKDIR" "$APP"
-sleep 4
+sleep 3
 
 for k in $KEYS; do
   tmux -L "$SOCK" send-keys -t "$SESSION" "$k"

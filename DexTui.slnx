@@ -1,9 +1,0 @@
-<Solution>
-  <Folder Name="/src/">
-    <Project Path="src/DexTui.App/DexTui.App.csproj" />
-    <Project Path="src/DexTui.Core/DexTui.Core.csproj" />
-  </Folder>
-  <Folder Name="/tests/">
-    <Project Path="tests/DexTui.Core.Tests/DexTui.Core.Tests.csproj" />
-  </Folder>
-</Solution>

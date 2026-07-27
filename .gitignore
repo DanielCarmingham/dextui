@@ -1,9 +1,10 @@
+target/
+.DS_Store
+
+# Leftover .NET build output from the pre-Rust implementation. The sources are
+# gone (see the v0.1.0-dotnet tag); these directories may still exist locally.
 bin/
 obj/
-*.user
-.DS_Store
-TestResults/
-.publish/
 
 # Per-machine Claude Code settings
 .claude/settings.local.json
