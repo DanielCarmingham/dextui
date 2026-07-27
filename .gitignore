@@ -3,6 +3,7 @@ obj/
 *.user
 .DS_Store
 TestResults/
+.publish/
 
 # Per-machine Claude Code settings
 .claude/settings.local.json
