@@ -38,8 +38,6 @@ pub struct Icons {
     // Header
     pub app: &'static str,
     pub project: &'static str,
-    /// Solid powerline separator, or empty when unavailable.
-    pub sep: &'static str,
 
     // Meter
     pub meter_done: &'static str,
@@ -47,7 +45,7 @@ pub struct Icons {
     pub meter_empty: &'static str,
 }
 
-/// Nerd Font: chevrons, Font Awesome state icons, powerline separators.
+/// Nerd Font: chevrons and Font Awesome state icons.
 pub const NERD: Icons = Icons {
     tier: Tier::Nerd,
     expanded: "\u{f078}",  // fa chevron-down
@@ -59,7 +57,6 @@ pub const NERD: Icons = Icons {
     blocked: "\u{f05e}", // fa ban
     app: "\u{f0ae}",     // fa tasks
     project: "\u{f07b}", // fa folder
-    sep: "\u{e0b0}",     // powerline right solid
     meter_done: "\u{2593}",
     meter_active: "\u{2592}",
     meter_empty: "\u{2591}",
@@ -77,7 +74,6 @@ pub const UNICODE: Icons = Icons {
     blocked: "\u{00d7}", // ×  (✗ and ⊗ are unavailable)
     app: "",
     project: "",
-    sep: "",
     meter_done: "\u{2593}",
     meter_active: "\u{2592}",
     meter_empty: "\u{2591}",
@@ -95,18 +91,12 @@ pub const ASCII: Icons = Icons {
     blocked: "!",
     app: "",
     project: "",
-    sep: "",
     meter_done: "#",
     meter_active: "+",
     meter_empty: ".",
 };
 
 impl Icons {
-    /// True when powerline separators can be drawn.
-    pub fn has_powerline(&self) -> bool {
-        !self.sep.is_empty()
-    }
-
     pub fn marker(&self, has_children: bool, is_open: bool) -> &'static str {
         if !has_children {
             self.leaf
@@ -130,7 +120,7 @@ pub fn name(tier: Tier) -> &'static str {
 
 pub fn about(tier: Tier) -> &'static str {
     match tier {
-        Tier::Nerd => "Nerd Font icons and powerline separators (needs a patched font)",
+        Tier::Nerd => "Nerd Font icons (needs a patched font)",
         Tier::Unicode => "plain Unicode; works in any modern font",
         Tier::Ascii => "7-bit only; for anywhere else",
     }

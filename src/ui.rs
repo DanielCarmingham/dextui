@@ -1,7 +1,7 @@
 //! Immediate-mode rendering. Everything is redrawn from `App` each frame.
 //!
 //! This is the only module that knows about colour: `markdown` and `tree` emit
-//! neutral descriptions of what things *are*, and the `Palette` decides how they
+//! neutral descriptions of what things *are*, and this module decides how they
 //! look.
 
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -14,10 +14,23 @@ use ratatui::widgets::{
 use ratatui::Frame;
 
 use crate::app::{App, Mode};
+
+/// Colour is used only where it carries meaning. Everything else is left to the
+/// terminal, so the app inherits whatever scheme the user runs -- including a
+/// light/dark switch at runtime -- instead of imposing its own.
+///
+/// Only ANSI-16 names and `Reset` appear here: they are remapped by the user's
+/// terminal theme. Fixed `Indexed`/`Rgb` values, and `White`/`Black` for text,
+/// can only ever suit one background.
+const PLAIN: Color = Color::Reset;
+const DIM: Color = Color::DarkGray;
+const ACTIVE: Color = Color::Yellow;
+const DONE: Color = Color::Green;
+const BLOCKED: Color = Color::Red;
+const CODE: Color = Color::Cyan;
 use crate::icons::Icons;
 use crate::dex::{age, local_time, Status, Task};
 use crate::markdown::{self, Emphasis};
-use crate::theme::Palette;
 use crate::tree::{self, Progress};
 
 const SHORTCUTS: &str =
@@ -26,7 +39,7 @@ const SHORTCUTS: &str =
 /// Width of the inline progress meter, in cells.
 const METER_WIDTH: usize = 7;
 
-pub fn draw(frame: &mut Frame, app: &App, p: &Palette, ic: &Icons) {
+pub fn draw(frame: &mut Frame, app: &App, ic: &Icons) {
     let [top, body, bottom] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -34,35 +47,33 @@ pub fn draw(frame: &mut Frame, app: &App, p: &Palette, ic: &Icons) {
     ])
     .areas(frame.area());
 
-    draw_header(frame, app, p, ic, top);
+    draw_header(frame, app, ic, top);
 
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(45), Constraint::Fill(1)]).areas(body);
 
-    draw_tree(frame, app, p, ic, left);
-    draw_detail(frame, app, p, ic, right);
-    draw_status(frame, app, p, bottom);
+    draw_tree(frame, app, ic, left);
+    draw_detail(frame, app, ic, right);
+    draw_status(frame, app, bottom);
 
     match &app.mode {
-        Mode::Prompt(prompt) => draw_prompt(frame, prompt, p),
+        Mode::Prompt(prompt) => draw_prompt(frame, prompt),
         Mode::Confirm { message, .. } => draw_message(
             frame,
             "Delete task",
             message,
             "enter delete    esc cancel",
-            p.blocked,
-            p,
+            BLOCKED,
         ),
         Mode::ForceComplete { message, .. } => draw_message(
             frame,
             "Incomplete subtasks",
             message,
             "enter force    esc cancel",
-            p.active,
-            p,
+            ACTIVE,
         ),
-        Mode::Error(e) => draw_message(frame, "dex error", e, "any key to dismiss", p.blocked, p),
-        Mode::Help => draw_help(frame, p),
+        Mode::Error(e) => draw_message(frame, "dex error", e, "any key to dismiss", BLOCKED),
+        Mode::Help => draw_help(frame),
         _ => {}
     }
 }
@@ -75,11 +86,11 @@ fn glyph(s: Status, ic: &Icons) -> &'static str {
     }
 }
 
-fn status_color(s: Status, p: &Palette) -> Color {
+fn status_color(s: Status) -> Color {
     match s {
-        Status::Completed => p.done,
-        Status::InProgress => p.active,
-        Status::Pending => p.pending,
+        Status::Completed => DONE,
+        Status::InProgress => ACTIVE,
+        Status::Pending => PLAIN,
     }
 }
 
@@ -87,7 +98,7 @@ fn status_color(s: Status, p: &Palette) -> Color {
 ///
 /// The number is shown alongside the bar on purpose: at seven cells a bar cannot
 /// distinguish 2/7 from 3/7, and for triage the exact count is the useful part.
-fn meter_spans(progress: Progress, p: &Palette, ic: &Icons) -> Vec<Span<'static>> {
+fn meter_spans(progress: Progress, ic: &Icons) -> Vec<Span<'static>> {
     let cells = |n: usize| -> usize {
         if n == 0 {
             0
@@ -102,121 +113,77 @@ fn meter_spans(progress: Progress, p: &Palette, ic: &Icons) -> Vec<Span<'static>
     let active = cells(progress.active).min(METER_WIDTH - done);
 
     vec![
-        Span::styled(ic.meter_done.repeat(done), Style::default().fg(p.meter_full)),
-        Span::styled(ic.meter_active.repeat(active), Style::default().fg(p.active)),
+        Span::styled(ic.meter_done.repeat(done), Style::default().fg(DONE)),
+        Span::styled(ic.meter_active.repeat(active), Style::default().fg(ACTIVE)),
         Span::styled(
             ic.meter_empty.repeat(METER_WIDTH - done - active),
-            Style::default().fg(p.meter_empty),
+            Style::default().fg(DIM),
         ),
         Span::styled(
             format!(" {}/{}", progress.done, progress.total),
-            Style::default().fg(p.label),
+            Style::default().fg(DIM),
         ),
     ]
 }
 
-/// A segment of the header: text plus its own background.
-struct Seg {
-    text: String,
-    fg: Color,
-    bg: Color,
-    bold: bool,
-}
-
-fn seg_text(icon: &str, text: &str) -> String {
-    if icon.is_empty() {
-        format!(" {text} ")
-    } else {
-        format!(" {icon} {text} ")
-    }
-}
-
 /// The header: app identity, which store you are in, and what is outstanding.
 ///
-/// With a Nerd Font the segments are joined by powerline separators; otherwise
-/// they simply abut, which still reads as distinct blocks because each carries
-/// its own background. Nothing here degrades to tofu.
+/// Plain text with dim separators, no coloured bands. The app does not impose a
+/// look; the terminal's own scheme shows through.
 ///
 /// While searching, the search box takes the whole line over. That is why the
 /// header costs no vertical space: the two are never needed at once.
-fn draw_header(frame: &mut Frame, app: &App, p: &Palette, ic: &Icons, area: Rect) {
+fn draw_header(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
     if matches!(app.mode, Mode::Search) {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(
-                    " search ",
-                    Style::default()
-                        .bg(p.head_app_bg)
-                        .fg(p.head_app_fg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    if ic.has_powerline() { ic.sep } else { "" },
-                    Style::default().fg(p.head_app_bg),
-                ),
-                Span::raw(" "),
-                Span::styled(app.query.value.clone(), Style::default().fg(p.active)),
+                Span::styled(" search ", Style::default().fg(DIM)),
+                Span::styled(app.query.value.clone(), Style::default().fg(ACTIVE)),
             ])),
             area,
         );
-
-        let lead = if ic.has_powerline() { 10 } else { 9 };
         frame.set_cursor_position(Position {
-            x: (area.x + lead + app.query.cursor as u16).min(area.right().saturating_sub(1)),
+            x: (area.x + 8 + app.query.cursor as u16).min(area.right().saturating_sub(1)),
             y: area.y,
         });
         return;
     }
 
     let (pending, active) = app.counts();
+    let sep = || Span::styled(" · ", Style::default().fg(DIM));
 
-    let segments = [
-        Seg {
-            text: seg_text(ic.app, "dex-tui"),
-            fg: p.head_app_fg,
-            bg: p.head_app_bg,
-            bold: true,
-        },
-        Seg {
-            text: seg_text(ic.project, &app.store_label),
-            fg: p.head_ctx_fg,
-            bg: p.head_ctx_bg,
-            bold: false,
-        },
-        Seg {
-            text: seg_text("", &format!("{pending} pending · {active} active")),
-            fg: p.head_info_fg,
-            bg: p.head_info_bg,
-            bold: false,
-        },
-    ];
-
-    let mut spans: Vec<Span> = Vec::new();
-    for (i, seg) in segments.iter().enumerate() {
-        let mut style = Style::default().fg(seg.fg).bg(seg.bg);
-        if seg.bold {
-            style = style.add_modifier(Modifier::BOLD);
-        }
-        spans.push(Span::styled(seg.text.clone(), style));
-
-        if ic.has_powerline() {
-            // The separator is drawn in this segment's colour on the *next*
-            // segment's background, which is what makes the join look solid.
-            let next_bg = segments.get(i + 1).map(|n| n.bg).unwrap_or(Color::Reset);
-            spans.push(Span::styled(
-                ic.sep,
-                Style::default().fg(seg.bg).bg(next_bg),
-            ));
-        }
+    let mut spans = vec![Span::raw(" ")];
+    if !ic.app.is_empty() {
+        spans.push(Span::styled(format!("{} ", ic.app), Style::default().fg(DIM)));
     }
+    spans.push(Span::styled(
+        "dex-tui",
+        Style::default().add_modifier(Modifier::BOLD),
+    ));
+    spans.push(sep());
+
+    if !ic.project.is_empty() {
+        spans.push(Span::styled(format!("{} ", ic.project), Style::default().fg(DIM)));
+    }
+    spans.push(Span::styled(app.store_label.clone(), Style::default().fg(PLAIN)));
+    spans.push(sep());
+
+    spans.push(Span::styled(
+        format!("{pending} pending"),
+        Style::default().fg(DIM),
+    ));
+    spans.push(sep());
+    spans.push(Span::styled(
+        format!("{active} active"),
+        Style::default().fg(ACTIVE),
+    ));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
-    // Filter state stays right-aligned, rendered over the same row.
     frame.render_widget(
         Paragraph::new(
             Line::from(vec![
-                Span::styled(app.filter.label(), Style::default().fg(p.label)),
+                Span::styled(app.filter.label(), Style::default().fg(DIM)),
                 Span::raw(" "),
             ])
             .right_aligned(),
@@ -225,10 +192,10 @@ fn draw_header(frame: &mut Frame, app: &App, p: &Palette, ic: &Icons, area: Rect
     );
 }
 
-fn draw_tree(frame: &mut Frame, app: &App, p: &Palette, ic: &Icons, area: Rect) {
+fn draw_tree(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
     // No title: the header already says which store this is, and repeating it
     // on the pane border was the same fact twice.
-    let block = Block::bordered().border_style(Style::default().fg(p.chrome));
+    let block = Block::bordered().border_style(Style::default().fg(DIM));
 
     let inner_width = area.width.saturating_sub(2) as usize;
     let rows = tree::visible_rows(&app.tree, &app.expanded);
@@ -239,33 +206,33 @@ fn draw_tree(frame: &mut Frame, app: &App, p: &Palette, ic: &Icons, area: Rect) 
             let t = &row.node.task;
 
             let mut spans = vec![
-                Span::styled(row.prefix.clone(), Style::default().fg(p.chrome)),
+                Span::styled(row.prefix.clone(), Style::default().fg(DIM)),
                 Span::styled(
                     format!("{} ", ic.marker(row.has_children, row.is_open)),
-                    Style::default().fg(p.chrome),
+                    Style::default().fg(DIM),
                 ),
                 Span::styled(
                     format!("{} ", glyph(t.status(), ic)),
-                    Style::default().fg(status_color(t.status(), p)),
+                    Style::default().fg(status_color(t.status())),
                 ),
             ];
 
             let name_style = if !row.node.is_match {
                 // Scaffolding: kept only because a descendant matched.
-                Style::default().fg(p.label)
+                Style::default().fg(DIM)
             } else if t.completed {
                 Style::default()
-                    .fg(p.label)
+                    .fg(DIM)
                     .add_modifier(Modifier::CROSSED_OUT)
             } else {
-                Style::default().fg(p.pending)
+                Style::default().fg(PLAIN)
             };
 
             spans.push(Span::styled(t.name.clone(), name_style));
             if t.is_blocked() {
                 spans.push(Span::styled(
                     format!(" {}", ic.blocked),
-                    Style::default().fg(p.blocked),
+                    Style::default().fg(BLOCKED),
                 ));
             }
 
@@ -273,9 +240,9 @@ fn draw_tree(frame: &mut Frame, app: &App, p: &Palette, ic: &Icons, area: Rect) 
             // in flight. Only in-progress tasks get an age -- putting one on every
             // row would bury the signal it exists to give.
             let trailing: Vec<Span> = match app.progress.get(&t.id) {
-                Some(progress) => meter_spans(*progress, p, ic),
+                Some(progress) => meter_spans(*progress, ic),
                 None if t.status() == Status::InProgress => match age(&t.started_at) {
-                    Some(a) => vec![Span::styled(a, Style::default().fg(p.active))],
+                    Some(a) => vec![Span::styled(a, Style::default().fg(ACTIVE))],
                     None => vec![],
                 },
                 None => vec![],
@@ -301,14 +268,13 @@ fn draw_tree(frame: &mut Frame, app: &App, p: &Palette, ic: &Icons, area: Rect) 
     // REVERSED inverts whatever the terminal's current colours are, so the
     // selected row stays readable in light and dark alike. A fixed background
     // can only ever be right for one of them.
-    let highlight = if p.reverse_selection {
-        Style::default().add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default().bg(p.selection).add_modifier(Modifier::BOLD)
-    };
-
+    // REVERSED inverts whatever the terminal's current colours are, so the
+    // selected row is readable on a light and a dark background alike. A fixed
+    // background can only ever be right for one of them.
     frame.render_stateful_widget(
-        List::new(items).block(block).highlight_style(highlight),
+        List::new(items)
+            .block(block)
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
         area,
         &mut state,
     );
@@ -321,16 +287,16 @@ fn draw_tree(frame: &mut Frame, app: &App, p: &Palette, ic: &Icons, area: Rect) 
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
                 .end_symbol(None)
-                .track_style(Style::default().fg(p.chrome))
-                .thumb_style(Style::default().fg(p.label)),
+                .track_style(Style::default().fg(DIM))
+                .thumb_style(Style::default().fg(DIM)),
             area,
             &mut sb,
         );
     }
 }
 
-fn draw_detail(frame: &mut Frame, app: &App, p: &Palette, ic: &Icons, area: Rect) {
-    let block = Block::bordered().border_style(Style::default().fg(p.chrome));
+fn draw_detail(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
+    let block = Block::bordered().border_style(Style::default().fg(DIM));
 
     let Some(task) = app.selected_task() else {
         let msg = if app.tasks.is_empty() {
@@ -341,7 +307,7 @@ fn draw_detail(frame: &mut Frame, app: &App, p: &Palette, ic: &Icons, area: Rect
         frame.render_widget(
             Paragraph::new(msg)
                 .block(block)
-                .style(Style::default().fg(p.label))
+                .style(Style::default().fg(DIM))
                 .wrap(Wrap { trim: false }),
             area,
         );
@@ -349,7 +315,7 @@ fn draw_detail(frame: &mut Frame, app: &App, p: &Palette, ic: &Icons, area: Rect
     };
 
     frame.render_widget(
-        Paragraph::new(detail_lines(task, app, p, ic))
+        Paragraph::new(detail_lines(task, app, ic))
             .block(block)
             .wrap(Wrap { trim: false }),
         area,
@@ -359,58 +325,58 @@ fn draw_detail(frame: &mut Frame, app: &App, p: &Palette, ic: &Icons, area: Rect
 /// Built entirely from the already-fetched list. `dex show` is never called,
 /// because selection changes on every arrow key and a ~180ms process spawn per
 /// keypress would make navigation unusable.
-fn detail_lines<'a>(t: &'a Task, app: &'a App, p: &'a Palette, ic: &Icons) -> Vec<Line<'a>> {
+fn detail_lines<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Vec<Line<'a>> {
     let mut lines = vec![
         Line::from(Span::styled(
             t.name.clone(),
-            Style::default().fg(p.title).add_modifier(Modifier::BOLD),
+            Style::default().fg(PLAIN).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
             "─".repeat(t.name.chars().count().clamp(8, 60)),
-            Style::default().fg(p.chrome),
+            Style::default().fg(DIM),
         )),
     ];
 
     // One status line reads faster than three separate label/value rows.
     let mut summary = vec![Span::styled(
         format!("{} {}", glyph(t.status(), ic), t.status().label()),
-        Style::default().fg(status_color(t.status(), p)),
+        Style::default().fg(status_color(t.status())),
     )];
 
     if t.status() == Status::InProgress
         && let Some(a) = age(&t.started_at) {
-            summary.push(Span::styled(" · ", Style::default().fg(p.chrome)));
+            summary.push(Span::styled(" · ", Style::default().fg(DIM)));
             summary.push(Span::styled(
                 format!("started {a} ago"),
-                Style::default().fg(p.active),
+                Style::default().fg(ACTIVE),
             ));
         }
 
     // How long it actually took, which reads better than two raw timestamps.
     if let Some(took) = t.worked_duration() {
-        summary.push(Span::styled(" · ", Style::default().fg(p.chrome)));
+        summary.push(Span::styled(" · ", Style::default().fg(DIM)));
         summary.push(Span::styled(
             format!("took {took}"),
-            Style::default().fg(p.done),
+            Style::default().fg(DONE),
         ));
     }
 
-    summary.push(Span::styled(" · ", Style::default().fg(p.chrome)));
+    summary.push(Span::styled(" · ", Style::default().fg(DIM)));
     summary.push(Span::styled(
         format!("priority {}", t.priority),
-        Style::default().fg(p.label),
+        Style::default().fg(DIM),
     ));
     lines.push(Line::from(summary));
 
     if let Some(progress) = app.progress.get(&t.id) {
         lines.push(Line::from(""));
-        let mut row = meter_spans(*progress, p, ic);
+        let mut row = meter_spans(*progress, ic);
         row.push(Span::styled(
             format!(
                 "  subtask{} done",
                 if progress.total == 1 { "" } else { "s" }
             ),
-            Style::default().fg(p.label),
+            Style::default().fg(DIM),
         ));
         lines.push(Line::from(row));
     }
@@ -419,15 +385,15 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, p: &'a Palette, ic: &Icons) -> Ve
 
     let mut field = |k: &str, v: String, style: Style| {
         lines.push(Line::from(vec![
-            Span::styled(format!("{k:<10}"), Style::default().fg(p.label)),
+            Span::styled(format!("{k:<10}"), Style::default().fg(DIM)),
             Span::styled(v, style),
         ]));
     };
 
-    field("id", t.id.clone(), Style::default().fg(p.label));
+    field("id", t.id.clone(), Style::default().fg(DIM));
 
     if let Some(parent) = t.parent_id.as_ref().and_then(|id| app.by_id.get(id)) {
-        field("parent", parent.name.clone(), Style::default().fg(p.pending));
+        field("parent", parent.name.clone(), Style::default().fg(PLAIN));
     }
 
     if t.is_blocked() {
@@ -441,7 +407,7 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, p: &'a Palette, ic: &Icons) -> Ve
                     .unwrap_or_else(|| id.clone())
             })
             .collect();
-        field("blocked", names.join(", "), Style::default().fg(p.blocked));
+        field("blocked", names.join(", "), Style::default().fg(BLOCKED));
     }
 
     // The reverse relationship. A task holding up three others is a priority
@@ -457,7 +423,7 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, p: &'a Palette, ic: &Icons) -> Ve
                     .unwrap_or_else(|| id.clone())
             })
             .collect();
-        field("blocks", names.join(", "), Style::default().fg(p.active));
+        field("blocks", names.join(", "), Style::default().fg(ACTIVE));
     }
 
     // Absolute date plus relative age: one for the record, one for the feel.
@@ -471,39 +437,39 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, p: &'a Palette, ic: &Icons) -> Ve
     field(
         "created",
         stamp(&t.created_at),
-        Style::default().fg(p.pending),
+        Style::default().fg(PLAIN),
     );
     if t.started_at.is_some() {
-        field("started", stamp(&t.started_at), Style::default().fg(p.active));
+        field("started", stamp(&t.started_at), Style::default().fg(ACTIVE));
     }
     if t.completed_at.is_some() {
-        field("done", stamp(&t.completed_at), Style::default().fg(p.done));
+        field("done", stamp(&t.completed_at), Style::default().fg(DONE));
     }
     // Only when it is not just an echo of created/started/done.
     if t.has_distinct_update() {
-        field("updated", stamp(&t.updated_at), Style::default().fg(p.label));
+        field("updated", stamp(&t.updated_at), Style::default().fg(DIM));
     }
 
     // Linked via `dex complete --commit <sha>`. Entirely local -- no sync needed.
     if let Some(c) = t.commit() {
         let mut parts = vec![Span::styled(
             format!("{:<10}", "commit"),
-            Style::default().fg(p.label),
+            Style::default().fg(DIM),
         )];
         parts.push(Span::styled(
             c.short_sha().to_string(),
-            Style::default().fg(p.md_code).add_modifier(Modifier::BOLD),
+            Style::default().fg(CODE).add_modifier(Modifier::BOLD),
         ));
         if let Some(m) = c.message.as_ref().filter(|m| !m.trim().is_empty()) {
             parts.push(Span::styled(
                 format!("  {m}"),
-                Style::default().fg(p.pending),
+                Style::default().fg(PLAIN),
             ));
         }
         if let Some(b) = c.branch.as_ref().filter(|b| !b.trim().is_empty()) {
             parts.push(Span::styled(
                 format!("  ({b})"),
-                Style::default().fg(p.label),
+                Style::default().fg(DIM),
             ));
         }
         lines.push(Line::from(parts));
@@ -511,19 +477,19 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, p: &'a Palette, ic: &Icons) -> Ve
 
     if let Some(d) = t.description.as_ref().filter(|d| !d.trim().is_empty()) {
         lines.push(Line::from(""));
-        lines.extend(markdown_lines(d, p));
+        lines.extend(markdown_lines(d));
     }
 
     if let Some(r) = t.result.as_ref().filter(|r| !r.trim().is_empty()) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "result",
-            Style::default().fg(p.label),
+            Style::default().fg(DIM),
         )));
         for line in r.lines() {
             lines.push(Line::from(Span::styled(
                 line.to_string(),
-                Style::default().fg(p.done),
+                Style::default().fg(DONE),
             )));
         }
     }
@@ -532,7 +498,7 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, p: &'a Palette, ic: &Icons) -> Ve
 }
 
 /// Applies the palette to what `markdown` identified.
-fn markdown_lines(text: &str, p: &Palette) -> Vec<Line<'static>> {
+fn markdown_lines(text: &str) -> Vec<Line<'static>> {
     markdown::parse(text)
         .into_iter()
         .map(|segments| {
@@ -541,15 +507,15 @@ fn markdown_lines(text: &str, p: &Palette) -> Vec<Line<'static>> {
                     .into_iter()
                     .map(|s| {
                         let style = match s.emphasis {
-                            Emphasis::Plain => Style::default().fg(p.pending),
-                            Emphasis::Marker => Style::default().fg(p.md_marker),
+                            Emphasis::Plain => Style::default().fg(PLAIN),
+                            Emphasis::Marker => Style::default().fg(DIM),
                             Emphasis::Heading => Style::default()
-                                .fg(p.md_heading)
+                                .fg(PLAIN)
                                 .add_modifier(Modifier::BOLD),
                             Emphasis::Bold => Style::default().add_modifier(Modifier::BOLD),
-                            Emphasis::Code | Emphasis::CodeBlock => Style::default().fg(p.md_code),
+                            Emphasis::Code | Emphasis::CodeBlock => Style::default().fg(CODE),
                             Emphasis::Quote => Style::default()
-                                .fg(p.md_quote)
+                                .fg(DIM)
                                 .add_modifier(Modifier::ITALIC),
                         };
                         Span::styled(s.text, style)
@@ -560,23 +526,23 @@ fn markdown_lines(text: &str, p: &Palette) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn draw_status(frame: &mut Frame, app: &App, p: &Palette, area: Rect) {
+fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let (text, style) = if app.status.is_empty() {
-        (SHORTCUTS.to_string(), Style::default().fg(p.label))
+        (SHORTCUTS.to_string(), Style::default().fg(DIM))
     } else {
-        (format!(" {}", app.status), Style::default().fg(p.active))
+        (format!(" {}", app.status), Style::default().fg(ACTIVE))
     };
 
     frame.render_widget(Paragraph::new(text).style(style), area);
 }
 
-fn draw_prompt(frame: &mut Frame, prompt: &crate::app::Prompt, p: &Palette) {
+fn draw_prompt(frame: &mut Frame, prompt: &crate::app::Prompt) {
     let area = centered(frame.area(), 70, 7);
     frame.render_widget(Clear, area);
 
     let block = Block::bordered()
         .title(format!(" {} ", prompt.title))
-        .border_style(Style::default().fg(p.active));
+        .border_style(Style::default().fg(ACTIVE));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -588,15 +554,15 @@ fn draw_prompt(frame: &mut Frame, prompt: &crate::app::Prompt, p: &Palette) {
     .areas(inner);
 
     frame.render_widget(
-        Paragraph::new(prompt.label.clone()).style(Style::default().fg(p.label)),
+        Paragraph::new(prompt.label.clone()).style(Style::default().fg(DIM)),
         label_area,
     );
     frame.render_widget(
-        Paragraph::new(prompt.input.value.clone()).style(Style::default().fg(p.title)),
+        Paragraph::new(prompt.input.value.clone()).style(Style::default().fg(PLAIN)),
         input_area,
     );
     frame.render_widget(
-        Paragraph::new("enter confirm    esc cancel").style(Style::default().fg(p.label)),
+        Paragraph::new("enter confirm    esc cancel").style(Style::default().fg(DIM)),
         hint_area,
     );
 
@@ -606,7 +572,7 @@ fn draw_prompt(frame: &mut Frame, prompt: &crate::app::Prompt, p: &Palette) {
     });
 }
 
-fn draw_message(frame: &mut Frame, title: &str, body: &str, hint: &str, accent: Color, p: &Palette) {
+fn draw_message(frame: &mut Frame, title: &str, body: &str, hint: &str, accent: Color) {
     let area = centered(frame.area(), 66, 9);
     frame.render_widget(Clear, area);
 
@@ -621,17 +587,17 @@ fn draw_message(frame: &mut Frame, title: &str, body: &str, hint: &str, accent: 
 
     frame.render_widget(
         Paragraph::new(body.to_string())
-            .style(Style::default().fg(p.pending))
+            .style(Style::default().fg(PLAIN))
             .wrap(Wrap { trim: false }),
         body_area,
     );
     frame.render_widget(
-        Paragraph::new(hint).style(Style::default().fg(p.label)),
+        Paragraph::new(hint).style(Style::default().fg(DIM)),
         hint_area,
     );
 }
 
-fn draw_help(frame: &mut Frame, p: &Palette) {
+fn draw_help(frame: &mut Frame) {
     // Left-aligned on purpose: centring would destroy the column alignment.
     const HELP: &str = "\
 ↑ ↓ j k    move              s   start task
@@ -651,18 +617,18 @@ dialog are never disturbed.";
 
     let block = Block::bordered()
         .title(" dex-tui ")
-        .border_style(Style::default().fg(p.active));
+        .border_style(Style::default().fg(ACTIVE));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let [body, hint] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
 
     frame.render_widget(
-        Paragraph::new(HELP).style(Style::default().fg(p.pending)),
+        Paragraph::new(HELP).style(Style::default().fg(PLAIN)),
         body,
     );
     frame.render_widget(
-        Paragraph::new("any key to dismiss").style(Style::default().fg(p.label)),
+        Paragraph::new("any key to dismiss").style(Style::default().fg(DIM)),
         hint,
     );
 }
@@ -682,7 +648,6 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 pub fn selftest(app: &App) -> String {
     use std::fmt::Write;
     let mut out = String::new();
-    let p = &crate::theme::CALM;
     let ic = &crate::icons::UNICODE;
 
     let (pending, active) = app.counts();
@@ -709,7 +674,7 @@ pub fn selftest(app: &App) -> String {
 
     if let Some(first) = app.tasks.first() {
         let _ = writeln!(out, "--- detail pane for {} ---", first.name);
-        for line in detail_lines(first, app, p, ic) {
+        for line in detail_lines(first, app, ic) {
             let _ = writeln!(
                 out,
                 "{}",
@@ -728,7 +693,7 @@ fn print_node(node: &tree::Node, depth: usize, app: &App, ic: &Icons, out: &mut 
     use std::fmt::Write;
     let scaffold = if node.is_match { "" } else { "  (scaffold)" };
     let rollup = match app.progress.get(&node.task.id) {
-        Some(p) => format!("  {}/{}", p.done, p.total),
+        Some(prog) => format!("  {}/{}", prog.done, prog.total),
         None => String::new(),
     };
     let _ = writeln!(
@@ -775,7 +740,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal
-            .draw(|f| draw(f, &app, &crate::theme::CALM, ic))
+            .draw(|f| draw(f, &app, ic))
             .unwrap();
 
         let buf = terminal.backend().buffer().clone();
