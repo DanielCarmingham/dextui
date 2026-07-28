@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dex::Task;
-use crate::tree::{self, Filter, Node, Progress};
+use crate::tree::{self, Filter, Node, Progress, Sort};
 
 /// A simple char-indexed editable buffer. Enough for a task name or a result note.
 #[derive(Debug, Clone, Default)]
@@ -105,6 +105,8 @@ pub struct App {
     pub expanded: HashSet<String>,
     pub selected: Option<String>,
     pub filter: Filter,
+    pub sort: Sort,
+    pub sort_reversed: bool,
     pub query: TextInput,
     pub mode: Mode,
     pub status: String,
@@ -135,6 +137,8 @@ impl App {
             expanded: HashSet::new(),
             selected: None,
             filter: Filter::Pending,
+            sort: Sort::Priority,
+            sort_reversed: false,
             query: TextInput::default(),
             mode: Mode::Normal,
             status: String::new(),
@@ -160,7 +164,7 @@ impl App {
     pub fn expand_all(&mut self) {
         // Built unfiltered, so a task stays expanded once a filter that hid its
         // children is cleared again.
-        let full = tree::build(&self.tasks, "", Filter::All);
+        let full = tree::build(&self.tasks, "", Filter::All, self.sort, self.sort_reversed);
         self.expanded = tree::flatten(&full)
             .iter()
             .filter(|n| !n.children.is_empty())
@@ -173,7 +177,13 @@ impl App {
     }
 
     pub fn rebuild(&mut self) {
-        self.tree = tree::build(&self.tasks, &self.query.value, self.filter);
+        self.tree = tree::build(
+            &self.tasks,
+            &self.query.value,
+            self.filter,
+            self.sort,
+            self.sort_reversed,
+        );
 
         // A selection filtered out of view must not linger invisibly.
         if let Some(sel) = self.selected.clone()
@@ -376,6 +386,16 @@ impl App {
             .filter(|t| !t.completed && t.started_at.is_some())
             .count();
         (pending, active)
+    }
+
+    pub fn cycle_sort(&mut self) {
+        self.sort = self.sort.next();
+        self.rebuild();
+    }
+
+    pub fn toggle_sort_direction(&mut self) {
+        self.sort_reversed = !self.sort_reversed;
+        self.rebuild();
     }
 
     pub fn toggle_focus(&mut self) {

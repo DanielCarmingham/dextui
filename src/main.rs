@@ -232,6 +232,8 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         // Wrapping and horizontal scrolling are mutually exclusive, so this is
         // the switch between reading prose and reading a wide table.
         KeyCode::Char('w') => app.toggle_wrap(),
+        KeyCode::Char('o') => app.cycle_sort(),
+        KeyCode::Char('O') => app.toggle_sort_direction(),
 
         // Movement drives whichever pane has focus. Action keys below stay
         // global, because they always act on the selected task.

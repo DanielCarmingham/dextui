@@ -33,7 +33,7 @@ use crate::dex::{age, local_time, Status, Task};
 use crate::tree::{self, Progress};
 
 const SHORTCUTS: &str =
-    " s start  c complete  e edit  n new  a subtask  d delete  f filter  / find  tab pane  ? help";
+    " s start  c complete  e edit  n new  a subtask  d del  f filter  o sort  / find  ? help";
 
 /// Width of the inline progress meter, in cells.
 const METER_WIDTH: usize = 7;
@@ -182,6 +182,11 @@ fn draw_header(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
     frame.render_widget(
         Paragraph::new(
             Line::from(vec![
+                Span::styled(
+                    app.sort.label(app.sort_reversed),
+                    Style::default().fg(DIM),
+                ),
+                Span::styled("  ", Style::default()),
                 Span::styled(app.filter.label(), Style::default().fg(DIM)),
                 Span::raw(" "),
             ])
@@ -650,8 +655,9 @@ tab        switch pane       s   start task
 → ← h l    expand / scroll   e   edit name, then description
 g / G      first / last      n   new top-level task
 w          toggle wrap       a   new subtask of selection
+o / O      sort / reverse    r   refresh now
 /          search            d   delete (with confirmation)
-f          cycle filter      r   refresh now
+f          cycle filter
 z Z        collapse/expand all
 
 Movement follows the focused pane, shown by its brighter border. Turn wrap
@@ -713,7 +719,7 @@ pub fn selftest(app: &App) -> String {
         tree::Filter::Pending,
         tree::Filter::InProgress,
     ] {
-        let forest = tree::build(&app.tasks, "", filter);
+        let forest = tree::build(&app.tasks, "", filter, app.sort, app.sort_reversed);
         let count = tree::flatten(&forest).len();
         let _ = writeln!(out, "--- filter: {filter:?} ({count} visible) ---");
         for node in &forest {

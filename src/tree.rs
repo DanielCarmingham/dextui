@@ -33,6 +33,44 @@ impl Filter {
     }
 }
 
+/// How siblings are ordered. Applied at every level, so the hierarchy, the
+/// progress rollups and expand/collapse all keep working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sort {
+    /// priority, then creation time, then name.
+    Priority,
+    Updated,
+    Created,
+    Name,
+}
+
+impl Sort {
+    pub fn next(self) -> Sort {
+        match self {
+            Sort::Priority => Sort::Updated,
+            Sort::Updated => Sort::Created,
+            Sort::Created => Sort::Name,
+            Sort::Name => Sort::Priority,
+        }
+    }
+
+    /// `reversed` flips each order's *natural* direction rather than meaning a
+    /// blanket ascending/descending: newest-first is the useful default for
+    /// timestamps, lowest-number-first for priority, A-Z for names.
+    pub fn label(self, reversed: bool) -> &'static str {
+        match (self, reversed) {
+            (Sort::Priority, false) => "priority",
+            (Sort::Priority, true) => "priority ↓",
+            (Sort::Updated, false) => "updated",
+            (Sort::Updated, true) => "stalest",
+            (Sort::Created, false) => "newest",
+            (Sort::Created, true) => "oldest",
+            (Sort::Name, false) => "A-Z",
+            (Sort::Name, true) => "Z-A",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Node {
     pub task: Task,
@@ -53,7 +91,7 @@ impl Node {
 /// dex returns tasks sorted by id, which is meaningless to a reader, so siblings
 /// are ordered by priority, then creation time, then name. Any task whose
 /// descendant matches is kept, so a match is never orphaned from its path.
-pub fn build(tasks: &[Task], query: &str, filter: Filter) -> Vec<Node> {
+pub fn build(tasks: &[Task], query: &str, filter: Filter, sort: Sort, reversed: bool) -> Vec<Node> {
     let by_id: HashMap<&str, &Task> = tasks.iter().map(|t| (t.id.as_str(), t)).collect();
 
     let mut by_parent: HashMap<&str, Vec<&Task>> = HashMap::new();
@@ -71,12 +109,12 @@ pub fn build(tasks: &[Task], query: &str, filter: Filter) -> Vec<Node> {
     let query = query.trim();
     let query = if query.is_empty() { None } else { Some(query) };
 
-    sort(&mut roots);
+    order(&mut roots, sort, reversed);
 
     let mut visiting: HashSet<&str> = HashSet::new();
     roots
         .into_iter()
-        .filter_map(|r| build_node(r, &by_parent, query, filter, &mut visiting))
+        .filter_map(|r| build_node(r, &by_parent, query, filter, sort, reversed, &mut visiting))
         .collect()
 }
 
@@ -85,6 +123,8 @@ fn build_node<'a>(
     by_parent: &HashMap<&'a str, Vec<&'a Task>>,
     query: Option<&str>,
     filter: Filter,
+    sort: Sort,
+    reversed: bool,
     visiting: &mut HashSet<&'a str>,
 ) -> Option<Node> {
     // Guards against a malformed store where parent links form a cycle.
@@ -95,10 +135,10 @@ fn build_node<'a>(
     let mut children = Vec::new();
     if let Some(kids) = by_parent.get(task.id.as_str()) {
         let mut kids = kids.clone();
-        sort(&mut kids);
+        order(&mut kids, sort, reversed);
         children = kids
             .into_iter()
-            .filter_map(|k| build_node(k, by_parent, query, filter, visiting))
+            .filter_map(|k| build_node(k, by_parent, query, filter, sort, reversed, visiting))
             .collect();
     }
 
@@ -116,13 +156,33 @@ fn build_node<'a>(
     })
 }
 
-fn sort(tasks: &mut [&Task]) {
-    tasks.sort_by(|a, b| {
-        a.priority
+fn order(tasks: &mut [&Task], sort: Sort, reversed: bool) {
+    // Name is the final tiebreak everywhere, so ordering is stable and does not
+    // jitter between refreshes when the primary key ties.
+    let by_name = |a: &Task, b: &Task| a.name.to_lowercase().cmp(&b.name.to_lowercase());
+
+    // Tasks missing a timestamp sort last rather than first, in either
+    // direction: an absent date is not "oldest", it is unknown.
+    let stamp = |t: &Task, key: fn(&Task) -> Option<&String>| key(t).cloned();
+
+    tasks.sort_by(|a, b| match sort {
+        Sort::Priority => a
+            .priority
             .cmp(&b.priority)
             .then_with(|| a.created_at.cmp(&b.created_at))
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| by_name(a, b)),
+        Sort::Updated => stamp(b, |t| t.updated_at.as_ref())
+            .cmp(&stamp(a, |t| t.updated_at.as_ref()))
+            .then_with(|| by_name(a, b)),
+        Sort::Created => stamp(b, |t| t.created_at.as_ref())
+            .cmp(&stamp(a, |t| t.created_at.as_ref()))
+            .then_with(|| by_name(a, b)),
+        Sort::Name => by_name(a, b),
     });
+
+    if reversed {
+        tasks.reverse();
+    }
 }
 
 fn matches(t: &Task, query: Option<&str>, filter: Filter) -> bool {
@@ -282,6 +342,12 @@ mod tests {
             created_at: Some("2026-01-01T00:00:00Z".to_string()),
             ..Default::default()
         }
+    }
+
+    /// The default ordering, so existing tests keep asserting sibling order
+    /// under Sort::Priority without restating it everywhere.
+    fn build(tasks: &[Task], query: &str, filter: Filter) -> Vec<Node> {
+        super::build(tasks, query, filter, Sort::Priority, false)
     }
 
     fn named(id: &str, parent: Option<&str>, name: &str) -> Task {
@@ -445,5 +511,113 @@ mod tests {
     fn subtree_progress_survives_a_cycle() {
         let tasks = vec![task("a", Some("b")), task("b", Some("a"))];
         let _ = subtree_progress(&tasks);
+    }
+
+    fn stamped(id: &str, created: &str, updated: &str) -> Task {
+        Task {
+            created_at: Some(created.to_string()),
+            updated_at: Some(updated.to_string()),
+            ..task(id, None)
+        }
+    }
+
+    fn ids(nodes: &[Node]) -> Vec<&str> {
+        nodes.iter().map(|n| n.id()).collect()
+    }
+
+    fn sorted(tasks: &[Task], sort: Sort, reversed: bool) -> Vec<String> {
+        super::build(tasks, "", Filter::All, sort, reversed)
+            .iter()
+            .map(|n| n.id().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn updated_sort_puts_the_most_recent_first() {
+        let tasks = vec![
+            stamped("old", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+            stamped("new", "2026-01-01T00:00:00Z", "2026-03-01T00:00:00Z"),
+            stamped("mid", "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"),
+        ];
+        assert_eq!(sorted(&tasks, Sort::Updated, false), ["new", "mid", "old"]);
+        assert_eq!(sorted(&tasks, Sort::Updated, true), ["old", "mid", "new"]);
+    }
+
+    #[test]
+    fn created_sort_is_newest_first_and_reverses_to_oldest() {
+        let tasks = vec![
+            stamped("first", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+            stamped("third", "2026-03-01T00:00:00Z", "2026-03-01T00:00:00Z"),
+            stamped("second", "2026-02-01T00:00:00Z", "2026-02-01T00:00:00Z"),
+        ];
+        assert_eq!(sorted(&tasks, Sort::Created, false), ["third", "second", "first"]);
+        assert_eq!(sorted(&tasks, Sort::Created, true), ["first", "second", "third"]);
+    }
+
+    #[test]
+    fn name_sort_ignores_case() {
+        let tasks = vec![named("b", None, "beta"), named("a", None, "Alpha")];
+        assert_eq!(sorted(&tasks, Sort::Name, false), ["a", "b"]);
+        assert_eq!(sorted(&tasks, Sort::Name, true), ["b", "a"]);
+    }
+
+    #[test]
+    fn sorting_applies_at_every_level_not_just_the_roots() {
+        let tasks = vec![
+            task("root", None),
+            Task { name: "zulu".into(), ..task("z", Some("root")) },
+            Task { name: "alpha".into(), ..task("a", Some("root")) },
+        ];
+        let roots = super::build(&tasks, "", Filter::All, Sort::Name, false);
+        assert_eq!(ids(&roots[0].children), ["a", "z"]);
+    }
+
+    #[test]
+    fn tasks_without_a_timestamp_sort_last_in_both_directions() {
+        // An absent date is unknown, not "oldest"; floating it to the top under
+        // one direction would be actively misleading.
+        let mut missing = task("missing", None);
+        missing.updated_at = None;
+        let tasks = vec![
+            missing,
+            stamped("has", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        ];
+
+        assert_eq!(sorted(&tasks, Sort::Updated, false), ["has", "missing"]);
+        assert_eq!(sorted(&tasks, Sort::Updated, true).last().unwrap(), "has");
+    }
+
+    #[test]
+    fn ties_break_on_name_so_order_does_not_jitter_between_refreshes() {
+        let tasks = vec![
+            stamped("b", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+            stamped("a", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        ];
+        // Identical timestamps: name decides, and does so consistently.
+        assert_eq!(sorted(&tasks, Sort::Updated, false), ["a", "b"]);
+    }
+
+    #[test]
+    fn the_sort_cycle_returns_to_where_it_started() {
+        let mut s = Sort::Priority;
+        for _ in 0..4 {
+            s = s.next();
+        }
+        assert_eq!(s, Sort::Priority);
+    }
+
+    #[test]
+    fn every_sort_and_direction_has_a_distinct_label() {
+        let mut labels = Vec::new();
+        let mut s = Sort::Priority;
+        for _ in 0..4 {
+            labels.push(s.label(false));
+            labels.push(s.label(true));
+            s = s.next();
+        }
+        let count = labels.len();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), count, "two orders render the same label");
     }
 }

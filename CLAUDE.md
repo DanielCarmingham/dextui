@@ -242,6 +242,26 @@ unreachable.
 Changing selection resets the scroll, or you land halfway down a task you have
 not read.
 
+## Sorting
+
+`o` cycles the order, `O` reverses it, and the current one shows in the header.
+Sorting is applied to **siblings at every level**, so the hierarchy, progress
+rollups and expand/collapse keep working — a subtask never escapes its parent.
+
+`reversed` flips each order's *natural* direction rather than meaning a blanket
+ascending/descending, because the useful default differs per key: newest-first
+for timestamps, lowest-number-first for priority, A-Z for names. That is why the
+labels read `newest`/`oldest` and `updated`/`stalest` rather than showing arrows.
+
+Two rules worth keeping:
+
+- **Name is the final tiebreak in every order.** Without it, tasks with equal
+  timestamps could swap places between refreshes, which looks like the tree
+  twitching on its own.
+- **A missing timestamp sorts last in both directions.** An absent date is
+  unknown, not "oldest"; floating it to the top under one direction would be
+  actively misleading.
+
 ## Verifying the UI
 
 `cargo test` covers the data path. The UI needs a real terminal emulator: under a
