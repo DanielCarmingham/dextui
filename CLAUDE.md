@@ -161,6 +161,29 @@ Fields that exist **only** on `dex show --json` — `ancestors`, `depth`,
 ~180ms spawn per selection change, and we already derive equivalents from the
 list (parent chain, progress rollups).
 
+## Colour must survive a light terminal
+
+This machine's Ghostty is configured `theme = light:"...",dark:"..."`, so the
+terminal follows the macOS appearance and **flips under the app at runtime**. Any
+palette with a fixed light-or-dark assumption is therefore wrong half the time.
+
+The default (`calm`) uses **only** `Color::Reset` and the ANSI-16 names, which the
+user's terminal theme remaps per mode, plus `Modifier::REVERSED` for the selected
+row — inverting the current colours is correct in both modes, where a fixed
+background can only ever suit one. A test enforces this: no `Indexed`/`Rgb` in
+the default palette, no `White` for text, and `reverse_selection` on.
+
+Two bugs this fixes, both invisible in a dark terminal:
+
+- `title: Color::White` rendered the task title **white on white**.
+- A fixed dark selection band left the selected row dark-on-dark.
+
+`temperature` and `ember` keep fixed colours on purpose and are dark-only; their
+`about:` text must say so, which is also enforced by a test.
+
+Avoid `Color::White`/`Color::Black` for text in any adaptive palette — they are
+effectively fixed. Use `Color::Reset` and let the terminal decide.
+
 ## Glyphs: verify, never assume
 
 **Check codepoints against the actual font before using them.** This is not

@@ -298,10 +298,17 @@ fn draw_tree(frame: &mut Frame, app: &App, p: &Palette, ic: &Icons, area: Rect) 
     let mut state = ListState::default();
     state.select(app.selected_row());
 
+    // REVERSED inverts whatever the terminal's current colours are, so the
+    // selected row stays readable in light and dark alike. A fixed background
+    // can only ever be right for one of them.
+    let highlight = if p.reverse_selection {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().bg(p.selection).add_modifier(Modifier::BOLD)
+    };
+
     frame.render_stateful_widget(
-        List::new(items)
-            .block(block)
-            .highlight_style(Style::default().bg(p.selection).add_modifier(Modifier::BOLD)),
+        List::new(items).block(block).highlight_style(highlight),
         area,
         &mut state,
     );
