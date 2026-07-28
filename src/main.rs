@@ -2,6 +2,7 @@
 
 mod app;
 mod dex;
+mod icons;
 mod markdown;
 mod theme;
 mod tree;
@@ -56,6 +57,23 @@ fn main() -> std::io::Result<()> {
 
     let mut app = App::new(tasks, store_label(&store_dir));
 
+    if std::env::args().any(|a| a == "--icons") {
+        println!("Set with DEXTUI_ICONS=<tier>\n");
+        for i in icons::ALL {
+            println!(
+                "  {:<9} {}  {}{}{}{}  {}",
+                icons::name(i.tier),
+                icons::about(i.tier),
+                i.pending,
+                i.active,
+                i.done,
+                i.blocked,
+                i.expanded,
+            );
+        }
+        return Ok(());
+    }
+
     if std::env::args().any(|a| a == "--themes") {
         println!("Set with DEXTUI_THEME=<name>\n");
         for t in theme::ALL {
@@ -99,10 +117,11 @@ fn main() -> std::io::Result<()> {
     }
 
     let palette = theme::from_env();
+    let glyphs = icons::from_env();
     let mut terminal = ratatui::init();
 
     while !app.should_quit {
-        terminal.draw(|f| ui::draw(f, &app, &palette))?;
+        terminal.draw(|f| ui::draw(f, &app, &palette, &glyphs))?;
 
         let Ok(msg) = rx.recv() else { break };
         match msg {

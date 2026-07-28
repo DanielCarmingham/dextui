@@ -221,11 +221,17 @@ fn collect<'a>(nodes: &'a [Node], out: &mut Vec<&'a Node>) {
     }
 }
 
-/// One rendered line: the node plus the tree-drawing prefix for its position.
-/// Indentation is baked into `prefix`, so no separate depth is needed.
+/// One rendered line: the node, its tree-drawing prefix, and enough state for
+/// the renderer to pick an expand/collapse glyph.
+///
+/// The marker is deliberately NOT baked into `prefix`: which glyph to use is a
+/// presentation decision that depends on the icon tier, and belongs in `ui`.
 pub struct Row<'a> {
     pub node: &'a Node,
+    /// Indentation plus the branch character, e.g. `"│ ├"`.
     pub prefix: String,
+    pub has_children: bool,
+    pub is_open: bool,
 }
 
 /// Flattens to only what is currently visible, honouring `expanded`, and builds
@@ -247,18 +253,12 @@ fn walk<'a>(
         let has_kids = !node.children.is_empty();
         let is_open = expanded.contains(node.id());
 
-        let marker = if !has_kids {
-            "─"
-        } else if is_open {
-            "▾"
-        } else {
-            "▸"
-        };
-
         let branch = if last { "└" } else { "├" };
         out.push(Row {
             node,
-            prefix: format!("{indent}{branch}{marker} "),
+            prefix: format!("{indent}{branch}"),
+            has_children: has_kids,
+            is_open,
         });
 
         if has_kids && is_open {

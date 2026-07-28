@@ -15,14 +15,6 @@ pub enum Status {
 }
 
 impl Status {
-    pub fn glyph(self) -> &'static str {
-        match self {
-            Status::Completed => "✓",
-            Status::InProgress => "◐",
-            Status::Pending => "○",
-        }
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Status::Completed => "completed",

@@ -14,6 +14,7 @@ use ratatui::widgets::{
 use ratatui::Frame;
 
 use crate::app::{App, Mode};
+use crate::icons::Icons;
 use crate::dex::{age, local_time, Status, Task};
 use crate::markdown::{self, Emphasis};
 use crate::theme::Palette;
@@ -25,7 +26,7 @@ const SHORTCUTS: &str =
 /// Width of the inline progress meter, in cells.
 const METER_WIDTH: usize = 7;
 
-pub fn draw(frame: &mut Frame, app: &App, p: &Palette) {
+pub fn draw(frame: &mut Frame, app: &App, p: &Palette, ic: &Icons) {
     let [top, body, bottom] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -33,13 +34,13 @@ pub fn draw(frame: &mut Frame, app: &App, p: &Palette) {
     ])
     .areas(frame.area());
 
-    draw_filter_bar(frame, app, p, top);
+    draw_header(frame, app, p, ic, top);
 
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(45), Constraint::Fill(1)]).areas(body);
 
-    draw_tree(frame, app, p, left);
-    draw_detail(frame, app, p, right);
+    draw_tree(frame, app, p, ic, left);
+    draw_detail(frame, app, p, ic, right);
     draw_status(frame, app, p, bottom);
 
     match &app.mode {
@@ -66,6 +67,14 @@ pub fn draw(frame: &mut Frame, app: &App, p: &Palette) {
     }
 }
 
+fn glyph(s: Status, ic: &Icons) -> &'static str {
+    match s {
+        Status::Completed => ic.done,
+        Status::InProgress => ic.active,
+        Status::Pending => ic.pending,
+    }
+}
+
 fn status_color(s: Status, p: &Palette) -> Color {
     match s {
         Status::Completed => p.done,
@@ -78,7 +87,7 @@ fn status_color(s: Status, p: &Palette) -> Color {
 ///
 /// The number is shown alongside the bar on purpose: at seven cells a bar cannot
 /// distinguish 2/7 from 3/7, and for triage the exact count is the useful part.
-fn meter_spans(progress: Progress, p: &Palette) -> Vec<Span<'static>> {
+fn meter_spans(progress: Progress, p: &Palette, ic: &Icons) -> Vec<Span<'static>> {
     let cells = |n: usize| -> usize {
         if n == 0 {
             0
@@ -93,10 +102,10 @@ fn meter_spans(progress: Progress, p: &Palette) -> Vec<Span<'static>> {
     let active = cells(progress.active).min(METER_WIDTH - done);
 
     vec![
-        Span::styled("▓".repeat(done), Style::default().fg(p.meter_full)),
-        Span::styled("▒".repeat(active), Style::default().fg(p.active)),
+        Span::styled(ic.meter_done.repeat(done), Style::default().fg(p.meter_full)),
+        Span::styled(ic.meter_active.repeat(active), Style::default().fg(p.active)),
         Span::styled(
-            "░".repeat(METER_WIDTH - done - active),
+            ic.meter_empty.repeat(METER_WIDTH - done - active),
             Style::default().fg(p.meter_empty),
         ),
         Span::styled(
@@ -106,32 +115,107 @@ fn meter_spans(progress: Progress, p: &Palette) -> Vec<Span<'static>> {
     ]
 }
 
-fn draw_filter_bar(frame: &mut Frame, app: &App, p: &Palette, area: Rect) {
-    let searching = matches!(app.mode, Mode::Search);
+/// A segment of the header: text plus its own background.
+struct Seg {
+    text: String,
+    fg: Color,
+    bg: Color,
+    bold: bool,
+}
+
+fn seg_text(icon: &str, text: &str) -> String {
+    if icon.is_empty() {
+        format!(" {text} ")
+    } else {
+        format!(" {icon} {text} ")
+    }
+}
+
+/// The header: app identity, which store you are in, and what is outstanding.
+///
+/// With a Nerd Font the segments are joined by powerline separators; otherwise
+/// they simply abut, which still reads as distinct blocks because each carries
+/// its own background. Nothing here degrades to tofu.
+///
+/// While searching, the search box takes the whole line over. That is why the
+/// header costs no vertical space: the two are never needed at once.
+fn draw_header(frame: &mut Frame, app: &App, p: &Palette, ic: &Icons, area: Rect) {
+    if matches!(app.mode, Mode::Search) {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    " search ",
+                    Style::default()
+                        .bg(p.head_app_bg)
+                        .fg(p.head_app_fg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    if ic.has_powerline() { ic.sep } else { "" },
+                    Style::default().fg(p.head_app_bg),
+                ),
+                Span::raw(" "),
+                Span::styled(app.query.value.clone(), Style::default().fg(p.active)),
+            ])),
+            area,
+        );
+
+        let lead = if ic.has_powerline() { 10 } else { 9 };
+        frame.set_cursor_position(Position {
+            x: (area.x + lead + app.query.cursor as u16).min(area.right().saturating_sub(1)),
+            y: area.y,
+        });
+        return;
+    }
+
     let (pending, active) = app.counts();
 
-    let query_style = if searching {
-        Style::default().fg(p.active)
-    } else {
-        Style::default().fg(p.label)
-    };
+    let segments = [
+        Seg {
+            text: seg_text(ic.app, "dex-tui"),
+            fg: p.head_app_fg,
+            bg: p.head_app_bg,
+            bold: true,
+        },
+        Seg {
+            text: seg_text(ic.project, &app.store_label),
+            fg: p.head_ctx_fg,
+            bg: p.head_ctx_bg,
+            bold: false,
+        },
+        Seg {
+            text: seg_text("", &format!("{pending} pending · {active} active")),
+            fg: p.head_info_fg,
+            bg: p.head_info_bg,
+            bold: false,
+        },
+    ];
 
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" / ", Style::default().fg(p.label)),
-            Span::styled(app.query.value.clone(), query_style),
-        ])),
-        area,
-    );
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, seg) in segments.iter().enumerate() {
+        let mut style = Style::default().fg(seg.fg).bg(seg.bg);
+        if seg.bold {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        spans.push(Span::styled(seg.text.clone(), style));
 
-    // Counts sit beside the filter so the filter label means something concrete.
+        if ic.has_powerline() {
+            // The separator is drawn in this segment's colour on the *next*
+            // segment's background, which is what makes the join look solid.
+            let next_bg = segments.get(i + 1).map(|n| n.bg).unwrap_or(Color::Reset);
+            spans.push(Span::styled(
+                ic.sep,
+                Style::default().fg(seg.bg).bg(next_bg),
+            ));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+
+    // Filter state stays right-aligned, rendered over the same row.
     frame.render_widget(
         Paragraph::new(
             Line::from(vec![
-                Span::styled(format!("{pending} pending"), Style::default().fg(p.label)),
-                Span::styled(" · ", Style::default().fg(p.chrome)),
-                Span::styled(format!("{active} active"), Style::default().fg(p.active)),
-                Span::raw("    "),
                 Span::styled(app.filter.label(), Style::default().fg(p.label)),
                 Span::raw(" "),
             ])
@@ -139,21 +223,12 @@ fn draw_filter_bar(frame: &mut Frame, app: &App, p: &Palette, area: Rect) {
         ),
         area,
     );
-
-    if searching {
-        let x = area.x + 3 + app.query.cursor as u16;
-        frame.set_cursor_position(Position {
-            x: x.min(area.right().saturating_sub(1)),
-            y: area.y,
-        });
-    }
 }
 
-fn draw_tree(frame: &mut Frame, app: &App, p: &Palette, area: Rect) {
-    let block = Block::bordered()
-        .title(format!(" {} ", app.store_label))
-        .border_style(Style::default().fg(p.chrome))
-        .title_style(Style::default().fg(p.label));
+fn draw_tree(frame: &mut Frame, app: &App, p: &Palette, ic: &Icons, area: Rect) {
+    // No title: the header already says which store this is, and repeating it
+    // on the pane border was the same fact twice.
+    let block = Block::bordered().border_style(Style::default().fg(p.chrome));
 
     let inner_width = area.width.saturating_sub(2) as usize;
     let rows = tree::visible_rows(&app.tree, &app.expanded);
@@ -166,7 +241,11 @@ fn draw_tree(frame: &mut Frame, app: &App, p: &Palette, area: Rect) {
             let mut spans = vec![
                 Span::styled(row.prefix.clone(), Style::default().fg(p.chrome)),
                 Span::styled(
-                    format!("{} ", t.status().glyph()),
+                    format!("{} ", ic.marker(row.has_children, row.is_open)),
+                    Style::default().fg(p.chrome),
+                ),
+                Span::styled(
+                    format!("{} ", glyph(t.status(), ic)),
                     Style::default().fg(status_color(t.status(), p)),
                 ),
             ];
@@ -184,14 +263,17 @@ fn draw_tree(frame: &mut Frame, app: &App, p: &Palette, area: Rect) {
 
             spans.push(Span::styled(t.name.clone(), name_style));
             if t.is_blocked() {
-                spans.push(Span::styled(" ⊘", Style::default().fg(p.blocked)));
+                spans.push(Span::styled(
+                    format!(" {}", ic.blocked),
+                    Style::default().fg(p.blocked),
+                ));
             }
 
             // Right gutter: a rollup for parents, otherwise how long this has been
             // in flight. Only in-progress tasks get an age -- putting one on every
             // row would bury the signal it exists to give.
             let trailing: Vec<Span> = match app.progress.get(&t.id) {
-                Some(progress) => meter_spans(*progress, p),
+                Some(progress) => meter_spans(*progress, p, ic),
                 None if t.status() == Status::InProgress => match age(&t.started_at) {
                     Some(a) => vec![Span::styled(a, Style::default().fg(p.active))],
                     None => vec![],
@@ -240,7 +322,7 @@ fn draw_tree(frame: &mut Frame, app: &App, p: &Palette, area: Rect) {
     }
 }
 
-fn draw_detail(frame: &mut Frame, app: &App, p: &Palette, area: Rect) {
+fn draw_detail(frame: &mut Frame, app: &App, p: &Palette, ic: &Icons, area: Rect) {
     let block = Block::bordered().border_style(Style::default().fg(p.chrome));
 
     let Some(task) = app.selected_task() else {
@@ -260,7 +342,7 @@ fn draw_detail(frame: &mut Frame, app: &App, p: &Palette, area: Rect) {
     };
 
     frame.render_widget(
-        Paragraph::new(detail_lines(task, app, p))
+        Paragraph::new(detail_lines(task, app, p, ic))
             .block(block)
             .wrap(Wrap { trim: false }),
         area,
@@ -270,7 +352,7 @@ fn draw_detail(frame: &mut Frame, app: &App, p: &Palette, area: Rect) {
 /// Built entirely from the already-fetched list. `dex show` is never called,
 /// because selection changes on every arrow key and a ~180ms process spawn per
 /// keypress would make navigation unusable.
-fn detail_lines<'a>(t: &'a Task, app: &'a App, p: &'a Palette) -> Vec<Line<'a>> {
+fn detail_lines<'a>(t: &'a Task, app: &'a App, p: &'a Palette, ic: &Icons) -> Vec<Line<'a>> {
     let mut lines = vec![
         Line::from(Span::styled(
             t.name.clone(),
@@ -284,7 +366,7 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, p: &'a Palette) -> Vec<Line<'a>> 
 
     // One status line reads faster than three separate label/value rows.
     let mut summary = vec![Span::styled(
-        format!("{} {}", t.status().glyph(), t.status().label()),
+        format!("{} {}", glyph(t.status(), ic), t.status().label()),
         Style::default().fg(status_color(t.status(), p)),
     )];
 
@@ -306,7 +388,7 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, p: &'a Palette) -> Vec<Line<'a>> 
 
     if let Some(progress) = app.progress.get(&t.id) {
         lines.push(Line::from(""));
-        let mut row = meter_spans(*progress, p);
+        let mut row = meter_spans(*progress, p, ic);
         row.push(Span::styled(
             format!(
                 "  subtask{} done",
@@ -537,6 +619,7 @@ pub fn selftest(app: &App) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let p = &crate::theme::CALM;
+    let ic = &crate::icons::UNICODE;
 
     let (pending, active) = app.counts();
     let _ = writeln!(out, "label   {}", app.store_label);
@@ -555,14 +638,14 @@ pub fn selftest(app: &App) -> String {
         let count = tree::flatten(&forest).len();
         let _ = writeln!(out, "--- filter: {filter:?} ({count} visible) ---");
         for node in &forest {
-            print_node(node, 0, app, &mut out);
+            print_node(node, 0, app, ic, &mut out);
         }
         let _ = writeln!(out);
     }
 
     if let Some(first) = app.tasks.first() {
         let _ = writeln!(out, "--- detail pane for {} ---", first.name);
-        for line in detail_lines(first, app, p) {
+        for line in detail_lines(first, app, p, ic) {
             let _ = writeln!(
                 out,
                 "{}",
@@ -577,7 +660,7 @@ pub fn selftest(app: &App) -> String {
     out
 }
 
-fn print_node(node: &tree::Node, depth: usize, app: &App, out: &mut String) {
+fn print_node(node: &tree::Node, depth: usize, app: &App, ic: &Icons, out: &mut String) {
     use std::fmt::Write;
     let scaffold = if node.is_match { "" } else { "  (scaffold)" };
     let rollup = match app.progress.get(&node.task.id) {
@@ -588,12 +671,101 @@ fn print_node(node: &tree::Node, depth: usize, app: &App, out: &mut String) {
         out,
         "{}{} {}{}{}",
         "  ".repeat(depth),
-        node.task.status().glyph(),
+        glyph(node.task.status(), ic),
         node.task.name,
         rollup,
         scaffold
     );
     for c in &node.children {
-        print_node(c, depth + 1, app, out);
+        print_node(c, depth + 1, app, ic, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dex::Task;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn task(id: &str, parent: Option<&str>, name: &str) -> Task {
+        Task {
+            id: id.into(),
+            parent_id: parent.map(str::to_string),
+            name: name.into(),
+            description: Some("a description".into()),
+            priority: 1,
+            completed: false,
+            result: None,
+            created_at: Some("2026-01-01T00:00:00Z".into()),
+            started_at: None,
+            completed_at: None,
+            blocked_by: vec![],
+            children: vec![],
+        }
+    }
+
+    /// Renders a full frame and returns it as plain text, one String per row.
+    fn render(w: u16, h: u16, ic: &Icons) -> Vec<String> {
+        let app = App::new(
+            vec![
+                task("root", None, "Parent task"),
+                task("kid", Some("root"), "Child task"),
+            ],
+            "demo".into(),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| draw(f, &app, &crate::theme::CALM, ic))
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_frame_actually_draws_something() {
+        // Regression: the app once ran happily while painting an empty screen.
+        let rows = render(100, 20, &crate::icons::UNICODE);
+        let text = rows.join("\n");
+        assert!(
+            text.contains("Parent task"),
+            "nothing was drawn:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_header_shows_identity_context_and_counts() {
+        let rows = render(100, 20, &crate::icons::UNICODE);
+        assert!(rows[0].contains("dex-tui"), "header row: {:?}", rows[0]);
+        assert!(rows[0].contains("demo"), "header row: {:?}", rows[0]);
+        assert!(rows[0].contains("pending"), "header row: {:?}", rows[0]);
+    }
+
+    #[test]
+    fn every_icon_tier_renders() {
+        for ic in crate::icons::ALL {
+            let text = render(100, 20, &ic).join("\n");
+            assert!(
+                text.contains("Parent task"),
+                "tier {} drew nothing",
+                crate::icons::name(ic.tier)
+            );
+        }
+    }
+
+    #[test]
+    fn a_very_narrow_pane_does_not_panic() {
+        // The right-hand gutter must be dropped rather than overflow the row.
+        for w in [20u16, 30, 40] {
+            let _ = render(w, 12, &crate::icons::UNICODE);
+        }
     }
 }

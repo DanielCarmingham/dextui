@@ -26,6 +26,8 @@ cd ~/some/project && dex-tui
 # project browses that project's tasks.
 cargo run -- --selftest       # data pipeline as text, no TUI
 cargo run -- --themes         # list palettes
+cargo run -- --icons          # list glyph tiers
+DEXTUI_ICONS=nerd cargo run   # Nerd Font icons + powerline header
 DEXTUI_THEME=temperature cargo run
 ```
 
@@ -43,6 +45,7 @@ and to check behaviour where no interactive terminal exists.
 | `src/dex.rs` | The only module that knows dex exists: model, argv, JSON. |
 | `src/markdown.rs` | Small markdown reader for descriptions; emits neutral emphasis. |
 | `src/theme.rs` | Every colour decision, as swappable palettes. |
+| `src/icons.rs` | Glyph sets in three tiers (nerd / unicode / ascii). |
 | `src/tree.rs` | Flat list → hierarchy, search and status filtering, row prefixes. |
 | `src/app.rs` | All view state, plus the refresh-survival rules. |
 | `src/ui.rs` | Immediate-mode rendering, and `--selftest`. |
@@ -132,13 +135,49 @@ selection, collapse an expanded node, or interrupt typing.
   consistent across block and inline syntax, and guarantees no input character is
   ever dropped -- a round-trip test enforces exactly that.
 
+## Glyphs: verify, never assume
+
+**Check codepoints against the actual font before using them.** This is not
+theoretical: `▾` U+25BE, `▸` U+25B8 and `⊘` U+2298 all looked like safe
+box-drawing characters and were shipped as the tree markers — and none of them
+exist in FiraCode Nerd Font. macOS silently substituted Lucida Grande and Apple
+Symbols at 0.86–1.17 cells against a 1.00 cell, so the markers were a different
+typeface at the wrong width. `✗` U+2717, `✘` U+2718 and `⊗` U+2297 are missing
+too, which is why the unicode tier uses `×` U+00D7.
+
+Two ways to check, both used here:
+
+```bash
+# Does the font contain it?
+python3 -c "
+from fontTools.ttLib import TTFont
+f = TTFont('/Users/daniel/Library/Fonts/NerdFonts/FiraCodeNerdFont-Regular.ttf')
+cm = set().union(*[t.cmap.keys() for t in f['cmap'].tables])
+print(0x25BC in cm)"
+
+# What does macOS actually substitute, and how wide?  (CoreText cascade list)
+# See CTFontCreateForString + CTFontGetAdvancesForGlyphs.
+```
+
+Everything in `icons.rs` was verified this way and measures exactly 1.00 cells.
+
+Forcing a fallback is possible — Ghostty's `font-codepoint-map = U+25BE=Menlo` —
+but it is fixing the symptom. Of the installed monospace fonts only Menlo has
+those three glyphs at all, and even it is 0.978 cells. Using glyphs the font
+already has is both exact and portable to whatever font someone else runs.
+
 ## Verifying the UI
 
 `cargo test` covers the data path. The UI needs a real terminal emulator: under a
 bare pty (`script`, a pipe) capability queries go unanswered and you get no
 usable frames.
 
-**tmux works.** `scripts/render-check.sh` starts the app in a detached tmux
+**Headless render tests are the primary check.** ratatui's `TestBackend` renders
+a real frame into a buffer, so `ui.rs` has tests asserting the header draws, every
+icon tier draws, and narrow panes do not panic. Prefer these — they are
+deterministic and run in CI, unlike anything involving a terminal.
+
+**tmux is the secondary check.** `scripts/render-check.sh` starts the app in a detached tmux
 session on a private socket, optionally sends keys, and prints the pane:
 
 ```bash
