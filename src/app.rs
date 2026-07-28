@@ -89,6 +89,13 @@ pub enum Mode {
     Help,
 }
 
+/// Which pane the movement keys drive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Tree,
+    Detail,
+}
+
 pub struct App {
     pub tasks: Vec<Task>,
     pub by_id: HashMap<String, Task>,
@@ -103,6 +110,17 @@ pub struct App {
     pub status: String,
     pub store_label: String,
     pub should_quit: bool,
+    pub focus: Focus,
+    /// (vertical, horizontal) offset into the detail pane.
+    pub detail_scroll: (u16, u16),
+    /// Wrapping and horizontal scrolling are mutually exclusive: wrapping
+    /// removes the overflow there would be anything to scroll to. Prose wants
+    /// wrap on, wide tables want it off, hence a toggle rather than a setting.
+    pub wrap: bool,
+    /// Written by the renderer each frame so input can clamp scrolling to
+    /// content it cannot otherwise measure (wrapped height depends on width).
+    pub detail_content_height: u16,
+    pub detail_viewport_height: u16,
     /// Set when a refresh arrives while a dialog is open; applied on close.
     pub pending_refresh: bool,
 }
@@ -122,6 +140,11 @@ impl App {
             status: String::new(),
             store_label,
             should_quit: false,
+            focus: Focus::Tree,
+            detail_scroll: (0, 0),
+            wrap: true,
+            detail_content_height: 0,
+            detail_viewport_height: 0,
             pending_refresh: false,
         };
 
@@ -196,15 +219,17 @@ impl App {
 
         let current = self.selected_row().unwrap_or(0) as isize;
         let next = (current + delta).clamp(0, rows.len() as isize - 1) as usize;
-        self.selected = Some(rows[next].clone());
+        self.select(Some(rows[next].clone()));
     }
 
     pub fn select_first(&mut self) {
-        self.selected = self.row_ids().first().cloned();
+        let id = self.row_ids().first().cloned();
+        self.select(id);
     }
 
     pub fn select_last(&mut self) {
-        self.selected = self.row_ids().last().cloned();
+        let id = self.row_ids().last().cloned();
+        self.select(id);
     }
 
     /// Right arrow: open the node, or step into it if already open.
@@ -351,6 +376,57 @@ impl App {
             .filter(|t| !t.completed && t.started_at.is_some())
             .count();
         (pending, active)
+    }
+
+    pub fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            Focus::Tree => Focus::Detail,
+            Focus::Detail => Focus::Tree,
+        };
+    }
+
+    /// Wrapping on makes horizontal offset meaningless, so it is also reset.
+    pub fn toggle_wrap(&mut self) {
+        self.wrap = !self.wrap;
+        if self.wrap {
+            self.detail_scroll.1 = 0;
+        }
+    }
+
+    pub fn scroll_detail(&mut self, dy: i32, dx: i32) {
+        let max_y = self
+            .detail_content_height
+            .saturating_sub(self.detail_viewport_height);
+
+        let y = (self.detail_scroll.0 as i32 + dy).clamp(0, max_y as i32) as u16;
+        // No content width is known, so the horizontal offset is only bounded
+        // below; scrolling past the end simply shows blank.
+        let x = if self.wrap {
+            0
+        } else {
+            (self.detail_scroll.1 as i32 + dx).max(0) as u16
+        };
+
+        self.detail_scroll = (y, x);
+    }
+
+    pub fn detail_to_top(&mut self) {
+        self.detail_scroll = (0, self.detail_scroll.1);
+    }
+
+    pub fn detail_to_bottom(&mut self) {
+        let max_y = self
+            .detail_content_height
+            .saturating_sub(self.detail_viewport_height);
+        self.detail_scroll = (max_y, self.detail_scroll.1);
+    }
+
+    /// Selecting a different task must not leave you halfway down the old one.
+    fn select(&mut self, id: Option<String>) {
+        if id != self.selected {
+            self.detail_scroll = (0, 0);
+        }
+        self.selected = id;
     }
 
     pub fn is_modal(&self) -> bool {
@@ -548,5 +624,91 @@ mod tests {
         input.left();
         input.insert('X');
         assert_eq!(input.value, "hélXl");
+    }
+
+    #[test]
+    fn tab_moves_focus_between_the_panes() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into());
+        assert_eq!(app.focus, Focus::Tree);
+        app.toggle_focus();
+        assert_eq!(app.focus, Focus::Detail);
+        app.toggle_focus();
+        assert_eq!(app.focus, Focus::Tree);
+    }
+
+    #[test]
+    fn detail_scroll_is_clamped_to_the_content() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into());
+        app.detail_content_height = 30;
+        app.detail_viewport_height = 10;
+
+        app.scroll_detail(100, 0);
+        assert_eq!(app.detail_scroll.0, 20, "cannot scroll past the last row");
+
+        app.scroll_detail(-100, 0);
+        assert_eq!(app.detail_scroll.0, 0, "cannot scroll above the first row");
+    }
+
+    #[test]
+    fn content_shorter_than_the_pane_does_not_scroll() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into());
+        app.detail_content_height = 4;
+        app.detail_viewport_height = 20;
+
+        app.scroll_detail(5, 0);
+        assert_eq!(app.detail_scroll.0, 0);
+    }
+
+    #[test]
+    fn horizontal_scroll_is_ignored_while_wrapping() {
+        // Wrapping removes the overflow there would be anything to scroll to,
+        // so accepting an offset would just move content off-screen for nothing.
+        let mut app = App::new(vec![task("a", None, &[])], "t".into());
+        assert!(app.wrap);
+
+        app.scroll_detail(0, 10);
+        assert_eq!(app.detail_scroll.1, 0);
+
+        app.toggle_wrap();
+        app.scroll_detail(0, 10);
+        assert_eq!(app.detail_scroll.1, 10);
+    }
+
+    #[test]
+    fn turning_wrap_back_on_resets_the_horizontal_offset() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into());
+        app.toggle_wrap();
+        app.scroll_detail(0, 12);
+        assert_eq!(app.detail_scroll.1, 12);
+
+        app.toggle_wrap();
+        assert_eq!(app.detail_scroll.1, 0, "a stale offset would hide content");
+    }
+
+    #[test]
+    fn selecting_a_different_task_resets_the_scroll() {
+        // Otherwise you land halfway down a task you have not read yet.
+        let mut app = App::new(
+            vec![task("a", None, &[]), task("b", None, &[])],
+            "t".into(),
+        );
+        app.detail_content_height = 50;
+        app.detail_viewport_height = 10;
+        app.scroll_detail(20, 0);
+        assert_ne!(app.detail_scroll.0, 0);
+
+        app.move_selection(1);
+        assert_eq!(app.detail_scroll, (0, 0));
+    }
+
+    #[test]
+    fn re_selecting_the_same_task_keeps_your_place() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into());
+        app.detail_content_height = 50;
+        app.detail_viewport_height = 10;
+        app.scroll_detail(15, 0);
+
+        app.select_first(); // already selected
+        assert_eq!(app.detail_scroll.0, 15);
     }
 }

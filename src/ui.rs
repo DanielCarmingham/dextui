@@ -13,7 +13,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::app::{App, Mode};
+use crate::app::{App, Focus, Mode};
 
 /// Colour is used only where it carries meaning. Everything else is left to the
 /// terminal, so the app inherits whatever scheme the user runs -- including a
@@ -33,12 +33,12 @@ use crate::dex::{age, local_time, Status, Task};
 use crate::tree::{self, Progress};
 
 const SHORTCUTS: &str =
-    " s start  c complete  e edit  n new  a subtask  d delete  f filter  / find  ? help  q quit";
+    " s start  c complete  e edit  n new  a subtask  d delete  f filter  / find  tab pane  ? help";
 
 /// Width of the inline progress meter, in cells.
 const METER_WIDTH: usize = 7;
 
-pub fn draw(frame: &mut Frame, app: &App, ic: &Icons) {
+pub fn draw(frame: &mut Frame, app: &mut App, ic: &Icons) {
     let [top, body, bottom] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -194,7 +194,13 @@ fn draw_header(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
 fn draw_tree(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
     // No title: the header already says which store this is, and repeating it
     // on the pane border was the same fact twice.
-    let block = Block::bordered().border_style(Style::default().fg(DIM));
+    let block = Block::bordered().border_style(Style::default().fg(if app.focus
+        == Focus::Tree
+    {
+        PLAIN
+    } else {
+        DIM
+    }));
 
     let inner_width = area.width.saturating_sub(2) as usize;
     let rows = tree::visible_rows(&app.tree, &app.expanded);
@@ -294,10 +300,38 @@ fn draw_tree(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
     }
 }
 
-fn draw_detail(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
-    let block = Block::bordered().border_style(Style::default().fg(DIM));
+/// Rows the content will occupy once wrapped.
+///
+/// Character-wrapping is assumed, which can under-count against ratatui's
+/// word-wrapping, so a small allowance is added: over-estimating merely lets you
+/// scroll into blank space, whereas under-estimating would make the last line
+/// unreachable.
+fn wrapped_height(line_widths: &[u16], width: u16, wrap: bool) -> u16 {
+    if !wrap || width == 0 {
+        return line_widths.len() as u16;
+    }
 
-    let Some(task) = app.selected_task() else {
+    let rows: u16 = line_widths
+        .iter()
+        .map(|w| if *w == 0 { 1 } else { w.div_ceil(width) })
+        .sum();
+
+    rows.saturating_add(2)
+}
+
+fn draw_detail(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
+    let focused = app.focus == Focus::Detail;
+    let block = Block::bordered()
+        .title(if app.wrap { "" } else { " no wrap " })
+        .title_style(Style::default().fg(DIM))
+        .border_style(Style::default().fg(if focused { PLAIN } else { DIM }));
+
+    let inner_w = area.width.saturating_sub(2);
+    let inner_h = area.height.saturating_sub(2);
+    let scroll = app.detail_scroll;
+    let wrap = app.wrap;
+
+    let Some(task) = app.selected_task().cloned() else {
         let msg = if app.tasks.is_empty() {
             "No tasks yet.\n\nPress n to create one."
         } else {
@@ -310,15 +344,42 @@ fn draw_detail(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
                 .wrap(Wrap { trim: false }),
             area,
         );
+        app.detail_content_height = 0;
+        app.detail_viewport_height = inner_h;
         return;
     };
 
-    frame.render_widget(
-        Paragraph::new(detail_lines(task, app, ic))
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+    // Rendered inside its own scope: the lines borrow `app`, and the measured
+    // heights cannot be written back until that borrow ends.
+    let content_h = {
+        let lines = detail_lines(&task, app, ic);
+        let widths: Vec<u16> = lines.iter().map(|l| l.width() as u16).collect();
+        let height = wrapped_height(&widths, inner_w, wrap);
+
+        let mut paragraph = Paragraph::new(lines).scroll(scroll);
+        if wrap {
+            paragraph = paragraph.wrap(Wrap { trim: false });
+        }
+        frame.render_widget(paragraph.block(block), area);
+        height
+    };
+
+    app.detail_content_height = content_h;
+    app.detail_viewport_height = inner_h;
+
+    if content_h > inner_h {
+        let mut sb = ScrollbarState::new(content_h.saturating_sub(inner_h) as usize)
+            .position(scroll.0 as usize);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_style(Style::default().fg(DIM))
+                .thumb_style(Style::default().fg(PLAIN)),
+            area,
+            &mut sb,
+        );
+    }
 }
 
 /// Built entirely from the already-fetched list. `dex show` is never called,
@@ -584,13 +645,18 @@ fn draw_message(frame: &mut Frame, title: &str, body: &str, hint: &str, accent: 
 fn draw_help(frame: &mut Frame) {
     // Left-aligned on purpose: centring would destroy the column alignment.
     const HELP: &str = "\
-↑ ↓ j k    move              s   start task
-→ ← h l    expand/collapse   c   complete (prompts for result)
-g / G      first / last      e   edit name, then description
-/          search            n   new top-level task
-f          cycle filter      a   new subtask of selection
-z          collapse all      d   delete (with confirmation)
-Z          expand all        r   refresh now
+tab        switch pane       s   start task
+↑ ↓ j k    move / scroll     c   complete (prompts for result)
+→ ← h l    expand / scroll   e   edit name, then description
+g / G      first / last      n   new top-level task
+w          toggle wrap       a   new subtask of selection
+/          search            d   delete (with confirmation)
+f          cycle filter      r   refresh now
+z Z        collapse/expand all
+
+Movement follows the focused pane, shown by its brighter border. Turn wrap
+off (w) to scroll a wide table sideways -- wrapping removes the overflow
+there would otherwise be to scroll to.
 
 The view refreshes itself whenever the dex store changes, including when
 another process or agent edits it. Your selection, expansion and any open
@@ -714,7 +780,7 @@ mod tests {
 
     /// Renders a full frame and returns it as plain text, one String per row.
     fn render(w: u16, h: u16, ic: &Icons) -> Vec<String> {
-        let app = App::new(
+        let mut app = App::new(
             vec![
                 task("root", None, "Parent task"),
                 task("kid", Some("root"), "Child task"),
@@ -724,7 +790,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal
-            .draw(|f| draw(f, &app, ic))
+            .draw(|f| draw(f, &mut app, ic))
             .unwrap();
 
         let buf = terminal.backend().buffer().clone();
@@ -770,7 +836,7 @@ mod tests {
 
     /// Renders one task whose description is `md`, and returns the frame text.
     fn render_description(md: &str, w: u16, h: u16) -> String {
-        let app = App::new(
+        let mut app = App::new(
             vec![Task {
                 id: "t".into(),
                 name: "Task".into(),
@@ -783,7 +849,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal
-            .draw(|f| draw(f, &app, &crate::icons::UNICODE))
+            .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
             .unwrap();
 
         let buf = terminal.backend().buffer().clone();

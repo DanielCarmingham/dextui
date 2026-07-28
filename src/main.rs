@@ -13,7 +13,7 @@ use std::thread;
 
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use app::{App, Mode, Pending, Prompt, TextInput};
+use app::{App, Focus, Mode, Pending, Prompt, TextInput};
 use dex::{store_label, Dex, Task};
 
 /// Everything the main loop reacts to, from every thread, on one channel.
@@ -110,7 +110,7 @@ fn main() -> std::io::Result<()> {
     let mut terminal = ratatui::init();
 
     while !app.should_quit {
-        terminal.draw(|f| ui::draw(f, &app, &glyphs))?;
+        terminal.draw(|f| ui::draw(f, &mut app, &glyphs))?;
 
         let Ok(msg) = rx.recv() else { break };
         match msg {
@@ -228,14 +228,45 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         }
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
 
-        KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
-        KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
-        KeyCode::PageDown => app.move_selection(10),
-        KeyCode::PageUp => app.move_selection(-10),
-        KeyCode::Right | KeyCode::Char('l') => app.expand_selected(),
-        KeyCode::Left | KeyCode::Char('h') => app.collapse_selected(),
-        KeyCode::Char('g') => app.select_first(),
-        KeyCode::Char('G') => app.select_last(),
+        KeyCode::Tab | KeyCode::BackTab => app.toggle_focus(),
+        // Wrapping and horizontal scrolling are mutually exclusive, so this is
+        // the switch between reading prose and reading a wide table.
+        KeyCode::Char('w') => app.toggle_wrap(),
+
+        // Movement drives whichever pane has focus. Action keys below stay
+        // global, because they always act on the selected task.
+        KeyCode::Down | KeyCode::Char('j') => match app.focus {
+            Focus::Tree => app.move_selection(1),
+            Focus::Detail => app.scroll_detail(1, 0),
+        },
+        KeyCode::Up | KeyCode::Char('k') => match app.focus {
+            Focus::Tree => app.move_selection(-1),
+            Focus::Detail => app.scroll_detail(-1, 0),
+        },
+        KeyCode::PageDown => match app.focus {
+            Focus::Tree => app.move_selection(10),
+            Focus::Detail => app.scroll_detail(10, 0),
+        },
+        KeyCode::PageUp => match app.focus {
+            Focus::Tree => app.move_selection(-10),
+            Focus::Detail => app.scroll_detail(-10, 0),
+        },
+        KeyCode::Right | KeyCode::Char('l') => match app.focus {
+            Focus::Tree => app.expand_selected(),
+            Focus::Detail => app.scroll_detail(0, 4),
+        },
+        KeyCode::Left | KeyCode::Char('h') => match app.focus {
+            Focus::Tree => app.collapse_selected(),
+            Focus::Detail => app.scroll_detail(0, -4),
+        },
+        KeyCode::Char('g') => match app.focus {
+            Focus::Tree => app.select_first(),
+            Focus::Detail => app.detail_to_top(),
+        },
+        KeyCode::Char('G') => match app.focus {
+            Focus::Tree => app.select_last(),
+            Focus::Detail => app.detail_to_bottom(),
+        },
         KeyCode::Char('z') => app.collapse_all(),
         KeyCode::Char('Z') => app.expand_all(),
 

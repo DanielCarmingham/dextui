@@ -214,6 +214,34 @@ but it is fixing the symptom. Of the installed monospace fonts only Menlo has
 those three glyphs at all, and even it is 0.978 cells. Using glyphs the font
 already has is both exact and portable to whatever font someone else runs.
 
+## Two panes, one set of movement keys
+
+`Tab` moves focus between the tree and the detail pane; the focused one has the
+brighter border. `j/k/h/l`, `g/G` and page keys drive whichever has focus, while
+the action keys (`s c e n a d f / r ?`) stay global because they always operate
+on the selected task.
+
+**`w` toggles wrapping, and that is not cosmetic.** Wrapping and horizontal
+scrolling are mutually exclusive in ratatui: `Paragraph::scroll((y, x))` honours
+the x offset only when wrapping is off, because wrapping removes the overflow
+there would be anything to scroll to. Prose wants wrap on; a table wider than the
+pane wants it off, where it clips cleanly and `h/l` reach the rest. With wrap on,
+a wide table wraps mid-border and turns to noise.
+
+`App::scroll_detail` ignores horizontal input while wrapping, and turning wrap
+back on resets the offset — a stale one would hide content.
+
+Vertical scrolling is clamped against `detail_content_height`, which the renderer
+measures each frame and writes back (hence `draw` takes `&mut App`). Wrapped
+height depends on pane width, so only the renderer knows it, and
+`Paragraph::line_count` is private in ratatui 0.30. `wrapped_height` estimates it
+by character wrapping and adds a small allowance: over-estimating only lets you
+scroll into blank space, while under-estimating would make the last line
+unreachable.
+
+Changing selection resets the scroll, or you land halfway down a task you have
+not read.
+
 ## Verifying the UI
 
 `cargo test` covers the data path. The UI needs a real terminal emulator: under a
