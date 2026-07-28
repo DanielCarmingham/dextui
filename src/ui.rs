@@ -379,6 +379,15 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, p: &'a Palette, ic: &Icons) -> Ve
             ));
         }
 
+    // How long it actually took, which reads better than two raw timestamps.
+    if let Some(took) = t.worked_duration() {
+        summary.push(Span::styled(" · ", Style::default().fg(p.chrome)));
+        summary.push(Span::styled(
+            format!("took {took}"),
+            Style::default().fg(p.done),
+        ));
+    }
+
     summary.push(Span::styled(" · ", Style::default().fg(p.chrome)));
     summary.push(Span::styled(
         format!("priority {}", t.priority),
@@ -428,6 +437,22 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, p: &'a Palette, ic: &Icons) -> Ve
         field("blocked", names.join(", "), Style::default().fg(p.blocked));
     }
 
+    // The reverse relationship. A task holding up three others is a priority
+    // signal that `blocked by` alone cannot show.
+    if !t.blocks.is_empty() {
+        let names: Vec<String> = t
+            .blocks
+            .iter()
+            .map(|id| {
+                app.by_id
+                    .get(id)
+                    .map(|b| b.name.clone())
+                    .unwrap_or_else(|| id.clone())
+            })
+            .collect();
+        field("blocks", names.join(", "), Style::default().fg(p.active));
+    }
+
     // Absolute date plus relative age: one for the record, one for the feel.
     let stamp = |iso: &Option<String>| match age(iso).as_deref() {
         // "now ago" reads as a bug; anything under a minute is just now.
@@ -441,8 +466,40 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, p: &'a Palette, ic: &Icons) -> Ve
         stamp(&t.created_at),
         Style::default().fg(p.pending),
     );
+    if t.started_at.is_some() {
+        field("started", stamp(&t.started_at), Style::default().fg(p.active));
+    }
     if t.completed_at.is_some() {
         field("done", stamp(&t.completed_at), Style::default().fg(p.done));
+    }
+    // Only when it is not just an echo of created/started/done.
+    if t.has_distinct_update() {
+        field("updated", stamp(&t.updated_at), Style::default().fg(p.label));
+    }
+
+    // Linked via `dex complete --commit <sha>`. Entirely local -- no sync needed.
+    if let Some(c) = t.commit() {
+        let mut parts = vec![Span::styled(
+            format!("{:<10}", "commit"),
+            Style::default().fg(p.label),
+        )];
+        parts.push(Span::styled(
+            c.short_sha().to_string(),
+            Style::default().fg(p.md_code).add_modifier(Modifier::BOLD),
+        ));
+        if let Some(m) = c.message.as_ref().filter(|m| !m.trim().is_empty()) {
+            parts.push(Span::styled(
+                format!("  {m}"),
+                Style::default().fg(p.pending),
+            ));
+        }
+        if let Some(b) = c.branch.as_ref().filter(|b| !b.trim().is_empty()) {
+            parts.push(Span::styled(
+                format!("  ({b})"),
+                Style::default().fg(p.label),
+            ));
+        }
+        lines.push(Line::from(parts));
     }
 
     if let Some(d) = t.description.as_ref().filter(|d| !d.trim().is_empty()) {
@@ -694,14 +751,8 @@ mod tests {
             parent_id: parent.map(str::to_string),
             name: name.into(),
             description: Some("a description".into()),
-            priority: 1,
-            completed: false,
-            result: None,
             created_at: Some("2026-01-01T00:00:00Z".into()),
-            started_at: None,
-            completed_at: None,
-            blocked_by: vec![],
-            children: vec![],
+            ..Default::default()
         }
     }
 

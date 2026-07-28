@@ -387,15 +387,9 @@ mod tests {
             id: id.to_string(),
             parent_id: parent.map(str::to_string),
             name: id.to_string(),
-            description: None,
-            priority: 1,
-            completed: false,
-            result: None,
             created_at: Some("2026-01-01T00:00:00Z".to_string()),
-            started_at: None,
-            completed_at: None,
-            blocked_by: vec![],
             children: children.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
         }
     }
 

@@ -135,6 +135,32 @@ selection, collapse an expanded node, or interrupt typing.
   consistent across block and inline syntax, and guarantees no input character is
   ever dropped -- a round-trip test enforces exactly that.
 
+## What the detail pane shows, and why
+
+Everything comes from `dex list --json`, which carries **all** of it including
+`metadata` — so none of this costs an extra process spawn, and the rule about
+never calling `dex show` on a keypress still holds.
+
+- **Duration** (`took 4h 12m`) is derived from `completed_at - started_at`. Not
+  stored by dex. Nothing here needs sync configured.
+- **`updated_at`** renders only when it differs from created/started/completed.
+  Every one of those bumps it, so without that guard the row just echoes
+  whichever happened last — which is exactly how it looked before the guard.
+- **`blocks`** is the reverse of `blockedBy`. A task holding up three others is a
+  priority signal that `blocked by` alone cannot show.
+- **`metadata.commit`** comes from `dex complete --commit <sha>` and is entirely
+  local — it reads your git repo, no GitHub involved.
+
+`metadata` can also carry `github`, `shortcut` and `beads` blocks, which only
+appear once sync is configured. They are deliberately **not** modelled: serde
+ignores unknown keys, so their presence is harmless and adding them later is
+additive. The shapes are in dex's `src/types.ts`.
+
+Fields that exist **only** on `dex show --json` — `ancestors`, `depth`,
+`subtasks`, `grandchildren`, `isBlocked` — are not used. They would cost a
+~180ms spawn per selection change, and we already derive equivalents from the
+list (parent chain, progress rollups).
+
 ## Glyphs: verify, never assume
 
 **Check codepoints against the actual font before using them.** This is not

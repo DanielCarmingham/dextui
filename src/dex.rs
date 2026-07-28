@@ -28,6 +28,37 @@ fn default_priority() -> i64 {
     1
 }
 
+/// A git commit linked to a task via `dex complete --commit <sha>`.
+///
+/// Purely local: this comes from your git repo and needs no sync configured.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommitMeta {
+    pub sha: String,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    // dex also sends `url` when the repo has a remote. Not modelled because
+    // nothing renders it; serde ignores unknown keys, so adding it is trivial.
+}
+
+impl CommitMeta {
+    /// The usual 7-character abbreviation.
+    pub fn short_sha(&self) -> &str {
+        let n = self.sha.len().min(7);
+        &self.sha[..n]
+    }
+}
+
+/// dex also stores `github`, `shortcut` and `beads` blocks here. They are
+/// deliberately not modelled: they only appear once sync is configured, and
+/// serde ignores unknown keys, so adding them later is additive.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct Metadata {
+    #[serde(default)]
+    pub commit: Option<CommitMeta>,
+}
+
 /// One dex task, as emitted by `dex list --json`.
 ///
 /// The wire format mixes conventions: most keys are snake_case, which serde
@@ -47,16 +78,48 @@ pub struct Task {
     pub completed: bool,
     #[serde(default)]
     pub result: Option<String>,
+    /// Null for most tasks; carries the linked commit when there is one.
+    #[serde(default)]
+    pub metadata: Option<Metadata>,
     #[serde(default)]
     pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
     #[serde(default)]
     pub started_at: Option<String>,
     #[serde(default)]
     pub completed_at: Option<String>,
     #[serde(default, rename = "blockedBy")]
     pub blocked_by: Vec<String>,
+    /// Tasks this one is blocking -- the reverse of `blocked_by`.
+    #[serde(default)]
+    pub blocks: Vec<String>,
     #[serde(default)]
     pub children: Vec<String>,
+}
+
+impl Default for Task {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            parent_id: None,
+            name: String::new(),
+            description: None,
+            // Matches serde's default, not i64::default(), so fixtures and real
+            // payloads agree on sibling ordering.
+            priority: default_priority(),
+            completed: false,
+            result: None,
+            metadata: None,
+            created_at: None,
+            updated_at: None,
+            started_at: None,
+            completed_at: None,
+            blocked_by: Vec::new(),
+            blocks: Vec::new(),
+            children: Vec::new(),
+        }
+    }
 }
 
 impl Task {
@@ -73,6 +136,27 @@ impl Task {
 
     pub fn is_blocked(&self) -> bool {
         !self.blocked_by.is_empty()
+    }
+
+    pub fn commit(&self) -> Option<&CommitMeta> {
+        self.metadata.as_ref()?.commit.as_ref()
+    }
+
+    /// How long the task was actually in flight, if it ran to completion.
+    pub fn worked_duration(&self) -> Option<String> {
+        span_between(self.started_at.as_deref()?, self.completed_at.as_deref()?)
+    }
+
+    /// True only when `updated_at` tells you something the other timestamps do
+    /// not. Creating, starting and completing all bump `updated_at`, so without
+    /// this the row would simply repeat whichever of those happened last.
+    pub fn has_distinct_update(&self) -> bool {
+        let Some(updated) = self.updated_at.as_deref() else {
+            return false;
+        };
+        [&self.created_at, &self.started_at, &self.completed_at]
+            .iter()
+            .all(|other| other.as_deref() != Some(updated))
     }
 }
 
@@ -296,6 +380,53 @@ pub fn humanize_secs(secs: i64) -> String {
     } else {
         format!("{}w", secs / WEEK)
     }
+}
+
+/// A duration as up to two units: `45s`, `5m 30s`, `4h 12m`, `3d 5h`, `2w 3d`.
+///
+/// Deliberately more precise than `humanize_secs`, which shows one unit because
+/// it has to fit a narrow gutter. Here there is room, and "4h 12m" answers
+/// "how long did this take" better than "4h".
+pub fn humanize_span(secs: i64) -> String {
+    let secs = secs.max(0);
+    const MIN: i64 = 60;
+    const HOUR: i64 = 60 * MIN;
+    const DAY: i64 = 24 * HOUR;
+    const WEEK: i64 = 7 * DAY;
+
+    let (major, major_unit, minor_unit) = if secs < MIN {
+        return format!("{secs}s");
+    } else if secs < HOUR {
+        (MIN, "m", "s")
+    } else if secs < DAY {
+        (HOUR, "h", "m")
+    } else if secs < WEEK {
+        (DAY, "d", "h")
+    } else {
+        (WEEK, "w", "d")
+    };
+
+    let whole = secs / major;
+    let minor_size = match major_unit {
+        "m" => 1,
+        "h" => MIN,
+        "d" => HOUR,
+        _ => DAY,
+    };
+    let rest = (secs % major) / minor_size;
+
+    if rest == 0 {
+        format!("{whole}{major_unit}")
+    } else {
+        format!("{whole}{major_unit} {rest}{minor_unit}")
+    }
+}
+
+/// Elapsed time between two ISO-8601 stamps, or None if either will not parse.
+pub fn span_between(start: &str, end: &str) -> Option<String> {
+    let a = chrono::DateTime::parse_from_rfc3339(start).ok()?;
+    let b = chrono::DateTime::parse_from_rfc3339(end).ok()?;
+    Some(humanize_span(b.signed_duration_since(a).num_seconds()))
 }
 
 /// How long ago an ISO-8601 timestamp was, or None if absent or unparseable.
@@ -544,5 +675,155 @@ mod tests {
     fn age_of_an_unparseable_or_absent_stamp_is_none() {
         assert_eq!(age(&None), None);
         assert_eq!(age(&Some("not a date".into())), None);
+    }
+
+    /// Captured verbatim from a task completed with `dex complete --commit`.
+    const WITH_COMMIT: &str = r#"[{
+        "id": "x62ncnp9",
+        "parent_id": null,
+        "name": "Task with a linked commit",
+        "description": "probe",
+        "priority": 1,
+        "completed": true,
+        "result": "Implemented it.",
+        "metadata": {"commit": {
+            "sha": "8f7c1015d414e18c5c071d3b1c0d856096e34f6c",
+            "message": "Add the file",
+            "branch": "main",
+            "timestamp": "2026-07-28T14:28:16.044Z"
+        }},
+        "created_at": "2026-07-28T14:28:14.729Z",
+        "updated_at": "2026-07-28T14:28:16.044Z",
+        "started_at": "2026-07-28T14:28:14.858Z",
+        "completed_at": "2026-07-28T14:28:16.044Z",
+        "blockedBy": [],
+        "blocks": ["abc123"],
+        "children": []
+    }]"#;
+
+    #[test]
+    fn commit_metadata_is_parsed() {
+        let fake = Fake::new(WITH_COMMIT, "", 0);
+        let tasks = dex_with(&fake).list().unwrap();
+        let c = tasks[0].commit().expect("commit metadata");
+
+        assert_eq!(c.sha, "8f7c1015d414e18c5c071d3b1c0d856096e34f6c");
+        assert_eq!(c.short_sha(), "8f7c101");
+        assert_eq!(c.message.as_deref(), Some("Add the file"));
+        assert_eq!(c.branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn unknown_metadata_blocks_are_ignored_not_fatal() {
+        // github/shortcut/beads appear once sync is configured. We do not model
+        // them yet, and their presence must never break parsing.
+        let json = r#"[{"id":"a","name":"n","created_at":"2026-01-01T00:00:00Z",
+            "metadata":{"github":{"issueNumber":42,"issueUrl":"https://x/1","repo":"o/r"},
+                        "commit":{"sha":"deadbeefcafe"}}}]"#;
+        let fake = Fake::new(json, "", 0);
+        let tasks = dex_with(&fake).list().unwrap();
+
+        assert_eq!(tasks[0].commit().unwrap().short_sha(), "deadbee");
+    }
+
+    #[test]
+    fn blocks_is_parsed_separately_from_blocked_by() {
+        let fake = Fake::new(WITH_COMMIT, "", 0);
+        let tasks = dex_with(&fake).list().unwrap();
+
+        assert_eq!(tasks[0].blocks, vec!["abc123"]);
+        assert!(tasks[0].blocked_by.is_empty());
+    }
+
+    #[test]
+    fn worked_duration_is_start_to_completion() {
+        let fake = Fake::new(WITH_COMMIT, "", 0);
+        let tasks = dex_with(&fake).list().unwrap();
+        // 14:28:14.858 -> 14:28:16.044 is just over a second.
+        assert_eq!(tasks[0].worked_duration().as_deref(), Some("1s"));
+    }
+
+    #[test]
+    fn worked_duration_needs_both_ends() {
+        let mut t = Task {
+            started_at: Some("2026-01-01T00:00:00Z".into()),
+            ..Default::default()
+        };
+        assert_eq!(t.worked_duration(), None, "never completed");
+
+        t.started_at = None;
+        t.completed_at = Some("2026-01-01T01:00:00Z".into());
+        assert_eq!(t.worked_duration(), None, "never started");
+    }
+
+    #[test]
+    fn updated_row_is_hidden_when_it_echoes_another_timestamp() {
+        let untouched = Task {
+            created_at: Some("2026-01-01T00:00:00Z".into()),
+            updated_at: Some("2026-01-01T00:00:00Z".into()),
+            ..Default::default()
+        };
+        assert!(!untouched.has_distinct_update(), "same as created");
+
+        // Completing bumps updated_at, so the two match and the row is noise.
+        let completed = Task {
+            completed_at: Some("2026-01-02T00:00:00Z".into()),
+            updated_at: Some("2026-01-02T00:00:00Z".into()),
+            ..untouched.clone()
+        };
+        assert!(!completed.has_distinct_update(), "same as done");
+
+        let started = Task {
+            started_at: Some("2026-01-03T00:00:00Z".into()),
+            updated_at: Some("2026-01-03T00:00:00Z".into()),
+            ..untouched.clone()
+        };
+        assert!(!started.has_distinct_update(), "same as started");
+    }
+
+    #[test]
+    fn updated_row_shows_for_a_genuine_edit() {
+        let edited = Task {
+            created_at: Some("2026-01-01T00:00:00Z".into()),
+            started_at: Some("2026-01-02T00:00:00Z".into()),
+            updated_at: Some("2026-01-05T00:00:00Z".into()),
+            ..Default::default()
+        };
+        assert!(edited.has_distinct_update());
+    }
+
+    #[test]
+    fn humanize_span_uses_up_to_two_units() {
+        assert_eq!(humanize_span(0), "0s");
+        assert_eq!(humanize_span(45), "45s");
+        assert_eq!(humanize_span(60), "1m");
+        assert_eq!(humanize_span(330), "5m 30s");
+        assert_eq!(humanize_span(3600), "1h");
+        assert_eq!(humanize_span(4 * 3600 + 12 * 60), "4h 12m");
+        assert_eq!(humanize_span(86400), "1d");
+        assert_eq!(humanize_span(3 * 86400 + 5 * 3600), "3d 5h");
+        assert_eq!(humanize_span(7 * 86400), "1w");
+        assert_eq!(humanize_span(17 * 86400), "2w 3d");
+    }
+
+    #[test]
+    fn humanize_span_never_goes_negative() {
+        // Clock skew between machines writing the store must not print "-3h".
+        assert_eq!(humanize_span(-9999), "0s");
+    }
+
+    #[test]
+    fn span_between_rejects_unparseable_stamps() {
+        assert_eq!(span_between("nonsense", "2026-01-01T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn short_sha_handles_an_already_short_value() {
+        let c = CommitMeta {
+            sha: "abc".into(),
+            message: None,
+            branch: None,
+        };
+        assert_eq!(c.short_sha(), "abc");
     }
 }
