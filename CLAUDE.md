@@ -41,7 +41,6 @@ and to check behaviour where no interactive terminal exists.
 | File | Purpose |
 | --- | --- |
 | `src/dex.rs` | The only module that knows dex exists: model, argv, JSON. |
-| `src/markdown.rs` | Small markdown reader for descriptions; emits neutral emphasis. |
 | `src/icons.rs` | Glyph sets in three tiers (nerd / unicode / ascii). |
 | `src/tree.rs` | Flat list → hierarchy, search and status filtering, row prefixes. |
 | `src/app.rs` | All view state, plus the refresh-survival rules. |
@@ -127,10 +126,12 @@ selection, collapse an expanded node, or interrupt typing.
   named/indexed colours, which adapt to the user's terminal theme -- `Color::Rgb`
   looks identical everywhere but ignores their scheme and assumes a dark
   background (that trade-off is why `ember` exists and is not the default).
-- **Markdown delimiters are kept and dimmed, never stripped.** Headings, list
-  markers, quotes, backticks and `**` all stay on screen as dim markers. That is
-  consistent across block and inline syntax, and guarantees no input character is
-  ever dropped -- a round-trip test enforces exactly that.
+- **Descriptions render through `tui-markdown`**, not a hand-rolled parser. It
+  was swapped in because tables need column measurement and terminal display
+  widths; the old parser skipped them, so tables appeared as raw `|---|` rows.
+  It emits only `Reset`/`dark_gray`/`cyan`, which keeps the light-mode rule
+  above intact. `highlight-code` is off — syntect costs 21 crates for syntax
+  highlighting we do not use.
 
 ## What the detail pane shows, and why
 

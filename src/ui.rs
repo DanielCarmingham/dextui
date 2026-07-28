@@ -30,7 +30,6 @@ const BLOCKED: Color = Color::Red;
 const CODE: Color = Color::Cyan;
 use crate::icons::Icons;
 use crate::dex::{age, local_time, Status, Task};
-use crate::markdown::{self, Emphasis};
 use crate::tree::{self, Progress};
 
 const SHORTCUTS: &str =
@@ -497,33 +496,18 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Vec<Line<'a>> {
     lines
 }
 
-/// Applies the palette to what `markdown` identified.
-fn markdown_lines(text: &str) -> Vec<Line<'static>> {
-    markdown::parse(text)
-        .into_iter()
-        .map(|segments| {
-            Line::from(
-                segments
-                    .into_iter()
-                    .map(|s| {
-                        let style = match s.emphasis {
-                            Emphasis::Plain => Style::default().fg(PLAIN),
-                            Emphasis::Marker => Style::default().fg(DIM),
-                            Emphasis::Heading => Style::default()
-                                .fg(PLAIN)
-                                .add_modifier(Modifier::BOLD),
-                            Emphasis::Bold => Style::default().add_modifier(Modifier::BOLD),
-                            Emphasis::Code | Emphasis::CodeBlock => Style::default().fg(CODE),
-                            Emphasis::Quote => Style::default()
-                                .fg(DIM)
-                                .add_modifier(Modifier::ITALIC),
-                        };
-                        Span::styled(s.text, style)
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect()
+/// Renders a description as markdown.
+///
+/// Delegates to `tui-markdown` rather than the small hand-rolled parser this
+/// used to have. Tables were the reason: doing them properly needs column
+/// measurement and terminal display widths, which that parser deliberately did
+/// not attempt, so tables appeared as raw pipes.
+///
+/// It emits only `Reset`, `dark_gray` and `cyan` — ANSI names the terminal
+/// remaps per mode — so it does not reintroduce the fixed-colour problem that
+/// made the old theme palettes unreadable on a light background.
+fn markdown_lines(text: &str) -> Vec<Line<'_>> {
+    tui_markdown::from_str(text).lines
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
@@ -784,6 +768,61 @@ mod tests {
         }
     }
 
+    /// Renders one task whose description is `md`, and returns the frame text.
+    fn render_description(md: &str, w: u16, h: u16) -> String {
+        let app = App::new(
+            vec![Task {
+                id: "t".into(),
+                name: "Task".into(),
+                description: Some(md.to_string()),
+                created_at: Some("2026-01-01T00:00:00Z".into()),
+                ..Default::default()
+            }],
+            "demo".into(),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| draw(f, &app, &crate::icons::UNICODE))
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn markdown_tables_are_drawn_as_tables_not_raw_pipes() {
+        // The reason tui-markdown replaced the hand-rolled parser: this used to
+        // render as literal `|---|---|` rows with unaligned columns.
+        let text = render_description(
+            "| option | cost |\n|---|---:|\n| hand-rolled | low |\n",
+            110,
+            24,
+        );
+
+        assert!(text.contains('┌') && text.contains('┼'), "no table borders:\n{text}");
+        assert!(
+            !text.contains("|---"),
+            "the delimiter row leaked through:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_wide_table_in_a_narrow_pane_does_not_panic() {
+        // Tables are laid out at their natural width, which can exceed the pane.
+        let wide = "| a very long column header here | and another one |\n                    |---|---|\n| some long cell value | another long value |\n";
+        for w in [40u16, 60, 80] {
+            let _ = render_description(wide, w, 20);
+        }
+    }
+
     #[test]
     fn a_very_narrow_pane_does_not_panic() {
         // The right-hand gutter must be dropped rather than overflow the row.
@@ -792,3 +831,4 @@ mod tests {
         }
     }
 }
+

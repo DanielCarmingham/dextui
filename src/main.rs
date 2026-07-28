@@ -3,7 +3,6 @@
 mod app;
 mod dex;
 mod icons;
-mod markdown;
 mod tree;
 mod ui;
 mod watch;
