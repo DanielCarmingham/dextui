@@ -24,6 +24,9 @@ cd ~/some/project && ~/Developer/DanielCarmingham/dex-tui/run.sh
 ./run.sh -n           # skip the build, run the last one
 ./run.sh -r           # release build
 ./run.sh --selftest   # print the data pipeline as text, no TUI
+./run.sh --themes     # list palettes
+
+DEXTUI_THEME=temperature ./run.sh    # try a palette
 ```
 
 `--selftest` resolves the store, lists tasks, builds the tree under every filter,
@@ -35,6 +38,8 @@ and to check behaviour where no interactive terminal exists.
 | File | Purpose |
 | --- | --- |
 | `src/dex.rs` | The only module that knows dex exists: model, argv, JSON. |
+| `src/markdown.rs` | Small markdown reader for descriptions; emits neutral emphasis. |
+| `src/theme.rs` | Every colour decision, as swappable palettes. |
 | `src/tree.rs` | Flat list → hierarchy, search and status filtering, row prefixes. |
 | `src/app.rs` | All view state, plus the refresh-survival rules. |
 | `src/ui.rs` | Immediate-mode rendering, and `--selftest`. |
@@ -104,6 +109,25 @@ selection, collapse an expanded node, or interrupt typing.
   was a real bug in the .NET version.
 - While a dialog is open, refreshes set `pending_refresh` and are applied on
   close. Never let one land mid-dialog.
+
+## Display conventions
+
+- **Progress rollups** appear on any task with descendants, as a three-state
+  meter plus the raw fraction: done, in flight, untouched. Computed from the
+  **unfiltered** task list, so hiding completed tasks does not make every meter
+  read `0/n`. Leaves get no meter, because a rollup over nothing is meaningless.
+- **Age** appears only on in-progress tasks (`47m`, `21h`, `3d`). Putting one on
+  every row would bury the signal it exists to give. Under a minute is `now`, and
+  renders as "just now" rather than "now ago".
+- **Colour lives entirely in `src/theme.rs`.** `markdown` and `tree` describe what
+  things *are*; `ui.rs` is the only module that decides how they look. Prefer
+  named/indexed colours, which adapt to the user's terminal theme -- `Color::Rgb`
+  looks identical everywhere but ignores their scheme and assumes a dark
+  background (that trade-off is why `ember` exists and is not the default).
+- **Markdown delimiters are kept and dimmed, never stripped.** Headings, list
+  markers, quotes, backticks and `**` all stay on screen as dim markers. That is
+  consistent across block and inline syntax, and guarantees no input character is
+  ever dropped -- a round-trip test enforces exactly that.
 
 ## Verifying the UI
 

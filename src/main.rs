@@ -2,6 +2,8 @@
 
 mod app;
 mod dex;
+mod markdown;
+mod theme;
 mod tree;
 mod ui;
 mod watch;
@@ -54,6 +56,14 @@ fn main() -> std::io::Result<()> {
 
     let mut app = App::new(tasks, store_label(&store_dir));
 
+    if std::env::args().any(|a| a == "--themes") {
+        println!("Set with DEXTUI_THEME=<name>\n");
+        for t in theme::ALL {
+            println!("  {:<12} {}", t.name, t.about);
+        }
+        return Ok(());
+    }
+
     if std::env::args().any(|a| a == "--selftest") {
         println!("store   {store_dir}");
         print!("{}", ui::selftest(&app));
@@ -88,10 +98,11 @@ fn main() -> std::io::Result<()> {
         });
     }
 
+    let palette = theme::from_env();
     let mut terminal = ratatui::init();
 
     while !app.should_quit {
-        terminal.draw(|f| ui::draw(f, &app))?;
+        terminal.draw(|f| ui::draw(f, &app, &palette))?;
 
         let Ok(msg) = rx.recv() else { break };
         match msg {

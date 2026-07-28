@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dex::Task;
-use crate::tree::{self, Filter, Node};
+use crate::tree::{self, Filter, Node, Progress};
 
 /// A simple char-indexed editable buffer. Enough for a task name or a result note.
 #[derive(Debug, Clone, Default)]
@@ -93,6 +93,8 @@ pub struct App {
     pub tasks: Vec<Task>,
     pub by_id: HashMap<String, Task>,
     pub tree: Vec<Node>,
+    /// Subtree completion per task, from the unfiltered list.
+    pub progress: HashMap<String, Progress>,
     pub expanded: HashSet<String>,
     pub selected: Option<String>,
     pub filter: Filter,
@@ -111,6 +113,7 @@ impl App {
             by_id: index(&tasks),
             tasks,
             tree: Vec::new(),
+            progress: HashMap::new(),
             expanded: HashSet::new(),
             selected: None,
             filter: Filter::Pending,
@@ -124,6 +127,7 @@ impl App {
 
         // Everything is "new" on first load, so the collapse-new-tasks rule would
         // otherwise open onto a single collapsed root. Expand once up front.
+        app.progress = tree::subtree_progress(&app.tasks);
         app.expand_all();
         app.rebuild();
         app.selected = app.first_visible_id();
@@ -249,6 +253,7 @@ impl App {
 
         self.by_id = index(&next);
         self.tasks = next;
+        self.progress = tree::subtree_progress(&self.tasks);
         self.rebuild();
     }
 
@@ -335,6 +340,17 @@ impl App {
         }
 
         None
+    }
+
+    /// Pending and in-progress totals across the whole store, for the header.
+    pub fn counts(&self) -> (usize, usize) {
+        let pending = self.tasks.iter().filter(|t| !t.completed).count();
+        let active = self
+            .tasks
+            .iter()
+            .filter(|t| !t.completed && t.started_at.is_some())
+            .count();
+        (pending, active)
     }
 
     pub fn is_modal(&self) -> bool {

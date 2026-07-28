@@ -149,6 +149,64 @@ fn matches(t: &Task, query: Option<&str>, filter: Filter) -> bool {
     }
 }
 
+/// Completed vs total descendants of a task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Progress {
+    pub done: usize,
+    /// Started but not finished. Tracked separately so a parent whose children
+    /// are all underway does not read as a completely empty bar.
+    pub active: usize,
+    pub total: usize,
+}
+
+/// Completion rolled up over every descendant, for every task that has any.
+///
+/// Deliberately computed from the *unfiltered* task list: a meter built from the
+/// filtered tree would read 0/n as soon as a filter hid the completed children,
+/// which is exactly when you most want to see the real number.
+pub fn subtree_progress(tasks: &[Task]) -> HashMap<String, Progress> {
+    let mut by_parent: HashMap<&str, Vec<&Task>> = HashMap::new();
+    for t in tasks {
+        if let Some(p) = t.parent_id.as_deref() {
+            by_parent.entry(p).or_default().push(t);
+        }
+    }
+
+    let mut out = HashMap::new();
+    for t in tasks {
+        let mut progress = Progress::default();
+        let mut seen: HashSet<&str> = HashSet::new();
+        accumulate(t.id.as_str(), &by_parent, &mut progress, &mut seen);
+        if progress.total > 0 {
+            out.insert(t.id.clone(), progress);
+        }
+    }
+    out
+}
+
+fn accumulate<'a>(
+    id: &'a str,
+    by_parent: &HashMap<&'a str, Vec<&'a Task>>,
+    progress: &mut Progress,
+    seen: &mut HashSet<&'a str>,
+) {
+    // Guards against a cyclic store, same as build().
+    if !seen.insert(id) {
+        return;
+    }
+    if let Some(kids) = by_parent.get(id) {
+        for k in kids {
+            progress.total += 1;
+            if k.completed {
+                progress.done += 1;
+            } else if k.started_at.is_some() {
+                progress.active += 1;
+            }
+            accumulate(k.id.as_str(), by_parent, progress, seen);
+        }
+    }
+}
+
 /// Every node in the forest, depth-first, ignoring expansion.
 pub fn flatten(nodes: &[Node]) -> Vec<&Node> {
     let mut out = Vec::new();
@@ -353,5 +411,46 @@ mod tests {
 
         let expanded: HashSet<String> = ["r".to_string()].into_iter().collect();
         assert_eq!(visible_rows(&forest, &expanded).len(), 2);
+    }
+
+    #[test]
+    fn subtree_progress_counts_all_descendants_not_just_children() {
+        let mut done = task("leaf", Some("mid"));
+        done.completed = true;
+        let tasks = vec![task("root", None), task("mid", Some("root")), done];
+
+        let p = subtree_progress(&tasks);
+
+        // root sees the grandchild too.
+        assert_eq!(p["root"], Progress { done: 1, active: 0, total: 2 });
+        assert_eq!(p["mid"], Progress { done: 1, active: 0, total: 1 });
+    }
+
+    #[test]
+    fn subtree_progress_separates_in_flight_from_done() {
+        let mut started = task("b", Some("root"));
+        started.started_at = Some("2026-01-01T00:00:00Z".into());
+        let mut finished = task("c", Some("root"));
+        finished.completed = true;
+
+        let tasks = vec![task("root", None), task("a", Some("root")), started, finished];
+
+        assert_eq!(
+            subtree_progress(&tasks)["root"],
+            Progress { done: 1, active: 1, total: 3 }
+        );
+    }
+
+    #[test]
+    fn leaves_get_no_rollup_at_all() {
+        // A meter on a task with no children would be meaningless.
+        let tasks = vec![task("solo", None)];
+        assert!(subtree_progress(&tasks).is_empty());
+    }
+
+    #[test]
+    fn subtree_progress_survives_a_cycle() {
+        let tasks = vec![task("a", Some("b")), task("b", Some("a"))];
+        let _ = subtree_progress(&tasks);
     }
 }

@@ -283,6 +283,39 @@ pub fn local_time(iso: &Option<String>) -> String {
     }
 }
 
+/// Compresses a duration to a short label: `12m`, `4h`, `2d`, `3w`.
+///
+/// Split out from the clock so it can be tested directly.
+pub fn humanize_secs(secs: i64) -> String {
+    let secs = secs.max(0);
+    const MIN: i64 = 60;
+    const HOUR: i64 = 60 * MIN;
+    const DAY: i64 = 24 * HOUR;
+    const WEEK: i64 = 7 * DAY;
+
+    if secs < MIN {
+        "now".to_string()
+    } else if secs < HOUR {
+        format!("{}m", secs / MIN)
+    } else if secs < DAY {
+        format!("{}h", secs / HOUR)
+    } else if secs < WEEK {
+        format!("{}d", secs / DAY)
+    } else {
+        format!("{}w", secs / WEEK)
+    }
+}
+
+/// How long ago an ISO-8601 timestamp was, or None if absent or unparseable.
+pub fn age(iso: &Option<String>) -> Option<String> {
+    let raw = iso.as_ref()?;
+    let then = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
+    let secs = chrono::Utc::now()
+        .signed_duration_since(then.with_timezone(&chrono::Utc))
+        .num_seconds();
+    Some(humanize_secs(secs))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,5 +526,31 @@ mod tests {
     fn store_label_names_the_project_or_global() {
         assert_eq!(store_label("/Users/x/Developer/myproj/.dex"), "myproj");
         assert_eq!(store_label("/Users/x/.config/dex/local"), "global");
+    }
+
+    #[test]
+    fn humanize_secs_picks_a_sensible_unit() {
+        assert_eq!(humanize_secs(0), "now");
+        assert_eq!(humanize_secs(59), "now");
+        assert_eq!(humanize_secs(60), "1m");
+        assert_eq!(humanize_secs(59 * 60), "59m");
+        assert_eq!(humanize_secs(60 * 60), "1h");
+        assert_eq!(humanize_secs(23 * 3600), "23h");
+        assert_eq!(humanize_secs(24 * 3600), "1d");
+        assert_eq!(humanize_secs(6 * 86400), "6d");
+        assert_eq!(humanize_secs(7 * 86400), "1w");
+        assert_eq!(humanize_secs(30 * 86400), "4w");
+    }
+
+    #[test]
+    fn humanize_secs_never_renders_a_negative_age() {
+        // Clock skew between machines writing the store must not print "-3h".
+        assert_eq!(humanize_secs(-500), "now");
+    }
+
+    #[test]
+    fn age_of_an_unparseable_or_absent_stamp_is_none() {
+        assert_eq!(age(&None), None);
+        assert_eq!(age(&Some("not a date".into())), None);
     }
 }
