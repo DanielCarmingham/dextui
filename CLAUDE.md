@@ -16,18 +16,21 @@ cargo build
 cargo test
 cargo clippy --all-targets
 
-# Run against the dex store for whatever directory you are in.
-# run.sh builds first, then execs the app; it deliberately does NOT cd into the
-# repo, because dex resolves its store from the working directory.
-cd ~/some/project && ~/Developer/DanielCarmingham/dex-tui/run.sh
+# Install it. ~/.cargo/bin is on PATH, so `dex-tui` then works anywhere, and you
+# get the release build (1.4 MB, ~87ms of runtime startup) by default.
+cargo install --path .
+cd ~/some/project && dex-tui
 
-./run.sh -n           # skip the build, run the last one
-./run.sh -r           # release build
-./run.sh --selftest   # print the data pipeline as text, no TUI
-./run.sh --themes     # list palettes
-
-DEXTUI_THEME=temperature ./run.sh    # try a palette
+# Development loop. cargo run preserves YOUR working directory, which is what
+# matters here: dex resolves its store from the cwd, so running it from another
+# project browses that project's tasks.
+cargo run -- --selftest       # data pipeline as text, no TUI
+cargo run -- --themes         # list palettes
+DEXTUI_THEME=temperature cargo run
 ```
+
+`cargo install` copies the binary, so it will not pick up code changes until you
+run it again — use `cargo run` while iterating.
 
 `--selftest` resolves the store, lists tasks, builds the tree under every filter,
 and renders the detail pane as text. Use it whenever you change the data path,
