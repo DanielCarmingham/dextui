@@ -172,6 +172,16 @@ already has is both exact and portable to whatever font someone else runs.
 bare pty (`script`, a pipe) capability queries go unanswered and you get no
 usable frames.
 
+**To look at it with real data**, seed a throwaway store:
+
+```bash
+scripts/seed-demo.sh          # prints where it went
+cd <that dir> && dex-tui
+```
+
+It runs `git init` on purpose — outside a git repo dex writes to the *shared
+global* store at `~/.config/dex/local`, which would pollute your real task list.
+
 **Headless render tests are the primary check.** ratatui's `TestBackend` renders
 a real frame into a buffer, so `ui.rs` has tests asserting the header draws, every
 icon tier draws, and narrow panes do not panic. Prefer these — they are
