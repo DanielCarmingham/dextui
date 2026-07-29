@@ -172,9 +172,15 @@ impl Bar {
         // subtraction can wrap.
         let done_cells = if done == 0 {
             0
+        } else if active == 0 {
+            // Every whole cell is done's. Without this the snap above can push
+            // `outer` past done's own rounding, and the leftover would be handed
+            // to `active` -- drawing an in-flight cell for a task with nothing
+            // started, which contradicts the row's own status glyph.
+            whole
         } else {
             let want = ((done as f64 / total as f64) * width as f64).round().max(1.0) as usize;
-            want.min(whole - usize::from(active > 0))
+            want.min(whole - 1)
         };
 
         Bar {
@@ -1232,6 +1238,41 @@ mod tests {
                 "coloured runs overflow the bar: {p:?} partials={partials} -> {b:?}"
             );
         });
+    }
+
+    /// The mirror of `a_non_zero_count_never_rounds_away_to_nothing`, and the
+    /// more dangerous direction: a run that does not exist must never be drawn.
+    ///
+    /// In a tier without sub-cell glyphs the bar snaps to whole cells, and the
+    /// snap can push the combined extent past the done run's own rounding. The
+    /// leftover cell was handed to `active` unconditionally, so a task with
+    /// nothing started painted an in-flight cell -- the meter and the status
+    /// glyph describing the same task in contradictory terms, which is the exact
+    /// failure this whole epic exists to remove.
+    #[test]
+    fn a_zero_count_is_never_drawn() {
+        every_bar(|p, b, partials| {
+            if p.active == 0 {
+                assert_eq!(b.active, 0, "phantom in-flight: {p:?} partials={partials} -> {b:?}");
+            }
+            if p.done == 0 {
+                assert_eq!(b.done, 0, "phantom done: {p:?} partials={partials} -> {b:?}");
+            }
+        });
+
+        // The smallest real case, found by brute force over the arithmetic: 7 of
+        // 9 done and nothing started rendered `#####+.` in ascii, with the `+`
+        // in blue.
+        let b = Bar::new(
+            Progress {
+                done: 7,
+                active: 0,
+                total: 9,
+            },
+            METER_WIDTH,
+            false,
+        );
+        assert_eq!(b.active, 0, "7 of 9 done, none started -> {b:?}");
     }
 
     /// One finished subtask out of a hundred is the single most useful thing a
