@@ -129,8 +129,13 @@ selection, collapse an expanded node, or interrupt typing.
 - **Descriptions render through `tui-markdown`**, not a hand-rolled parser. It
   was swapped in because tables need column measurement and terminal display
   widths; the old parser skipped them, so tables appeared as raw `|---|` rows.
-  It emits only `Reset`/`dark_gray`/`cyan`, which keeps the light-mode rule
-  above intact. `highlight-code` is off — syntect costs 21 crates for syntax
+  Its **default stylesheet is not** light-mode safe, so `markdown::Adaptive`
+  replaces it: the stock H1 is `on_cyan().bold().underlined()` — a background
+  with no foreground, leaving the text in the terminal's default colour, which
+  is white on cyan in dark mode and dark grey on cyan in light. Inline code is
+  `white().on_black()`, equally wrong on a light background. Ours carries
+  structure with modifiers and sets no backgrounds at all; a test walks every
+  rendered span and fails on any background without a foreground. `highlight-code` is off — syntect costs 21 crates for syntax
   highlighting we do not use.
 
 ## What the detail pane shows, and why

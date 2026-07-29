@@ -12,7 +12,60 @@
 //! line, and `dex` stores them verbatim. Without this, "line one\nline two"
 //! renders as "line one line two".
 
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+
+/// Styling that does not assume a background colour.
+///
+/// tui-markdown's defaults set backgrounds without setting a matching
+/// foreground — an H1 is `on_cyan().bold().underlined()`, so the text keeps
+/// whatever the terminal's default foreground is. That is white on cyan in a
+/// dark theme and dark grey on cyan in a light one, and both are hard to read.
+/// Inline code is `white().on_black()`, a fixed black block that is equally
+/// wrong on a light background.
+///
+/// Structure is carried by modifiers instead, which work in any theme, with a
+/// single foreground accent for code. Same rule as the rest of the UI: the
+/// terminal owns colour.
+#[derive(Clone)]
+struct Adaptive;
+
+impl tui_markdown::StyleSheet for Adaptive {
+    fn heading(&self, level: u8) -> Style {
+        // Depth reads from weight and decoration rather than colour.
+        match level {
+            1 => Style::default()
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::UNDERLINED),
+            2 => Style::default().add_modifier(Modifier::BOLD),
+            _ => Style::default()
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::ITALIC),
+        }
+    }
+
+    fn code(&self) -> Style {
+        Style::default().fg(ratatui::style::Color::Cyan)
+    }
+
+    fn link(&self) -> Style {
+        Style::default().add_modifier(Modifier::UNDERLINED)
+    }
+
+    fn blockquote(&self) -> Style {
+        Style::default()
+            .fg(ratatui::style::Color::DarkGray)
+            .add_modifier(Modifier::ITALIC)
+    }
+
+    fn table_border(&self) -> Style {
+        Style::default().fg(ratatui::style::Color::DarkGray)
+    }
+
+    fn table_header(&self) -> Style {
+        Style::default().add_modifier(Modifier::BOLD)
+    }
+}
 
 /// Renders `text`, honouring single newlines as line breaks.
 ///
@@ -21,7 +74,9 @@ use ratatui::text::{Line, Span};
 pub fn render(text: &str) -> Vec<Line<'static>> {
     let prepared = hard_break_soft_lines(text);
 
-    tui_markdown::from_str(&prepared)
+    let options = tui_markdown::Options::new(Adaptive);
+
+    tui_markdown::from_str_with_options(&prepared, &options)
         .lines
         .into_iter()
         .map(|line| {
@@ -150,3 +205,58 @@ mod tests {
         );
     }
 }
+
+
+#[cfg(test)]
+mod style_checks {
+    use super::*;
+    use ratatui::style::Style;
+
+    /// A style that sets a background but no foreground leaves the text in the
+    /// terminal's default colour, which is unreadable against the background in
+    /// one theme or the other. That is the bug this stylesheet exists to fix.
+    fn no_bare_background(style: Style, what: &str) {
+        if style.bg.is_some() {
+            assert!(
+                style.fg.is_some(),
+                "{what} sets a background with no foreground: {style:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_rendered_style_sets_a_background_without_a_foreground() {
+        let src = "# H1\n\n## H2\n\n### H3\n\ntext with `code` in it\n\n\
+                   > a quote\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n\
+                   [link](https://example.com)\n";
+
+        for line in render(src) {
+            no_bare_background(line.style, "line");
+            for span in &line.spans {
+                no_bare_background(span.style, &format!("span {:?}", span.content));
+            }
+        }
+    }
+
+    #[test]
+    fn headings_are_distinguished_without_relying_on_colour() {
+        // Modifiers survive any terminal theme; a colour choice may not.
+        use tui_markdown::StyleSheet;
+        let sheet = Adaptive;
+        for level in 1..=3u8 {
+            let s = sheet.heading(level);
+            assert!(
+                !s.add_modifier.is_empty(),
+                "heading {level} has no modifier to distinguish it: {s:?}"
+            );
+            assert!(s.bg.is_none(), "heading {level} sets a background");
+        }
+    }
+
+    #[test]
+    fn inline_code_has_no_fixed_black_block() {
+        use tui_markdown::StyleSheet;
+        assert!(Adaptive.code().bg.is_none());
+    }
+}
+
