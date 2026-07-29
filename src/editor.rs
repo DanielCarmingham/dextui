@@ -32,7 +32,7 @@ fn editor_command() -> (String, Vec<String>) {
 
 fn scratch_path(task_id: &str) -> PathBuf {
     // `.md` so editors apply markdown highlighting; descriptions usually are.
-    let name = format!("dex-tui-{}-{}.md", std::process::id(), task_id);
+    let name = format!("dextui-{}-{}.md", std::process::id(), task_id);
     std::env::temp_dir().join(name)
 }
 

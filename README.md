@@ -1,9 +1,9 @@
-# dex-tui
+# dextui
 
 A terminal UI for browsing and triaging [dex](https://dex.rip/) tasks.
 
 ```
- dex-tui · my-project · 8 pending · 2 active            priority  [ all  PENDING  active ]
+ dextui · my-project · 8 pending · 2 active            priority  [ all  PENDING  active ]
 ┌──────────────────────────────────────────┐┌───────────────────────────────────────────┐
 │├▼ ◐ Ship v1                   ▓▒▒░░░░ 1/7││Wire up the file watcher                   │
 ││ ├▼ ◐ Core data layer         ▒▒▒▒▒▒▒ 0/2││◐ in progress · started 4h ago · priority 1│
@@ -32,10 +32,10 @@ interrupting a dialog you have open.
 
 ```bash
 cargo install --path .
-cd ~/any/project && dex-tui
+cd ~/any/project && dextui
 ```
 
-`~/.cargo/bin` needs to be on your `PATH`. dex-tui reads the store for the
+`~/.cargo/bin` needs to be on your `PATH`. dextui reads the store for the
 **current directory**, so run it from the project whose tasks you want.
 
 While developing, `cargo run` preserves your working directory the same way.
@@ -93,16 +93,16 @@ which `h`/`l` reach the rest.
 Optional, and there are three ways to get a file to edit:
 
 ```bash
-dex-tui config init            # write the template to the global config
-dex-tui config edit            # open it in $EDITOR, creating it if needed
-dex-tui config                 # print it instead, with both resolved paths
+dextui config init            # write the template to the global config
+dextui config edit            # open it in $EDITOR, creating it if needed
+dextui config                 # print it instead, with both resolved paths
 ```
 
 Add `-l` (or `--local` / `--project`) to act on the project file instead:
 
 ```bash
-dex-tui config init --local    # write .dex-tui.toml at the git root
-dex-tui config edit -l
+dextui config init --local    # write .dextui.toml at the git root
+dextui config edit -l
 ```
 
 Or press `,` inside the app, which opens the global file in `$EDITOR`, creating
@@ -116,8 +116,8 @@ Layered **defaults < global < project < environment**:
 
 | layer | path |
 | --- | --- |
-| global | `~/.config/dex-tui/config.toml` |
-| project | `.dex-tui.toml` at the git root |
+| global | `~/.config/dextui/config.toml` |
+| project | `.dextui.toml` at the git root |
 
 ```toml
 sort = "priority"       # priority | updated | created | name
@@ -130,11 +130,11 @@ icons = "unicode"       # nerd | unicode | ascii
 A project file need only mention what it changes:
 
 ```toml
-# .dex-tui.toml — this repo has wide tables
+# .dextui.toml — this repo has wide tables
 wrap = false
 ```
 
-`dex-tui config` prints both paths and whether each exists — the first thing to
+`dextui config` prints both paths and whether each exists — the first thing to
 check when a setting seems not to apply. `DEXTUI_ICONS` overrides the icon tier
 for a single run.
 
@@ -143,17 +143,17 @@ for a single run.
 Subcommands follow dex's own shape, including `-l`/`-g`.
 
 ```
-dex-tui                     Run the TUI (default)
-dex-tui config              Show the config paths and a commented template
-dex-tui config init         Write a config template
-dex-tui config edit         Open a config in $EDITOR, creating it if needed
-dex-tui icons               List the glyph tiers
-dex-tui selftest            Print the data pipeline as text (no TUI)
+dextui                     Run the TUI (default)
+dextui config              Show the config paths and a commented template
+dextui config init         Write a config template
+dextui config edit         Open a config in $EDITOR, creating it if needed
+dextui icons               List the glyph tiers
+dextui selftest            Print the data pipeline as text (no TUI)
 
 -h, --help                  Show help
 -V, --version               Show the version
--g, --global                Act on ~/.config/dex-tui/config.toml (default)
--l, --local, --project      Act on .dex-tui.toml at the git root
+-g, --global                Act on ~/.config/dextui/config.toml (default)
+-l, --local, --project      Act on .dextui.toml at the git root
     --force                 With `config init`, overwrite an existing file
 ```
 
@@ -177,7 +177,7 @@ back to a *global* store outside a git repo. `dex dir` shows which one is in use
 **Tofu (`□`) instead of icons** — `icons = "nerd"` without a patched font. Use
 `unicode`, or `ascii` if that still looks wrong.
 
-**A setting seems ignored** — `dex-tui config` shows which files were found;
+**A setting seems ignored** — `dextui config` shows which files were found;
 an unknown key or value is reported in the status bar at startup.
 
 ## Development

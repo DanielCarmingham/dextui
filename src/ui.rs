@@ -163,7 +163,7 @@ fn draw_header(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
         spans.push(Span::styled(format!("{} ", ic.app), Style::default().fg(DIM)));
     }
     spans.push(Span::styled(
-        "dex-tui",
+        "dextui",
         Style::default().add_modifier(Modifier::BOLD),
     ));
     spans.push(sep());
@@ -687,7 +687,7 @@ dialog are never disturbed.";
     frame.render_widget(Clear, area);
 
     let block = Block::bordered()
-        .title(" dex-tui ")
+        .title(" dextui ")
         .border_style(Style::default().fg(ACTIVE));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -715,7 +715,7 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-/// Plain-text render of the whole pipeline, for `dex-tui selftest`.
+/// Plain-text render of the whole pipeline, for `dextui selftest`.
 pub fn selftest(app: &App) -> String {
     use std::fmt::Write;
     let mut out = String::new();
@@ -839,7 +839,7 @@ mod tests {
     #[test]
     fn the_header_shows_identity_context_and_counts() {
         let rows = render(100, 20, &crate::icons::UNICODE);
-        assert!(rows[0].contains("dex-tui"), "header row: {:?}", rows[0]);
+        assert!(rows[0].contains("dextui"), "header row: {:?}", rows[0]);
         assert!(rows[0].contains("demo"), "header row: {:?}", rows[0]);
         assert!(rows[0].contains("pending"), "header row: {:?}", rows[0]);
     }

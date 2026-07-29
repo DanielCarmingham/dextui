@@ -2,7 +2,7 @@
 #
 # render-check.sh [keys]
 #
-# Renders dex-tui inside a tmux pane and prints what it actually drew.
+# Renders dextui inside a tmux pane and prints what it actually drew.
 #
 # ratatui (like most TUI frameworks) needs a real terminal: under a bare pty
 # such as `script` or a plain pipe, capability queries go unanswered and you get
@@ -22,7 +22,7 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-APP="$REPO/target/debug/dex-tui"
+APP="$REPO/target/debug/dextui"
 SOCK="dextui-render"
 SESSION="render"
 WORKDIR="${DEXTUI_RENDER_CWD:-$PWD}"

@@ -3,17 +3,17 @@
 # seed-demo.sh [dir]
 #
 # Creates a throwaway dex store with a realistic nested task tree, so the UI can
-# be looked at with real data. Defaults to ./dex-tui-demo under your temp dir.
+# be looked at with real data. Defaults to ./dextui-demo under your temp dir.
 #
 #   scripts/seed-demo.sh              # seed and print where it went
-#   cd <that dir> && dex-tui          # look at it
+#   cd <that dir> && dextui          # look at it
 #
 # It runs `git init` on purpose: dex uses a repo-local .dex inside a git repo,
 # and falls back to the SHARED GLOBAL store at ~/.config/dex/local outside one.
 # Without the repo this would pollute your real global task list.
 set -euo pipefail
 
-DIR="${1:-${TMPDIR:-/tmp}/dex-tui-demo}"
+DIR="${1:-${TMPDIR:-/tmp}/dextui-demo}"
 
 command -v dex >/dev/null 2>&1 || { echo "seed-demo.sh: dex is not on PATH" >&2; exit 1; }
 
@@ -24,7 +24,7 @@ git init -q .
 
 new() { dex create "$@" 2>&1 | head -1 | awk '{print $3}'; }
 
-ROOT=$(new "Ship dex-tui v1" -d "Two-pane terminal browser over the dex CLI.
+ROOT=$(new "Ship dextui v1" -d "Two-pane terminal browser over the dex CLI.
 
 Steps:
 
@@ -62,6 +62,6 @@ echo
 echo "seeded: $DIR"
 echo
 echo "  cd $DIR"
-echo "  dex-tui"
+echo "  dextui"
 echo
 dex list

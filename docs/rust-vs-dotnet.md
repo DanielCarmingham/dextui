@@ -1,6 +1,6 @@
 # Rust vs .NET: what the rewrite actually bought
 
-dex-tui was first built in .NET 10 + Terminal.Gui 2.4.17, then rebuilt in Rust
+dextui was first built in .NET 10 + Terminal.Gui 2.4.17, then rebuilt in Rust
 with ratatui 0.30 + crossterm 0.29. The Rust version is now the project; the .NET
 one is preserved at the **`v0.1.0-dotnet`** tag.
 

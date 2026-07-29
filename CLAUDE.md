@@ -1,4 +1,4 @@
-# dex-tui
+# dextui
 
 Conventions and hard-won gotchas for anyone changing this code. For what it is,
 how to install it and what the keys do, see [README.md](README.md) — user-facing
@@ -20,10 +20,10 @@ cargo build
 cargo test
 cargo clippy --all-targets
 
-# Install it. ~/.cargo/bin is on PATH, so `dex-tui` then works anywhere, and you
+# Install it. ~/.cargo/bin is on PATH, so `dextui` then works anywhere, and you
 # get the release build (1.4 MB, ~87ms of runtime startup) by default.
 cargo install --path .
-cd ~/some/project && dex-tui
+cd ~/some/project && dextui
 
 # Development loop. cargo run preserves YOUR working directory, which is what
 # matters here: dex resolves its store from the cwd, so running it from another
@@ -258,8 +258,8 @@ precedence so both behave the same way in the same repository:
 
 | layer | path |
 | --- | --- |
-| global | `~/.config/dex-tui/config.toml` |
-| project | `.dex-tui.toml` at the git root |
+| global | `~/.config/dextui/config.toml` |
+| project | `.dextui.toml` at the git root |
 
 `config` prints both paths and whether each exists; `config init` writes the
 template (refusing to clobber without `--force`); `config edit` opens it in
@@ -400,7 +400,7 @@ usable frames.
 
 ```bash
 scripts/seed-demo.sh          # prints where it went
-cd <that dir> && dex-tui
+cd <that dir> && dextui
 ```
 
 It runs `git init` on purpose — outside a git repo dex writes to the *shared
@@ -430,5 +430,5 @@ after any change to `ui.rs` or the key handling.**
 
 In: browse, search, filter, start, complete, edit, create, subtask, delete.
 Out (run these from the shell): `sync`, `import`, `export`, `plan`,
-`archive`, and multi-project views. dex-tui shows the current directory's store
+`archive`, and multi-project views. dextui shows the current directory's store
 only.

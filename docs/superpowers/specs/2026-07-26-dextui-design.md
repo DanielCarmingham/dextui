@@ -1,4 +1,4 @@
-# dex-tui design
+# dextui design
 
 **Date:** 2026-07-26
 **Status:** historical — describes the .NET implementation, since replaced
@@ -76,10 +76,10 @@ Two-pane master/detail with a persistent search + status-filter bar, and a
 shortcut bar along the bottom.
 
 ```
-┌─ dex-tui — <project> ─────────────────────────────┐
+┌─ dextui — <project> ─────────────────────────────┐
 │ / refresh_                        [all|pending|◐] │
 ├─────────────────────────────┬─────────────────────┤
-│ ▾ ◐ Ship dex-tui v1         │ Wire up refresh     │
+│ ▾ ◐ Ship dextui v1         │ Wire up refresh     │
 │   ▾ ◐ Core data layer       │ ─────────────────── │
 │     ● ○ Wire up refresh     │ id/status/priority  │
 │   ▸ ○ Terminal.Gui views    │ full description    │

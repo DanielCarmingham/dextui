@@ -1,4 +1,4 @@
-//! dex-tui — a two-pane terminal browser for dex tasks.
+//! dextui — a two-pane terminal browser for dex tasks.
 
 mod app;
 mod config;
@@ -39,10 +39,10 @@ enum Msg {
 }
 
 const USAGE: &str = "\
-dex-tui — browse and triage dex tasks
+dextui — browse and triage dex tasks
 
 USAGE:
-    dex-tui [COMMAND]
+    dextui [COMMAND]
 
 With no command, runs the TUI against the dex store for the current directory.
 
@@ -58,8 +58,8 @@ OPTIONS:
     -V, --version       Show the version
 
 CONFIG OPTIONS:
-    -g, --global        Act on ~/.config/dex-tui/config.toml (the default)
-    -l, --local         Act on .dex-tui.toml at the git root
+    -g, --global        Act on ~/.config/dextui/config.toml (the default)
+    -l, --local         Act on .dextui.toml at the git root
         --project       Alias for --local
         --force         With `config init`, overwrite an existing file
 
@@ -127,7 +127,7 @@ fn main() -> std::io::Result<()> {
     let command = match parse_args() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("dex-tui: {e}\n");
+            eprintln!("dextui: {e}\n");
             eprint!("{USAGE}");
             std::process::exit(2);
         }
@@ -140,7 +140,7 @@ fn main() -> std::io::Result<()> {
             return Ok(());
         }
         Command::Version => {
-            println!("dex-tui {}", env!("CARGO_PKG_VERSION"));
+            println!("dextui {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
         Command::ShowConfig => {
@@ -162,7 +162,7 @@ fn main() -> std::io::Result<()> {
                 return Ok(());
             }
             Err(e) => {
-                eprintln!("dex-tui: {e}");
+                eprintln!("dextui: {e}");
                 std::process::exit(1);
             }
         },
@@ -172,7 +172,7 @@ fn main() -> std::io::Result<()> {
             let path = match config::path_for_editing(scope) {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("dex-tui: {e}");
+                    eprintln!("dextui: {e}");
                     std::process::exit(1);
                 }
             };
@@ -181,7 +181,7 @@ fn main() -> std::io::Result<()> {
             match editor::edit("config", &current) {
                 Ok(Some(text)) => {
                     if let Err(e) = std::fs::write(&path, format!("{text}\n")) {
-                        eprintln!("dex-tui: {}: {e}", path.display());
+                        eprintln!("dextui: {}: {e}", path.display());
                         std::process::exit(1);
                     }
                     // Parse it back so a mistake is reported now rather than at
@@ -191,7 +191,7 @@ fn main() -> std::io::Result<()> {
                         Some(p) => {
                             // Saved, so the edit is not lost -- but a non-zero
                             // exit so this is not mistaken for success.
-                            eprintln!("dex-tui: saved {}, but: {p}", path.display());
+                            eprintln!("dextui: saved {}, but: {p}", path.display());
                             std::process::exit(1);
                         }
                         None => println!("saved {}", path.display()),
@@ -199,7 +199,7 @@ fn main() -> std::io::Result<()> {
                 }
                 Ok(None) => println!("{} unchanged", path.display()),
                 Err(e) => {
-                    eprintln!("dex-tui: {e}");
+                    eprintln!("dextui: {e}");
                     std::process::exit(1);
                 }
             }
@@ -230,8 +230,8 @@ fn main() -> std::io::Result<()> {
     let store_dir = match dex.store_dir() {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("dex-tui: {e}");
-            eprintln!("dex-tui: is `dex` installed and on your PATH?");
+            eprintln!("dextui: {e}");
+            eprintln!("dextui: is `dex` installed and on your PATH?");
             std::process::exit(1);
         }
     };
@@ -239,7 +239,7 @@ fn main() -> std::io::Result<()> {
     let tasks = match dex.list() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("dex-tui: {e}");
+            eprintln!("dextui: {e}");
             std::process::exit(1);
         }
     };
@@ -903,7 +903,7 @@ mod tests {
                 .split_whitespace()
                 .take_while(|w| !w.starts_with('-') && w.chars().all(|c| c.is_ascii_lowercase()))
                 .collect();
-            if words.is_empty() || words[0] == "dex-tui" {
+            if words.is_empty() || words[0] == "dextui" {
                 continue;
             }
             assert!(

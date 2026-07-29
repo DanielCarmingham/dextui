@@ -1,4 +1,4 @@
-//! Starting values, read from `~/.config/dex-tui/config.toml`.
+//! Starting values, read from `~/.config/dextui/config.toml`.
 //!
 //! The file is **read-only**: it sets what the app opens with, and the runtime
 //! toggles (`w`, `o`, `O`, `f`) affect only the current run. Writing every
@@ -50,7 +50,7 @@ impl Default for Config {
     }
 }
 
-/// The per-project file, `.dex-tui.toml` at the git root.
+/// The per-project file, `.dextui.toml` at the git root.
 ///
 /// Mirrors how dex layers `.dex/config.toml` over its global file, so "in this
 /// repo, start unwrapped" is expressible. The root is found by walking up for a
@@ -60,7 +60,7 @@ pub fn project_path() -> Option<PathBuf> {
     let mut dir = std::env::current_dir().ok()?;
     loop {
         if dir.join(".git").exists() {
-            return Some(dir.join(".dex-tui.toml"));
+            return Some(dir.join(".dextui.toml"));
         }
         if !dir.pop() {
             return None;
@@ -74,7 +74,7 @@ pub fn path() -> Option<PathBuf> {
         Some(x) if !x.is_empty() => PathBuf::from(x),
         _ => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
     };
-    Some(base.join("dex-tui").join("config.toml"))
+    Some(base.join("dextui").join("config.toml"))
 }
 
 /// Applies one file's values over `cfg`, recording anything unrecognised.
@@ -186,8 +186,8 @@ pub const EXAMPLE: &str = r#"# Starting values only. w / o / O / f still toggle 
 # is written back, so this file stays exactly as you left it.
 #
 # Layered defaults < global < project < environment:
-#   global   ~/.config/dex-tui/config.toml
-#   project  .dex-tui.toml at the git root
+#   global   ~/.config/dextui/config.toml
+#   project  .dextui.toml at the git root
 # A project file need only mention what it changes.
 
 # priority | updated | created | name
@@ -260,10 +260,10 @@ pub fn path_for_editing(scope: Scope) -> Result<PathBuf, String> {
 /// The project template is deliberately near-empty: a project file exists to
 /// override a handful of things, and a full copy would silently pin every
 /// setting against later changes to the global file.
-pub const PROJECT_EXAMPLE: &str = r#"# .dex-tui.toml — settings for this repository only.
+pub const PROJECT_EXAMPLE: &str = r#"# .dextui.toml — settings for this repository only.
 #
-# Layered over ~/.config/dex-tui/config.toml, so mention only what differs.
-# Anything left out falls through to the global file. See `dex-tui --config`.
+# Layered over ~/.config/dextui/config.toml, so mention only what differs.
+# Anything left out falls through to the global file. See `dextui --config`.
 
 # wrap = false          # this repo's descriptions have wide tables
 # sort = "updated"      # priority | updated | created | name
