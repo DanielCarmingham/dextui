@@ -8,3 +8,7 @@ obj/
 
 # Per-machine Claude Code settings
 .claude/settings.local.json
+
+# This repo's own dex store. dex resolves it from the cwd, so working on dextui
+# from here creates one; it is a local task list, not part of the project.
+.dex/
