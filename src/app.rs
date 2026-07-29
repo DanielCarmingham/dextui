@@ -96,6 +96,23 @@ pub enum Focus {
     Detail,
 }
 
+/// What the header reports about the whole store. See [`App::counts`] for why
+/// `ready + blocked` deliberately does not equal `pending`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub total: usize,
+    pub completed: usize,
+    pub pending: usize,
+    /// Started and unfinished.
+    pub active: usize,
+    /// Has at least one blocker that exists and is not completed.
+    pub blocked: usize,
+    /// Pending, unstarted, unblocked, and with no unfinished children.
+    pub ready: usize,
+    /// Completed over total, rounded down.
+    pub percent: usize,
+}
+
 pub struct App {
     pub tasks: Vec<Task>,
     pub by_id: HashMap<String, Task>,
@@ -410,15 +427,61 @@ impl App {
         None
     }
 
-    /// Pending and in-progress totals across the whole store, for the header.
-    pub fn counts(&self) -> (usize, usize) {
-        let pending = self.tasks.iter().filter(|t| !t.completed).count();
-        let active = self
-            .tasks
+    /// Store-wide totals for the header, from the **unfiltered** list -- like the
+    /// progress rollups, so changing what is on screen never changes what the
+    /// header reports.
+    ///
+    /// The rule mirrors the `dex list --ready` / `dex list --blocked` pair, and
+    /// deliberately **not** `dex status`'s partition. dex disagrees with itself:
+    /// `cli/status.js` counts a parent with unfinished children as blocked,
+    /// while `list --blocked` counts only tasks with an incomplete blocker.
+    /// Measured across four real stores, five of the six tasks `dex status`
+    /// calls blocked have no blocker at all -- two of them contain no blocking
+    /// relationship anywhere and it still reported some. Following `status.js`
+    /// would also put this header at odds with the tree drawn beneath it, since
+    /// the row glyph means "has an incomplete blocker".
+    ///
+    /// The cost, which is deliberate: `ready + blocked` does **not** sum to
+    /// `pending`. A parent with unfinished children is neither -- you cannot
+    /// pick up an epic, and nothing is blocking it. Do not close that gap by
+    /// folding parents into either bucket; a test asserts the gap exists.
+    pub fn counts(&self) -> Counts {
+        let mut c = Counts {
+            total: self.tasks.len(),
+            ..Default::default()
+        };
+
+        for t in &self.tasks {
+            if t.completed {
+                c.completed += 1;
+                continue;
+            }
+            c.pending += 1;
+
+            // Same precedence as status.js: started wins over everything else.
+            if t.is_in_progress() {
+                c.active += 1;
+            } else if crate::dex::is_blocked(t, &self.by_id) {
+                c.blocked += 1;
+            } else if !self.has_incomplete_children(t) {
+                c.ready += 1;
+            }
+        }
+
+        c.percent = match c.total {
+            0 => 0,
+            n => (c.completed * 100) / n,
+        };
+        c
+    }
+
+    /// Immediate children only, matching dex's `hasIncompleteChildren` -- not the
+    /// progress rollup, which counts all descendants.
+    fn has_incomplete_children(&self, t: &Task) -> bool {
+        t.children
             .iter()
-            .filter(|t| !t.completed && t.started_at.is_some())
-            .count();
-        (pending, active)
+            .filter_map(|id| self.by_id.get(id))
+            .any(|c| !c.completed)
     }
 
     /// Whether anything on screen is currently breathing.
@@ -596,6 +659,126 @@ mod tests {
             children: children.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         }
+    }
+
+    fn counted(tasks: Vec<Task>) -> App {
+        App::new(tasks, "demo".into(), Config::default())
+    }
+
+    /// The header mirrors the `dex list --ready` / `dex list --blocked` pair,
+    /// **not** `dex status`'s partition. dex disagrees with itself here:
+    /// `status.js` counts a parent with unfinished children as blocked, while
+    /// `list --blocked` counts only tasks with incomplete blockers. Measured
+    /// across four real stores, five of the six tasks `dex status` calls blocked
+    /// have no blocker at all -- two of those stores contain no blocking
+    /// relationship anywhere and it still reported 3 and 1 blocked.
+    ///
+    /// So "blocked" here means what the row's own glyph means, what the detail
+    /// pane means, and what dex-report's red `[!]` means. One word, one
+    /// definition, everywhere.
+    #[test]
+    fn blocked_counts_only_tasks_with_an_incomplete_blocker() {
+        let mut done = task("done", None, &[]);
+        done.completed = true;
+
+        let mut live_blocker = task("open", None, &[]);
+        live_blocker.name = "open".into();
+
+        let mut stale = task("stale", None, &[]);
+        stale.blocked_by = vec!["done".into()]; // blocker finished -> not blocked
+        let mut real = task("real", None, &[]);
+        real.blocked_by = vec!["open".into()];
+        let mut ghost = task("ghost", None, &[]);
+        ghost.blocked_by = vec!["nonexistent".into()]; // dangling -> not blocked
+
+        let app = counted(vec![done, live_blocker, stale, real, ghost]);
+        assert_eq!(app.counts().blocked, 1, "only `real` is blocked");
+    }
+
+    /// A parent with unfinished children is neither ready nor blocked. You
+    /// cannot pick up an epic, so counting it ready would be a small lie; it has
+    /// no blocker, so calling it blocked would be a bigger one.
+    ///
+    /// This is the deliberate cost of the rule: ready + blocked does NOT sum to
+    /// pending. Asserted rather than tolerated, so nobody "fixes" the gap by
+    /// quietly folding parents into one bucket or the other.
+    #[test]
+    fn a_parent_with_open_children_is_neither_ready_nor_blocked() {
+        let parent = task("parent", None, &["kid"]);
+        let kid = task("kid", Some("parent"), &[]);
+
+        let app = counted(vec![parent, kid]);
+        let c = app.counts();
+
+        assert_eq!(c.pending, 2);
+        assert_eq!(c.ready, 1, "only the child can be picked up");
+        assert_eq!(c.blocked, 0, "nothing has a blocker");
+        assert_ne!(c.ready + c.blocked, c.pending, "the gap is the parent");
+    }
+
+    #[test]
+    fn a_parent_whose_children_are_all_done_is_ready_again() {
+        let parent = task("parent", None, &["kid"]);
+        let mut kid = task("kid", Some("parent"), &[]);
+        kid.completed = true;
+
+        let app = counted(vec![parent, kid]);
+        assert_eq!(app.counts().ready, 1, "nothing is holding the parent up now");
+    }
+
+    /// In progress is its own bucket and is never also counted ready or blocked,
+    /// matching how `status.js` partitions: it tests in-progress first.
+    #[test]
+    fn a_started_task_counts_as_active_and_nothing_else() {
+        let mut started = task("started", None, &[]);
+        started.started_at = Some("2026-01-01T00:00:00Z".into());
+        started.blocked_by = vec!["open".into()];
+        let open = task("open", None, &[]);
+
+        let app = counted(vec![started, open]);
+        let c = app.counts();
+
+        assert_eq!(c.active, 1);
+        assert_eq!(c.blocked, 0, "started wins over blocked");
+        assert_eq!(c.ready, 1, "only `open` is ready");
+    }
+
+    /// The percentage is the one number `dex status` and `dex-report` agree on,
+    /// so it must not drift: completed over total, archived aside.
+    #[test]
+    fn the_percentage_is_completed_over_everything() {
+        let mut a = task("a", None, &[]);
+        a.completed = true;
+        let b = task("b", None, &[]);
+        let c = task("c", None, &[]);
+        let d = task("d", None, &[]);
+
+        let app = counted(vec![a, b, c, d]);
+        assert_eq!(app.counts().percent, 25);
+    }
+
+    #[test]
+    fn an_empty_store_reports_zero_percent_rather_than_dividing_by_zero() {
+        let app = counted(vec![]);
+        assert_eq!(app.counts().percent, 0);
+    }
+
+    /// Counts come from the unfiltered list, like the progress rollups, so
+    /// changing what is on screen never changes what the header reports.
+    #[test]
+    fn the_counts_ignore_the_current_filter() {
+        let mut done = task("done", None, &[]);
+        done.completed = true;
+        let open = task("open", None, &[]);
+
+        let mut app = counted(vec![done, open]);
+        let before = app.counts();
+
+        app.filter = Filter::InProgress;
+        app.rebuild();
+
+        assert_eq!(app.counts().percent, before.percent);
+        assert_eq!(app.counts().ready, before.ready);
     }
 
     fn app_with(tasks: Vec<Task>, selected: &str) -> App {

@@ -13,7 +13,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::app::{App, Focus, Mode};
+use crate::app::{App, Counts, Focus, Mode};
 
 /// Colour is used only where it carries meaning. Everything else is left to the
 /// terminal, so the app inherits whatever scheme the user runs -- including a
@@ -213,11 +213,21 @@ fn cap(i: usize, width: usize) -> usize {
 /// The number is shown alongside the bar on purpose: at seven cells a bar cannot
 /// distinguish 2/7 from 3/7, and for triage the exact count is the useful part.
 fn meter_spans(progress: Progress, ic: &Icons) -> Vec<Span<'static>> {
+    let mut spans = bar_spans(progress, ic, METER_WIDTH);
+    spans.push(Span::styled(
+        format!(" {}/{}", progress.done, progress.total),
+        Style::default().fg(DIM),
+    ));
+    spans
+}
+
+/// The bar alone, at any width. The header draws one too, without the fraction.
+fn bar_spans(progress: Progress, ic: &Icons, width: usize) -> Vec<Span<'static>> {
     let m = &ic.meter;
-    let bar = Bar::new(progress, METER_WIDTH, !m.partial.is_empty());
+    let bar = Bar::new(progress, width, !m.partial.is_empty());
 
     let run = |glyphs: [&'static str; 3], from: usize, len: usize| -> String {
-        (from..from + len).map(|i| glyphs[cap(i, METER_WIDTH)]).collect()
+        (from..from + len).map(|i| glyphs[cap(i, width)]).collect()
     };
 
     let mut spans = Vec::new();
@@ -251,11 +261,84 @@ fn meter_spans(progress: Progress, ic: &Icons) -> Vec<Span<'static>> {
         ));
     }
 
-    spans.push(Span::styled(
-        format!(" {}/{}", progress.done, progress.total),
-        Style::default().fg(DIM),
-    ));
     spans
+}
+
+/// The header's count block, widest layout that fits in `room` cells.
+///
+/// Dropped in order of what carries least: the bar first, then the percentage,
+/// then the words -- at which point the status glyphs stand in for them, which
+/// is why the tier is needed here. A zero `active` or `blocked` is omitted
+/// rather than shown as `0`, following dex-report.
+///
+/// Returns one group per `·`-separated part; the caller inserts the separators.
+fn header_counts(c: Counts, room: usize, ic: &Icons) -> Vec<Vec<Span<'static>>> {
+    const BAR: usize = 10;
+
+    let numbers = |worded: bool| -> Vec<Vec<Span<'static>>> {
+        let mut out: Vec<Vec<Span<'static>>> = Vec::new();
+        let mut push = |n: usize, word: &str, glyph: &'static str, fg: Color| {
+            let text = if worded {
+                format!("{n} {word}")
+            } else {
+                format!("{glyph} {n}")
+            };
+            out.push(vec![Span::styled(text, Style::default().fg(fg))]);
+        };
+        if c.active > 0 {
+            push(c.active, "active", ic.active, ACTIVE);
+        }
+        push(c.ready, "ready", ic.pending, TODO);
+        if c.blocked > 0 {
+            push(c.blocked, "blocked", ic.blocked, BLOCKED);
+        }
+        out
+    };
+
+    let pct = || -> Vec<Span<'static>> {
+        vec![Span::styled(
+            format!("{}%", c.percent),
+            Style::default().add_modifier(Modifier::BOLD),
+        )]
+    };
+
+    let bar = || -> Vec<Span<'static>> {
+        let mut s = bar_spans(
+            Progress {
+                done: c.completed,
+                active: c.active,
+                total: c.total,
+            },
+            ic,
+            BAR,
+        );
+        s.push(Span::raw(" "));
+        s.extend(pct());
+        s
+    };
+
+    // Widest first; the first that fits wins.
+    let candidates: Vec<Vec<Vec<Span<'static>>>> = vec![
+        [vec![bar()], numbers(true)].concat(),
+        [vec![pct()], numbers(true)].concat(),
+        numbers(true),
+        numbers(false),
+        vec![pct()],
+        vec![],
+    ];
+
+    for parts in candidates {
+        let w: usize = parts
+            .iter()
+            .flatten()
+            .map(|s| s.content.chars().count())
+            .sum::<usize>()
+            + parts.len() * 3; // the separators the caller will add
+        if w <= room {
+            return parts;
+        }
+    }
+    Vec::new()
 }
 
 /// The header: app identity, which store you are in, and what is outstanding.
@@ -281,7 +364,7 @@ fn draw_header(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
         return;
     }
 
-    let (pending, active) = app.counts();
+    let c = app.counts();
     let sep = || Span::styled(" · ", Style::default().fg(DIM));
 
     let mut spans = vec![Span::raw(" ")];
@@ -298,17 +381,22 @@ fn draw_header(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
         spans.push(Span::styled(format!("{} ", ic.project), Style::default().fg(DIM)));
     }
     spans.push(Span::styled(app.store_label.clone(), Style::default().fg(PLAIN)));
-    spans.push(sep());
 
-    spans.push(Span::styled(
-        format!("{pending} pending"),
-        Style::default().fg(DIM),
-    ));
-    spans.push(sep());
-    spans.push(Span::styled(
-        format!("{active} active"),
-        Style::default().fg(ACTIVE),
-    ));
+    // The right-hand sort/filter block is drawn over the same row, so the counts
+    // have to stop short of it or they collide. Everything after this point is
+    // dropped widest-first when the room is not there.
+    let reserved = app.sort.label(app.sort_reversed).chars().count()
+        + app.filter.label().chars().count()
+        + 4;
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let room = (area.width as usize)
+        .saturating_sub(used)
+        .saturating_sub(reserved);
+
+    for part in header_counts(c, room, ic) {
+        spans.push(sep());
+        spans.extend(part);
+    }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
@@ -876,12 +964,17 @@ pub fn selftest(app: &App) -> String {
     let mut out = String::new();
     let ic = &crate::icons::UNICODE;
 
-    let (pending, active) = app.counts();
+    let c = app.counts();
     let _ = writeln!(out, "label   {}", app.store_label);
     let _ = writeln!(
         out,
-        "tasks   {} ({pending} pending, {active} active)\n",
-        app.tasks.len()
+        "tasks   {} ({} pending: {} active, {} ready, {} blocked; {}% complete)\n",
+        app.tasks.len(),
+        c.pending,
+        c.active,
+        c.ready,
+        c.blocked,
+        c.percent
     );
 
     for filter in [
@@ -1121,7 +1214,86 @@ mod tests {
         let rows = render(100, 20, &crate::icons::UNICODE);
         assert!(rows[0].contains("dextui"), "header row: {:?}", rows[0]);
         assert!(rows[0].contains("demo"), "header row: {:?}", rows[0]);
-        assert!(rows[0].contains("pending"), "header row: {:?}", rows[0]);
+        // "pending" was one opaque number; it is now split into what you can
+        // actually pick up and what you cannot.
+        assert!(rows[0].contains("ready"), "header row: {:?}", rows[0]);
+    }
+
+    /// The header shares its row with the sort and filter labels drawn right-
+    /// aligned over the same area, so the counts must yield rather than collide.
+    /// They are dropped in order of what carries least: bar, then percentage,
+    /// then the words.
+    #[test]
+    fn the_header_counts_give_way_as_the_terminal_narrows() {
+        let c = Counts {
+            total: 10,
+            completed: 4,
+            pending: 6,
+            active: 1,
+            blocked: 2,
+            ready: 3,
+            percent: 40,
+        };
+        let ic = &crate::icons::UNICODE;
+
+        let width = |parts: &[Vec<Span<'static>>]| -> usize {
+            parts
+                .iter()
+                .flatten()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>()
+                + parts.len() * 3
+        };
+
+        let mut seen: Vec<usize> = Vec::new();
+        for room in (0..=60).rev() {
+            let parts = header_counts(c, room, ic);
+            let w = width(&parts);
+            assert!(w <= room, "room={room} produced {w} cells: {parts:?}");
+            seen.push(w);
+        }
+
+        // Widest at 60, and it really does shed content on the way down.
+        assert!(seen[0] > 0, "nothing drawn even at 60 cells");
+        assert_eq!(*seen.last().unwrap(), 0, "something drawn at zero room");
+        assert!(
+            seen.windows(2).all(|w| w[0] >= w[1]),
+            "width must never grow as room shrinks: {seen:?}"
+        );
+
+        // The widest layout carries the bar and the percentage; the narrowest
+        // non-empty one still names every non-zero state.
+        let widest: String = header_counts(c, 60, ic)
+            .iter()
+            .flatten()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(widest.contains("40%"), "{widest:?}");
+        assert!(widest.contains("3 ready"), "{widest:?}");
+        assert!(widest.contains("2 blocked"), "{widest:?}");
+    }
+
+    /// A zero is not worth a word. dex-report omits its zero sections too.
+    #[test]
+    fn the_header_omits_states_with_nothing_in_them() {
+        let c = Counts {
+            total: 4,
+            completed: 1,
+            pending: 3,
+            active: 0,
+            blocked: 0,
+            ready: 3,
+            percent: 25,
+        };
+        let text: String = header_counts(c, 60, &crate::icons::UNICODE)
+            .iter()
+            .flatten()
+            .map(|s| s.content.to_string())
+            .collect();
+
+        assert!(text.contains("3 ready"), "{text:?}");
+        assert!(!text.contains("active"), "nothing is active: {text:?}");
+        assert!(!text.contains("blocked"), "nothing is blocked: {text:?}");
     }
 
     #[test]
