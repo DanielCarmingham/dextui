@@ -3,6 +3,7 @@
 mod app;
 mod config;
 mod dex;
+mod editor;
 mod icons;
 mod markdown;
 mod tree;
@@ -10,6 +11,7 @@ mod ui;
 mod watch;
 
 use std::sync::mpsc::{channel, Sender};
+use std::time::Duration;
 use std::sync::Arc;
 use std::thread;
 
@@ -20,7 +22,6 @@ use dex::{store_label, Dex, Task};
 
 /// Everything the main loop reacts to, from every thread, on one channel.
 enum Msg {
-    Input(CtEvent),
     StoreChanged,
     Tasks(Result<Vec<Task>, String>),
     Ok(String),
@@ -96,18 +97,6 @@ fn main() -> std::io::Result<()> {
 
     let (tx, rx) = channel::<Msg>();
 
-    // Input thread: blocking reads forwarded onto the single event channel.
-    {
-        let tx = tx.clone();
-        thread::spawn(move || {
-            while let Ok(ev) = event::read() {
-                if tx.send(Msg::Input(ev)).is_err() {
-                    return;
-                }
-            }
-        });
-    }
-
     // Watcher. Kept alive for the whole run; dropping it stops notifications.
     let (watch_tx, watch_rx) = channel::<()>();
     let _watcher = watch::spawn(&store_dir, watch_tx);
@@ -125,47 +114,108 @@ fn main() -> std::io::Result<()> {
     let glyphs = cfg.icons;
     let mut terminal = ratatui::init();
 
+    // Polled rather than run from a reader thread. A thread blocked in
+    // `event::read()` would swallow the first keystroke intended for $EDITOR,
+    // because both it and the child would be reading the same terminal.
+    let mut dirty = true;
     while !app.should_quit {
-        terminal.draw(|f| ui::draw(f, &mut app, &glyphs))?;
+        if dirty {
+            terminal.draw(|f| ui::draw(f, &mut app, &glyphs))?;
+            dirty = false;
+        }
 
-        let Ok(msg) = rx.recv() else { break };
-        match msg {
-            Msg::Input(CtEvent::Key(key)) if key.kind == KeyEventKind::Press => {
-                handle_key(&mut app, key, &dex, &tx);
-            }
-            // Resize and everything else just falls through to a redraw.
-            Msg::Input(_) => {}
-
-            Msg::StoreChanged => {
-                if app.is_modal() {
-                    // Deferred rather than dropped; applied when the dialog closes.
-                    app.pending_refresh = true;
-                } else {
-                    refresh(&dex, &tx);
+        // The timeout bounds how long a store change waits to be noticed; it is
+        // not a redraw interval, since nothing is drawn unless something changed.
+        if event::poll(Duration::from_millis(100))? {
+            match event::read()? {
+                CtEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                    handle_key(&mut app, key, &dex, &tx);
+                    dirty = true;
                 }
+                CtEvent::Resize(..) => dirty = true,
+                _ => {}
             }
+        }
 
-            Msg::Tasks(Ok(tasks)) => app.apply_tasks(tasks),
-            // Keep the last good model rather than blanking the view.
-            Msg::Tasks(Err(e)) => app.status = format!("refresh failed: {}", flatten(&e)),
+        while let Ok(msg) = rx.try_recv() {
+            handle_msg(&mut app, msg, &dex, &tx);
+            dirty = true;
+        }
 
-            Msg::Ok(message) => {
-                app.status = message;
-                refresh(&dex, &tx);
-            }
-            Msg::Failed(e) => app.mode = Mode::Error(flatten(&e)),
-
-            Msg::CompleteRejected { id, result, error } => {
-                app.mode = Mode::ForceComplete {
-                    id,
-                    result,
-                    message: flatten(&error),
-                };
-            }
+        // Requested by `E`. Runs here, outside the draw, so the terminal can be
+        // handed over cleanly and restored afterwards.
+        if let Some(id) = app.pending_editor.take() {
+            run_editor(&mut terminal, &mut app, &id, &dex, &tx)?;
+            dirty = true;
         }
     }
 
     ratatui::restore();
+    Ok(())
+}
+
+fn handle_msg(app: &mut App, msg: Msg, dex: &Arc<Dex>, tx: &Sender<Msg>) {
+    match msg {
+        Msg::StoreChanged => {
+            if app.is_modal() {
+                // Deferred rather than dropped; applied when the dialog closes.
+                app.pending_refresh = true;
+            } else {
+                refresh(dex, tx);
+            }
+        }
+
+        Msg::Tasks(Ok(tasks)) => app.apply_tasks(tasks),
+        // Keep the last good model rather than blanking the view.
+        Msg::Tasks(Err(e)) => app.status = format!("refresh failed: {}", flatten(&e)),
+
+        Msg::Ok(message) => {
+            app.status = message;
+            refresh(dex, tx);
+        }
+        Msg::Failed(e) => app.mode = Mode::Error(flatten(&e)),
+
+        Msg::CompleteRejected { id, result, error } => {
+            app.mode = Mode::ForceComplete {
+                id,
+                result,
+                message: flatten(&error),
+            };
+        }
+    }
+}
+
+/// Leaves the TUI, runs the editor, restores the TUI, and writes back only if
+/// the text actually changed.
+fn run_editor(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    id: &str,
+    dex: &Arc<Dex>,
+    tx: &Sender<Msg>,
+) -> std::io::Result<()> {
+    let current = app
+        .by_id
+        .get(id)
+        .and_then(|t| t.description.clone())
+        .unwrap_or_default();
+
+    ratatui::restore();
+    let outcome = editor::edit(id, &current);
+    *terminal = ratatui::init();
+    terminal.clear()?;
+
+    match outcome {
+        Ok(Some(new_text)) => {
+            let id = id.to_string();
+            act(dex, tx, "description updated".into(), move |d| {
+                d.edit(&id, None, Some(&new_text))
+            });
+        }
+        Ok(None) => app.status = "description unchanged".into(),
+        Err(e) => app.mode = Mode::Error(flatten(&e.to_string())),
+    }
+
     Ok(())
 }
 
@@ -336,11 +386,17 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         KeyCode::Char('e') => {
             if let Some(t) = selected {
                 app.mode = Mode::Prompt(Prompt {
-                    title: format!("Edit: {}", t.name),
+                    title: format!("Rename: {}", t.name),
                     label: "Name".into(),
                     input: TextInput::new(&t.name),
                     pending: Pending::EditName { id: t.id.clone() },
                 });
+            }
+        }
+        // A single-line field cannot honestly edit a multi-line description.
+        KeyCode::Char('E') => {
+            if let Some(t) = selected {
+                app.pending_editor = Some(t.id.clone());
             }
         }
         KeyCode::Char('d') => {
@@ -435,22 +491,13 @@ fn submit(app: &mut App, p: Prompt, dex: &Arc<Dex>, tx: &Sender<Msg>) {
         }
 
         Pending::EditName { id } => {
-            let current = app
-                .by_id
-                .get(&id)
-                .and_then(|t| t.description.clone())
-                .unwrap_or_default();
-            app.mode = Mode::Prompt(Prompt {
-                title: p.title,
-                label: "Description".into(),
-                input: TextInput::new(&current),
-                pending: Pending::EditDescription { id, name: value },
-            });
-        }
-        Pending::EditDescription { id, name } => {
-            let shown = name.clone();
-            act(dex, tx, format!("updated {shown}"), move |d| {
-                d.edit(&id, Some(&name), Some(&value))
+            if value.trim().is_empty() {
+                close_modal(app, dex, tx);
+                return;
+            }
+            let shown = value.clone();
+            act(dex, tx, format!("renamed to {shown}"), move |d| {
+                d.edit(&id, Some(&value), None)
             });
             close_modal(app, dex, tx);
         }

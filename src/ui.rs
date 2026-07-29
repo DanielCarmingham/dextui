@@ -33,7 +33,7 @@ use crate::dex::{age, local_time, Status, Task};
 use crate::tree::{self, Progress};
 
 const SHORTCUTS: &str =
-    " s start  c complete  e edit  n new  a subtask  d del  f filter  o sort  / find  ? help";
+    " s start  c done  e rename  E edit  n new  a sub  d del  f filter  o sort  / find  ? help";
 
 /// Width of the inline progress meter, in cells.
 const METER_WIDTH: usize = 7;
@@ -654,10 +654,10 @@ tab        switch pane       s   start task
 ↑ ↓ j k    move / scroll     c   complete (prompts for result)
 → ← h l    expand / scroll   e   edit name, then description
 g / G      first / last      n   new top-level task
-w          toggle wrap       a   new subtask of selection
-o / O      sort / reverse    r   refresh now
+w          toggle wrap       E   edit description in $EDITOR
+o / O      sort / reverse    a   new subtask of selection
 /          search            d   delete (with confirmation)
-f          cycle filter
+f          cycle filter      r   refresh now
 z Z        collapse/expand all
 
 Movement follows the focused pane, shown by its brighter border. Turn wrap

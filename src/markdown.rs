@@ -90,16 +90,71 @@ pub fn render(text: &str) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Appends the two trailing spaces that CommonMark reads as a hard break.
+/// Markers that mean the leading whitespace is structural, not decorative.
 ///
-/// Skipped for anything where trailing whitespace would change meaning or where
-/// a break makes no sense:
+/// Indentation before a list item, quote, heading, table row or fence is how
+/// markdown expresses nesting; rewriting it would flatten nested lists.
+fn starts_a_block(trimmed: &str) -> bool {
+    if trimmed.starts_with("```")
+        || trimmed.starts_with('>')
+        || trimmed.starts_with('#')
+        || trimmed.starts_with('|')
+    {
+        return true;
+    }
+
+    for m in ["- ", "* ", "+ "] {
+        if trimmed.starts_with(m) {
+            return true;
+        }
+    }
+
+    let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+    digits > 0 && {
+        let rest = &trimmed[digits..];
+        rest.starts_with(". ") || rest.starts_with(") ")
+    }
+}
+
+/// Leading spaces on an ordinary line, rewritten so markdown keeps them.
 ///
-/// - inside fenced code blocks, where content is verbatim;
-/// - the fence delimiters themselves;
-/// - blank lines, which already separate paragraphs;
-/// - lines followed by a blank line, where the break is redundant;
-/// - lines that already end in two or more spaces.
+/// Markdown discards leading whitespace on a paragraph line, so plain text laid
+/// out with indentation loses its shape — and four spaces would instead become
+/// an indented code block. Non-breaking spaces are ordinary characters to the
+/// parser, so the indentation survives and cannot trigger a code block.
+///
+/// Skipped when the line begins a markdown block, where the indentation is
+/// structural: converting it would flatten nested lists.
+fn preserve_indent(line: &str) -> String {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || starts_a_block(trimmed) {
+        return line.to_string();
+    }
+
+    let indent_len = line.len() - trimmed.len();
+    if indent_len == 0 {
+        return line.to_string();
+    }
+
+    // A tab is rendered as four cells, matching how it usually reads.
+    let cells: usize = line[..indent_len]
+        .chars()
+        .map(|c| if c == '\t' { 4 } else { 1 })
+        .sum();
+
+    let mut out = String::with_capacity(line.len() + cells);
+    out.push_str(&"\u{a0}".repeat(cells));
+    out.push_str(trimmed);
+    out
+}
+
+/// Appends the two trailing spaces that CommonMark reads as a hard break, and
+/// rewrites decorative indentation so it survives.
+///
+/// The break is skipped where trailing whitespace would change meaning or where
+/// it makes no sense: inside fenced code blocks, on the fence delimiters, on
+/// blank lines, on lines already followed by a blank line, and on lines that
+/// already end in two spaces.
 fn hard_break_soft_lines(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = String::with_capacity(text.len() + lines.len() * 2);
@@ -111,7 +166,12 @@ fn hard_break_soft_lines(text: &str) -> String {
             in_fence = !in_fence;
         }
 
-        out.push_str(line);
+        if in_fence || is_fence {
+            // Verbatim: indentation inside code is meaningful.
+            out.push_str(line);
+        } else {
+            out.push_str(&preserve_indent(line));
+        }
 
         let next_is_text = lines
             .get(i + 1)
@@ -204,6 +264,66 @@ mod tests {
             src.lines().count()
         );
     }
+
+    const NBSP: char = '\u{a0}';
+
+    #[test]
+    fn plain_indented_text_keeps_its_shape() {
+        // Markdown drops leading whitespace on a paragraph line, so without this
+        // an indented plain-text description renders flush left.
+        let out = text_of(&render("Notes:\n    indented once\n        twice"));
+        let joined = out.join("\n");
+        assert!(
+            joined.contains(&format!("{}{}{}{}indented", NBSP, NBSP, NBSP, NBSP)),
+            "indentation was lost: {out:?}"
+        );
+    }
+
+    #[test]
+    fn four_spaces_no_longer_becomes_a_code_block() {
+        // CommonMark would treat this as indented code; for plain text that is
+        // wrong, and fenced blocks remain the way to ask for code.
+        let prepared = hard_break_soft_lines("text\n    four spaces");
+        assert!(!prepared.contains("\n    four"), "leading spaces survived as-is");
+    }
+
+    #[test]
+    fn nested_list_indentation_is_left_structural() {
+        // Rewriting these would flatten the nesting.
+        let prepared = hard_break_soft_lines("- a\n  - nested\n    - deeper");
+        assert!(prepared.contains("\n  - nested"), "nesting was rewritten: {prepared:?}");
+        assert!(prepared.contains("\n    - deeper"), "nesting was rewritten");
+    }
+
+    #[test]
+    fn indentation_inside_a_fence_is_untouched() {
+        let prepared = hard_break_soft_lines("```\n    let x = 1;\n```");
+        assert!(prepared.contains("\n    let x = 1;"), "code indent was rewritten");
+    }
+
+    #[test]
+    fn other_block_markers_keep_their_indentation() {
+        for line in ["  > quoted", "  # heading", "  | a | b |", "  1. first"] {
+            let prepared = hard_break_soft_lines(line);
+            assert!(
+                prepared.starts_with("  "),
+                "{line:?} had structural indentation rewritten"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tab_indent_is_preserved_as_width() {
+        let prepared = hard_break_soft_lines("text\n\tindented");
+        assert!(prepared.contains(NBSP), "tab indent was dropped");
+        assert!(!prepared.contains('\t'), "tab survived and would collapse");
+    }
+
+    #[test]
+    fn unindented_lines_are_not_touched() {
+        let prepared = hard_break_soft_lines("plain line\nanother");
+        assert!(!prepared.contains(NBSP));
+    }
 }
 
 
@@ -259,4 +379,3 @@ mod style_checks {
         assert!(Adaptive.code().bg.is_none());
     }
 }
-

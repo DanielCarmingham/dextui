@@ -66,7 +66,6 @@ pub enum Pending {
     CreateName { parent: Option<String> },
     CreateDescription { parent: Option<String>, name: String },
     EditName { id: String },
-    EditDescription { id: String, name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +112,9 @@ pub struct App {
     pub status: String,
     pub store_label: String,
     pub should_quit: bool,
+    /// Set by `E`; the main loop picks it up and hands off to $EDITOR, which
+    /// cannot happen mid-draw because the terminal has to be released first.
+    pub pending_editor: Option<String>,
     pub focus: Focus,
     /// (vertical, horizontal) offset into the detail pane.
     pub detail_scroll: (u16, u16),
@@ -145,6 +147,7 @@ impl App {
             status: String::new(),
             store_label,
             should_quit: false,
+            pending_editor: None,
             focus: Focus::Tree,
             detail_scroll: (0, 0),
             wrap: cfg.wrap,

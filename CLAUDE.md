@@ -275,10 +275,39 @@ Refusing to start over a typo in a preferences file would be the worse failure.
 Unknown *keys* are an error (`deny_unknown_fields`) rather than a silent no-op,
 so a misspelled setting tells you instead of pretending to work.
 
-Soft line breaks are **not** configurable: a single newline is always a line
-break. Descriptions are frequently not markdown at all, and plain text should
+Soft line breaks and indentation are **not** configurable: a single newline is
+always a line break, and leading whitespace on an ordinary line is rewritten to
+non-breaking spaces so markdown keeps it — which also stops four spaces becoming
+an indented code block. Lines that begin a markdown block (list, quote, heading,
+table, fence) keep their real indentation, since there it is structural and
+rewriting it would flatten nested lists. Descriptions are frequently not markdown at all, and plain text should
 survive as written — joining lines was a regression from the tui-markdown swap,
 and a switch to re-enable a regression has no use.
+
+## Editing, and why input is polled
+
+`e` renames (a single line, so a prompt is honest). `E` hands the **description**
+to `$EDITOR` — `VISUAL`, then `EDITOR`, then `vi`. The value may carry arguments
+(`code -w`), so it is split rather than run through a shell.
+
+This is why the main loop **polls** for input instead of running a reader thread:
+a thread blocked in `event::read()` would swallow the first keystroke meant for
+the editor, since both it and the child read the same terminal. Nothing is drawn
+unless something changed, so the poll timeout bounds how quickly a store change
+is noticed rather than acting as a frame rate.
+
+The old flow prompted for the description in a one-line field. A multi-line
+description showed only its first line while the cursor sat at the end of the
+last, so typing appended to text you could not see.
+
+Returning unchanged text writes nothing, so opening the editor and quitting does
+not bump `updated_at`. A trailing newline alone does not count as a change —
+editors add one habitually.
+
+**Render-time transforms must never round-trip into a write.** Soft breaks and
+indentation preservation build a local string inside `markdown::render`; the
+edit path reads `by_id[…].description`, the raw task from dex. A round-trip test
+proves the stored bytes are identical after an edit that changes nothing.
 
 ## Sorting
 
