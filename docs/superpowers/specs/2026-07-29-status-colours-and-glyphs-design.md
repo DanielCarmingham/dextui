@@ -46,9 +46,9 @@ the foreground of the row.
 | state | nerd | unicode | ascii |
 | --- | --- | --- | --- |
 | todo | `󰜌` md-rhombus_outline U+F070C | `◇` U+25C7 | `-` |
-| in progress | `` fa-play U+F04B | `►` U+25BA | `>` |
+| in progress | `` fa-play U+F04B | `►` U+25BA | `>` |
 | done | `󰜋` md-rhombus U+F070B | `◆` U+25C6 | `x` |
-| blocked | `` fa-ban U+F05E | `×` U+00D7 | `!` |
+| blocked | `` fa-ban U+F05E | `×` U+00D7 | `!` |
 
 Hollow diamond fills in as the task completes, so the state change is carried by
 the shape itself rather than by colour alone. In-progress deliberately breaks
