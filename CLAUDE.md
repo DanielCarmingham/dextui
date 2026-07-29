@@ -261,7 +261,17 @@ precedence so both behave the same way in the same repository:
 | global | `~/.config/dex-tui/config.toml` |
 | project | `.dex-tui.toml` at the git root |
 
-`--config` prints both paths, whether each exists, and a commented example. A
+`--config` prints both paths and whether each exists; `--config-init` writes the
+template (refusing to clobber without `--force`); `,` opens the global file in
+`$EDITOR`, creating it from the template first and reloading on save.
+
+Reloading is the one moment the file's values are meant to override the runtime
+toggles — otherwise saving an edit would appear to do nothing.
+
+Arguments are parsed properly rather than scanned with `.any()`. An unknown flag
+is an **error**, not a fall-through into launching the TUI: `--help` used to be
+ignored, and outside a terminal it panicked trying to initialise one. A test
+walks the usage text and asserts every flag it advertises is actually accepted. A
 project file need only mention what it changes; everything else falls through to
 the global file. A bad value in one layer is reported and leaves the layer
 beneath intact, rather than resetting to the built-in default.

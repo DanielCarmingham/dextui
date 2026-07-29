@@ -13,7 +13,7 @@ A terminal UI for browsing and triaging [dex](https://dex.rip/) tasks.
 ││ └  ○ Write the docs                     ││id        9pljm7cu                         │
 │└  ○ Long task title …                    ││blocks    Write the docs                   │
 └──────────────────────────────────────────┘└───────────────────────────────────────────┘
- s start  c done  e rename  E edit  n new  a sub  d del  f filter  o sort  / find  ? help
+ s start  c done  e rename  E edit  n new  a sub  d del  f filter  o sort  , config  ? help
 ```
 
 Two panes: the task tree on the left, full detail on the right. It **refreshes
@@ -55,6 +55,7 @@ While developing, `cargo run` preserves your working directory the same way.
 | `o` `O` | cycle sort / reverse it |
 | `w` | toggle wrapping |
 | `r` | refresh now |
+| `,` | edit the config in `$EDITOR` (created if missing, reloaded on save) |
 | `?` | help |
 | `q` `esc` | quit |
 
@@ -89,8 +90,19 @@ which `h`/`l` reach the rest.
 
 ## Configuration
 
-Optional. Both files are **read-only** — `w`, `o`, `O` and `f` change only the
-current run, so nothing you toggle is written back over a file you have edited.
+Optional, and there are three ways to get a file to edit:
+
+```bash
+dex-tui --config-init          # write the template to the global config
+dex-tui --config               # print it instead, with both resolved paths
+```
+
+or press `,` inside the app, which opens the global file in `$EDITOR`, creating
+it from the template first if it does not exist, and reloading it when you save.
+
+Both files are **read-only** to the app otherwise — `w`, `o`, `O` and `f` change
+only the current run, so nothing you toggle is written back over a file you have
+edited.
 
 Layered **defaults < global < project < environment**:
 
@@ -114,8 +126,21 @@ A project file need only mention what it changes:
 wrap = false
 ```
 
-`dex-tui --config` prints both paths, whether each exists, and a commented
-example. `DEXTUI_ICONS` overrides the icon tier for a single run.
+`dex-tui --config` prints both paths and whether each exists — the first thing
+to check when a setting seems not to apply. `DEXTUI_ICONS` overrides the icon
+tier for a single run.
+
+## Command line
+
+```
+-h, --help          Show help
+-V, --version       Show the version
+    --config        Print the config paths and a commented template
+    --config-init   Write the template to the global config file
+    --force         With --config-init, overwrite an existing file
+    --icons         List the glyph tiers
+    --selftest      Print the data pipeline as text and exit (no TUI)
+```
 
 ## Descriptions
 

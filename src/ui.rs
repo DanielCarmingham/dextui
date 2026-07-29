@@ -33,7 +33,7 @@ use crate::dex::{age, local_time, Status, Task};
 use crate::tree::{self, Progress};
 
 const SHORTCUTS: &str =
-    " s start  c done  e rename  E edit  n new  a sub  d del  f filter  o sort  / find  ? help";
+    " s start  c done  e rename  E edit  n new  a sub  d del  f filter  o sort  , config  ? help";
 
 /// Width of the inline progress meter, in cells.
 const METER_WIDTH: usize = 7;
@@ -669,7 +669,8 @@ w          toggle wrap       n   new top-level task
 o / O      sort / reverse    a   new subtask of selection
 /          search            d   delete (with confirmation)
 f          cycle filter      r   refresh now
-z Z        collapse/expand all       q  quit
+,          edit config       q   quit
+z Z        collapse/expand all
 
 Movement follows the focused pane, shown by its brighter border. Turn wrap
 off (w) to scroll a wide table sideways -- wrapping removes the overflow

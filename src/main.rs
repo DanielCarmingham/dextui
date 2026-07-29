@@ -38,7 +38,132 @@ enum Msg {
     },
 }
 
+const USAGE: &str = "\
+dex-tui — browse and triage dex tasks
+
+USAGE:
+    dex-tui [OPTIONS]
+
+Runs against the dex store for the current directory.
+
+OPTIONS:
+    -h, --help          Show this help
+    -V, --version       Show the version
+        --config        Print the config file paths and a commented template
+        --config-init   Write the template to the global config file
+        --force         With --config-init, overwrite an existing file
+        --icons         List the glyph tiers
+        --selftest      Print the data pipeline as text and exit (no TUI)
+
+CONFIGURATION:
+    Layered defaults < global < project < environment.
+      global    ~/.config/dex-tui/config.toml
+      project   .dex-tui.toml at the git root
+
+    Press , inside the app to open the global file in $EDITOR; it is created
+    from the template if it does not exist, and reloaded when you save.
+";
+
+#[derive(Debug)]
+enum Command {
+    Run,
+    Help,
+    Version,
+    PrintConfig,
+    InitConfig { force: bool },
+    Icons,
+    SelfTest,
+}
+
+/// Hand-rolled rather than reaching for a parser crate: the surface is six
+/// flags. The point is that an unrecognised one is an error, not a silent
+/// fall-through into launching the TUI.
+fn parse_args() -> Result<Command, String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    parse(&args)
+}
+
+fn parse(args: &[String]) -> Result<Command, String> {
+    let force = args.iter().any(|a| a == "--force");
+    let mut command = Command::Run;
+
+    for arg in args {
+        command = match arg.as_str() {
+            "-h" | "--help" => Command::Help,
+            "-V" | "--version" => Command::Version,
+            "--config" => Command::PrintConfig,
+            "--config-init" => Command::InitConfig { force },
+            "--icons" => Command::Icons,
+            "--selftest" => Command::SelfTest,
+            "--force" => continue,
+            other => return Err(format!("unknown option {other:?}")),
+        };
+    }
+
+    Ok(command)
+}
+
 fn main() -> std::io::Result<()> {
+    let command = match parse_args() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("dex-tui: {e}\n");
+            eprint!("{USAGE}");
+            std::process::exit(2);
+        }
+    };
+
+    // Handled before touching dex or the terminal, so they work anywhere.
+    match command {
+        Command::Help => {
+            print!("{USAGE}");
+            return Ok(());
+        }
+        Command::Version => {
+            println!("dex-tui {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Command::PrintConfig => {
+            let mark = |p: Option<std::path::PathBuf>| match p {
+                Some(p) => {
+                    let state = if p.exists() { "present" } else { "not present" };
+                    format!("{}  ({state})", p.display())
+                }
+                None => "(could not resolve)".to_string(),
+            };
+            println!("# global   {}", mark(config::path()));
+            println!("# project  {}\n", mark(config::project_path()));
+            print!("{}", config::EXAMPLE);
+            return Ok(());
+        }
+        Command::InitConfig { force } => match config::init(force) {
+            Ok(p) => {
+                println!("wrote {}", p.display());
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("dex-tui: {e}");
+                std::process::exit(1);
+            }
+        },
+        Command::Icons => {
+            println!("Set with icons = \"...\" in the config, or DEXTUI_ICONS\n");
+            for i in icons::ALL {
+                println!(
+                    "  {:<9} {}  {}{}{}{}",
+                    icons::name(i.tier),
+                    icons::about(i.tier),
+                    i.pending,
+                    i.active,
+                    i.done,
+                    i.blocked,
+                );
+            }
+            return Ok(());
+        }
+        Command::Run | Command::SelfTest => {}
+    }
+
     let dex = Arc::new(Dex::real());
 
     // Preflight before taking over the terminal, so a failure prints plainly
@@ -62,43 +187,12 @@ fn main() -> std::io::Result<()> {
 
     let (cfg, config_problem) = config::load();
 
-    if std::env::args().any(|a| a == "--config") {
-        let mark = |p: Option<std::path::PathBuf>| match p {
-            Some(p) => {
-                let state = if p.exists() { "present" } else { "not present" };
-                format!("{}  ({state})", p.display())
-            }
-            None => "(could not resolve)".to_string(),
-        };
-        println!("# global   {}", mark(config::path()));
-        println!("# project  {}\n", mark(config::project_path()));
-        print!("{}", config::EXAMPLE);
-        return Ok(());
-    }
-
     let mut app = App::new(tasks, store_label(&store_dir), cfg);
     if let Some(msg) = config_problem {
         app.status = format!("config: {msg}");
     }
 
-    if std::env::args().any(|a| a == "--icons") {
-        println!("Set with DEXTUI_ICONS=<tier>\n");
-        for i in icons::ALL {
-            println!(
-                "  {:<9} {}  {}{}{}{}  {}",
-                icons::name(i.tier),
-                icons::about(i.tier),
-                i.pending,
-                i.active,
-                i.done,
-                i.blocked,
-                i.expanded,
-            );
-        }
-        return Ok(());
-    }
-
-    if std::env::args().any(|a| a == "--selftest") {
+    if matches!(command, Command::SelfTest) {
         println!("store   {store_dir}");
         print!("{}", ui::selftest(&app));
         return Ok(());
@@ -120,7 +214,7 @@ fn main() -> std::io::Result<()> {
         });
     }
 
-    let glyphs = cfg.icons;
+    let mut glyphs = cfg.icons;
     let mut terminal = ratatui::init();
     // ratatui::init only sets raw mode and the alternate screen; mouse
     // reporting is opt-in. While captured, the terminal stops doing its own
@@ -163,6 +257,11 @@ fn main() -> std::io::Result<()> {
         // handed over cleanly and restored afterwards.
         if let Some(id) = app.pending_editor.take() {
             run_editor(&mut terminal, &mut app, &id, &dex, &tx)?;
+            dirty = true;
+        }
+
+        if std::mem::take(&mut app.pending_config_edit) {
+            edit_config(&mut terminal, &mut app, &mut glyphs)?;
             dirty = true;
         }
     }
@@ -246,6 +345,51 @@ fn handle_msg(app: &mut App, msg: Msg, dex: &Arc<Dex>, tx: &Sender<Msg>) {
             };
         }
     }
+}
+
+/// Opens the config file in $EDITOR and reloads it, creating it from the
+/// template first if it does not exist yet.
+fn edit_config(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    glyphs: &mut icons::Icons,
+) -> std::io::Result<()> {
+    let path = match config::path_for_editing() {
+        Ok(p) => p,
+        Err(e) => {
+            app.mode = Mode::Error(e);
+            return Ok(());
+        }
+    };
+
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    ratatui::restore();
+    let outcome = editor::edit("config", &current);
+    *terminal = ratatui::init();
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
+    terminal.clear()?;
+
+    match outcome {
+        Ok(Some(text)) => {
+            if let Err(e) = std::fs::write(&path, format!("{text}\n")) {
+                app.mode = Mode::Error(format!("{}: {e}", path.display()));
+                return Ok(());
+            }
+            let (cfg, problem) = config::load();
+            *glyphs = cfg.icons;
+            app.apply_config(cfg);
+            app.status = match problem {
+                Some(p) => format!("config reloaded, but: {p}"),
+                None => "config reloaded".into(),
+            };
+        }
+        Ok(None) => app.status = "config unchanged".into(),
+        Err(e) => app.mode = Mode::Error(flatten(&e.to_string())),
+    }
+
+    Ok(())
 }
 
 /// Leaves the TUI, runs the editor, restores the TUI, and writes back only if
@@ -411,6 +555,8 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         }
         KeyCode::Char('r') => refresh(dex, tx),
         KeyCode::Char('?') => app.mode = Mode::Help,
+        // Reuses the $EDITOR machinery rather than building a settings form.
+        KeyCode::Char(',') => app.pending_config_edit = true,
 
         KeyCode::Char('n') => {
             app.mode = Mode::Prompt(Prompt {
@@ -590,6 +736,73 @@ fn submit(app: &mut App, p: Prompt, dex: &Arc<Dex>, tx: &Sender<Msg>) {
 
             close_modal(app, dex, tx);
             app.status = "completing…".into();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(args: &[&str]) -> Result<Command, String> {
+        parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn no_arguments_runs_the_tui() {
+        assert!(matches!(parsed(&[]), Ok(Command::Run)));
+    }
+
+    #[test]
+    fn an_unknown_option_is_an_error_not_a_silent_launch() {
+        // It used to fall through and start the TUI, so `--help` appeared to do
+        // nothing -- or panicked, when there was no terminal to initialise.
+        let err = parsed(&["--nonsense"]).unwrap_err();
+        assert!(err.contains("--nonsense"), "{err}");
+    }
+
+    #[test]
+    fn help_and_version_have_short_forms() {
+        assert!(matches!(parsed(&["-h"]), Ok(Command::Help)));
+        assert!(matches!(parsed(&["--help"]), Ok(Command::Help)));
+        assert!(matches!(parsed(&["-V"]), Ok(Command::Version)));
+        assert!(matches!(parsed(&["--version"]), Ok(Command::Version)));
+    }
+
+    #[test]
+    fn force_applies_to_config_init_in_either_order() {
+        assert!(matches!(
+            parsed(&["--config-init", "--force"]),
+            Ok(Command::InitConfig { force: true })
+        ));
+        assert!(matches!(
+            parsed(&["--force", "--config-init"]),
+            Ok(Command::InitConfig { force: true })
+        ));
+    }
+
+    #[test]
+    fn config_init_without_force_does_not_overwrite() {
+        assert!(matches!(
+            parsed(&["--config-init"]),
+            Ok(Command::InitConfig { force: false })
+        ));
+    }
+
+    #[test]
+    fn every_option_in_the_usage_text_is_actually_accepted() {
+        // The usage block is the only place these are advertised, so a flag
+        // documented but not handled would be a silent lie.
+        for line in USAGE.lines() {
+            for word in line.split_whitespace() {
+                let flag = word.trim_end_matches(',');
+                if flag.starts_with("--") && flag.len() > 2 {
+                    assert!(
+                        parsed(&[flag]).is_ok(),
+                        "usage advertises {flag} but the parser rejects it"
+                    );
+                }
+            }
         }
     }
 }

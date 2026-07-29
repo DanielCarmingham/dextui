@@ -115,6 +115,8 @@ pub struct App {
     /// Set by `E`; the main loop picks it up and hands off to $EDITOR, which
     /// cannot happen mid-draw because the terminal has to be released first.
     pub pending_editor: Option<String>,
+    /// Set by `,`; the main loop opens the config file in $EDITOR and reloads.
+    pub pending_config_edit: bool,
     /// Width of the tree pane as a percentage. Dragged with the mouse.
     pub split_percent: u16,
     pub dragging_split: bool,
@@ -160,6 +162,7 @@ impl App {
             store_label,
             should_quit: false,
             pending_editor: None,
+            pending_config_edit: false,
             split_percent: 45,
             dragging_split: false,
             divider_x: 0,
@@ -454,6 +457,19 @@ impl App {
         if let Some(id) = rows.get(index) {
             self.select(Some(id.clone()));
         }
+    }
+
+    /// Applies a freshly loaded config to a running session.
+    ///
+    /// Everything the file controls is a *starting* value, so a reload after an
+    /// edit is the one moment those values are meant to replace what the runtime
+    /// toggles have done — otherwise saving a change would appear to do nothing.
+    pub fn apply_config(&mut self, cfg: Config) {
+        self.sort = cfg.sort;
+        self.sort_reversed = cfg.sort_reversed;
+        self.filter = cfg.filter;
+        self.wrap = cfg.wrap;
+        self.rebuild();
     }
 
     pub fn toggle_focus(&mut self) {

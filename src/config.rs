@@ -180,7 +180,8 @@ pub fn parse_icons(v: &str) -> Option<Icons> {
     }
 }
 
-/// Printed by `--config` so there is something to copy rather than invent.
+/// Printed by `--config` and written by `--config-init`, so there is something
+/// to start from rather than invent.
 pub const EXAMPLE: &str = r#"# Starting values only. w / o / O / f still toggle freely at runtime; nothing
 # is written back, so this file stays exactly as you left it.
 #
@@ -204,6 +205,38 @@ wrap = true
 # nerd | unicode | ascii   (DEXTUI_ICONS overrides this for one run)
 icons = "unicode"
 "#;
+
+/// Creates the config file from the template.
+///
+/// Refuses to overwrite: a preferences file is the sort of thing people edit and
+/// then forget about, and silently replacing one would be the worst outcome of a
+/// command whose whole job is convenience.
+pub fn init(force: bool) -> Result<PathBuf, String> {
+    let p = path().ok_or("could not resolve a config path (is HOME set?)")?;
+
+    if p.exists() && !force {
+        return Err(format!(
+            "{} already exists; pass --force to overwrite it",
+            p.display()
+        ));
+    }
+
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    std::fs::write(&p, EXAMPLE).map_err(|e| format!("{}: {e}", p.display()))?;
+    Ok(p)
+}
+
+/// Ensures a file exists to open in an editor, creating it from the template on
+/// first use so `,` works before any config has been written.
+pub fn path_for_editing() -> Result<PathBuf, String> {
+    let p = path().ok_or("could not resolve a config path (is HOME set?)")?;
+    if !p.exists() {
+        init(false)?;
+    }
+    Ok(p)
+}
 
 #[cfg(test)]
 mod tests {
