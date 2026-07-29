@@ -663,17 +663,20 @@ fn draw_help(frame: &mut Frame) {
     const HELP: &str = "\
 tab        switch pane       s   start task
 ↑ ↓ j k    move / scroll     c   complete (prompts for result)
-→ ← h l    expand / scroll   e   edit name, then description
-g / G      first / last      n   new top-level task
-w          toggle wrap       E   edit description in $EDITOR
+→ ← h l    expand / scroll   e   rename
+g / G      first / last      E   edit description in $EDITOR
+w          toggle wrap       n   new top-level task
 o / O      sort / reverse    a   new subtask of selection
 /          search            d   delete (with confirmation)
 f          cycle filter      r   refresh now
-z Z        collapse/expand all
+z Z        collapse/expand all       q  quit
 
 Movement follows the focused pane, shown by its brighter border. Turn wrap
 off (w) to scroll a wide table sideways -- wrapping removes the overflow
 there would otherwise be to scroll to.
+
+Mouse: drag the divider to resize, wheel scrolls the pane under the pointer,
+click selects. Hold Shift to select text, as capture is enabled.
 
 The view refreshes itself whenever the dex store changes, including when
 another process or agent edits it. Your selection, expansion and any open

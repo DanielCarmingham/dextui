@@ -1,5 +1,9 @@
 # dex-tui
 
+Conventions and hard-won gotchas for anyone changing this code. For what it is,
+how to install it and what the keys do, see [README.md](README.md) — user-facing
+documentation belongs there, not here.
+
 A terminal UI for browsing and triaging [dex](https://dex.rip/) tasks. Rust,
 with [ratatui](https://ratatui.rs) + crossterm. Two panes: task tree on the left,
 full task detail on the right, with a search/filter bar on top.
