@@ -3,15 +3,15 @@
 A terminal UI for browsing and triaging [dex](https://dex.rip/) tasks.
 
 ```
- dextui · my-project · 8 pending · 2 active            priority  [ all  PENDING  active ]
+ dextui · my-project · ██████▍░░░ 62% · 2 active · 5 ready · 1 blocked   priority  [ all  PENDING  active ]
 ┌──────────────────────────────────────────┐┌───────────────────────────────────────────┐
-│├▼ ◐ Ship v1                   ▓▒▒░░░░ 1/7││Wire up the file watcher                   │
-││ ├▼ ◐ Core data layer         ▒▒▒▒▒▒▒ 0/2││◐ in progress · started 4h ago · priority 1│
-││ │ ├  ◐ Wire up the watcher           4h ││                                           │
-││ │ └  ○ Parse the JSON                   ││▓▒▒░░░░ 1/7  subtasks done                 │
-││ ├  ✓ Keybindings                        ││                                           │
-││ └  ○ Write the docs                     ││id        9pljm7cu                         │
-│└  ○ Long task title …                    ││blocks    Write the docs                   │
+│┃├▼ ► Ship v1                   ██▌░░░░ 1/7││Wire up the file watcher                   │
+││ ├▼ ► Core data layer          ░░░░░░░ 0/2││► in progress · started 4h ago · priority 1│
+││ │ ├  ► Wire up the watcher           4h ││                                           │
+││ │ └  ◇ Parse the JSON                   ││██▌░░░░ 1/7  subtasks done                 │
+││ ├  ◆ Keybindings                        ││                                           │
+││ └  × Write the docs                     ││id        9pljm7cu                         │
+│└  ◇ Long task title …                    ││blocks    Write the docs                   │
 └──────────────────────────────────────────┘└───────────────────────────────────────────┘
  s start  c done  e rename  E edit  n new  a sub  d del  f filter  o sort  , config  ? help
 ```
@@ -77,11 +77,22 @@ does its own text selection — hold **Shift** to select and copy as usual.
 
 ## Reading the display
 
-- `○` pending `◐` in progress `✓` done `×` blocked
-- `▓▒░ 1/7` on a parent: subtree progress — done, in flight, untouched — from
+- **`◇` todo · `►` in progress · `◆` done · `×` blocked.** The hollow shape fills
+  in as a task completes; in progress breaks the family because it is the one
+  state that is *happening*, and it breathes gently so you can find it. Colours
+  match the `dex` CLI exactly — yellow, blue, green, red — so the two tools never
+  disagree about what a task is.
+- `██▌░░░░ 1/7` on a parent: subtree progress — done, in flight, untouched — from
   the **unfiltered** task list, so hiding completed tasks does not zero it.
 - `4h` on an in-progress task: how long it has been in flight. Only in-progress
   tasks get one, so it stays a signal rather than noise.
+- The **header** counts what you can act on: `2 active · 5 ready · 1 blocked`.
+  *Ready* means unstarted with nothing in its way. A parent with unfinished
+  children is neither ready nor blocked — you cannot pick up an epic — so those
+  three numbers deliberately do not add up to the total outstanding. Narrow the
+  terminal and the bar, then the percentage, then the words drop away in turn.
+- The selected row is marked by a `┃` in the left margin rather than a
+  highlight bar, so the status colours stay readable on it.
 
 **Wrapping vs wide tables.** Wrapping and sideways scrolling are mutually
 exclusive: wrapping removes the overflow there would be anything to scroll to.
@@ -125,7 +136,12 @@ sort_reversed = false   # flips it: newest→oldest, updated→stalest
 filter = "pending"      # pending | active | all
 wrap = true
 icons = "unicode"       # nerd | unicode | ascii
+animate = true          # breathe the in-progress marker
 ```
+
+Set `animate = false` if you would rather nothing moved. dextui only redraws
+when something changes, so with it off the app costs nothing at all while you
+are not touching it — and with it on, only while a task is actually running.
 
 A project file need only mention what it changes:
 

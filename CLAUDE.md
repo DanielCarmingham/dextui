@@ -44,10 +44,11 @@ and to check behaviour where no interactive terminal exists.
 
 | File | Purpose |
 | --- | --- |
-| `src/dex.rs` | The only module that knows dex exists: model, argv, JSON. |
+| `src/dex.rs` | The only module that knows dex exists: model, argv, JSON, status. |
 | `src/icons.rs` | Glyph sets in three tiers (nerd / unicode / ascii). |
+| `src/theme.rs` | Every colour, and nothing else. |
 | `src/tree.rs` | Flat list → hierarchy, search and status filtering, row prefixes. |
-| `src/app.rs` | All view state, plus the refresh-survival rules. |
+| `src/app.rs` | All view state, the refresh-survival rules, and the header counts. |
 | `src/ui.rs` | Immediate-mode rendering, and `selftest`. |
 | `src/watch.rs` | Debounced FS events plus the safety poll. |
 | `src/pulse.rs` | The animation clock, and the guard on its idle cost. |
@@ -67,8 +68,25 @@ These were all discovered the hard way; do not re-derive them.
   snake_case, but `blockedBy` and `blocks` are camelCase — in the same object.
   serde matches the snake_case ones on field names; the others need an explicit
   `#[serde(rename)]`.
-- **There is no status field.** `Status` is derived: `completed` true means
-  completed, otherwise a non-null `started_at` means in progress.
+- **There is no status field.** `Status` is derived, in dex's own precedence
+  (`cli/status.js`): `completed` → `Completed`; else `started_at` set →
+  `InProgress`; else an incomplete blocker → `Blocked`; else `Pending`. A started
+  task that is *also* blocked reads as in progress, because work is happening on
+  it — that is the more useful signal, and it is what dex does.
+- **`blockedBy` is never cleared when a blocker finishes.** So the list alone
+  says nothing: blockers must be resolved against the rest of the set and
+  checked. `dex::is_blocked` mirrors dex's `isBlocked` exactly — ids absent from
+  the set are skipped, as are completed blockers. Treating `!blocked_by
+  .is_empty()` as blocked was a real bug: tasks showed the red marker for the
+  rest of their lives. Only *direct* blockers count, which also means a blocking
+  cycle in a hand-edited store cannot recurse.
+- **dex contradicts itself about "blocked".** `cli/status.js` counts a parent
+  with unfinished children as blocked; `dex list --blocked` counts only
+  incomplete blockers. Measured across four real stores, five of the six tasks
+  `dex status` calls blocked have no blocker at all — two of those stores hold no
+  blocking relationship anywhere and it still reported some. We follow
+  `dex list --ready` / `--blocked`, so "blocked" means one thing in the header,
+  the row glyph, the detail pane and dex-report alike. See `App::counts`.
 - **`dex delete` prompts interactively** when a task has subtasks, which would
   hang a TUI with no way to answer. `Dex::delete` always passes `--force`, behind
   our own confirmation dialog.
@@ -120,17 +138,42 @@ selection, collapse an expanded node, or interrupt typing.
 ## Display conventions
 
 - **Progress rollups** appear on any task with descendants, as a three-state
-  meter plus the raw fraction: done, in flight, untouched. Computed from the
-  **unfiltered** task list, so hiding completed tasks does not make every meter
-  read `0/n`. Leaves get no meter, because a rollup over nothing is meaningless.
+  meter plus the raw fraction: done (green), in flight (blue), untouched (dim) —
+  the same colours the status glyphs use, and dex-report's stacked bar. Computed
+  from the **unfiltered** task list, so hiding completed tasks does not make
+  every meter read `0/n`. Leaves get no meter, because a rollup over nothing is
+  meaningless.
+
+  The arithmetic is in `Bar`, shared by every tier; only the glyph table differs.
+  Three rules earned their tests the hard way:
+
+  - **A run that does not exist is never drawn.** Whole-cell snapping can push
+    the bar past the done run's own rounding, and handing the leftover to
+    `active` painted an in-flight cell for a task with nothing started — the
+    meter contradicting the very glyph beside it. 987 inputs under total 199 hit
+    this, and only in tiers without partial glyphs, so the default tier hid it.
+  - **A non-zero run always gets a whole cell**, never a 1/8 sliver. One finished
+    subtask out of a hundred is the most useful thing a meter can say.
+  - **The sub-cell remainder sits at the outer edge only**, and the done→active
+    boundary always snaps to a whole cell. A true sub-cell boundary would need
+    `fg=green` on `bg=blue`, a background the colour policy forbids and which the
+    selected row would invert.
+
+- **The header splits "pending"** into `N active · N ready · N blocked`, each in
+  its state's colour, with an overall bar and percentage when there is room. It
+  degrades by what carries least: bar, then percentage, then the words — at which
+  point the status glyphs stand in. A zero `active` or `blocked` is omitted
+  rather than drawn as `0`. `ready + blocked` deliberately does **not** sum to
+  `pending`; see `App::counts`.
 - **Age** appears only on in-progress tasks (`47m`, `21h`, `3d`). Putting one on
   every row would bury the signal it exists to give. Under a minute is `now`, and
   renders as "just now" rather than "now ago".
 - **Colour lives entirely in `src/theme.rs`.** `markdown` and `tree` describe what
-  things *are*; `ui.rs` is the only module that decides how they look. Prefer
-  named/indexed colours, which adapt to the user's terminal theme -- `Color::Rgb`
-  looks identical everywhere but ignores their scheme and assumes a dark
-  background (that trade-off is why `ember` exists and is not the default).
+  things *are*; `ui.rs` is the only module that decides how they look. Use only
+  `Color::Reset` and the ANSI-16 names, which the user's terminal remaps —
+  `Indexed` and `Rgb` are fixed values that cannot follow a theme that changes
+  under the running app. A test walks `theme::ALL` and enforces this, so a new
+  colour must be added to that list or it is unguarded.
 - **Descriptions render through `tui-markdown`**, not a hand-rolled parser. It
   was swapped in because tables need column measurement and terminal display
   widths; the old parser skipped them, so tables appeared as raw `|---|` rows.
@@ -172,8 +215,28 @@ list (parent chain, progress rollups).
 ## Colour policy: the terminal owns it
 
 There is no theme system, on purpose. Colour appears only where it carries
-meaning — in-progress, done, blocked — and everything else is left to the
+meaning — todo, in-progress, done, blocked — and everything else is left to the
 terminal, so the app inherits whatever scheme the user runs.
+
+**The four state colours are dex's own**, taken from `cli/formatting.js`
+(`getTaskStatusDisplay`) and `~/.local/bin/dex-report`:
+
+| state | | ANSI |
+| --- | --- | --- |
+| todo | yellow | 33 |
+| in progress | blue | 34 |
+| done | green | 32 |
+| blocked | red | 31 |
+
+That is not cosmetic. The two tools are used on the same tasks in the same
+directory, often on the same screen, so disagreeing made them *contradictory*
+rather than merely different — yellow meant "not started" in dex and "running"
+here.
+
+**Colour lands on the status glyph only, never the task name.** That is what
+keeps a mostly-unstarted tree from becoming a wall of yellow, and it is what dex
+itself does (`cc($gcol; $g)` in dex-report wraps the glyph and stops). Tree
+connectors stay dimmed so the coloured marker reads as the row's foreground.
 
 That is not just taste. This machine's Ghostty is configured
 `theme = light:"...",dark:"..."`, so the terminal follows the macOS appearance
@@ -183,7 +246,7 @@ the default assumed dark, which produced two bugs invisible in dark mode:
 `title: Color::White` rendered the task title white on white, and a fixed dark
 selection band left the selected row dark-on-dark.
 
-The rules, in `src/ui.rs`:
+The rules — values in `src/theme.rs`, placement in `src/ui.rs`:
 
 - Use only `Color::Reset` and the ANSI-16 names. The terminal remaps those per
   mode. `Indexed`/`Rgb` are fixed values and cannot adapt.
@@ -265,6 +328,31 @@ print(0x25BC in cm)"
 
 Everything in `icons.rs` was verified this way and measures exactly 1.00 cells.
 
+**Braille is unusable here, and this is the most tempting mistake.** FiraCode
+Nerd Font contains *no braille at all*, so `⠋⠙⠹` — what `ora`, and therefore
+yarn and npm, use for their spinners — falls back to **Apple Braille at 1.11
+cells**. It looks fine in yarn because the spinner is one transient glyph at the
+end of a line with nothing aligned beneath it. Here the status marker sits in a
+column, so an 11%-oversized glyph makes the whole tree jitter as tasks start and
+stop. Do not reach for it.
+
+**Nerd Fonts 3.3.0 added two sets worth knowing**, both native at exactly 1.00
+cells:
+
+- **U+EE00–EE05, progress-bar segments** — open left cap / mid / right cap, then
+  filled left / mid / right. Composed by position, they give the nerd tier a
+  properly capped, seamless meter rather than seven stamped cells. In use.
+- **U+EE06–EE0B, a real 6-frame arc spinner.** Deliberately **unused**: it exists
+  in the nerd tier alone, and a second animation model for one tier is not worth
+  two code paths. Motion is carried by colour instead, so the glyph never changes
+  shape and the column cannot jitter.
+
+**Write nerd glyphs as Rust escapes** (`"\u{f04b}"`), never literal characters.
+Codepoints in the BMP Private Use Area (U+E000–U+F8FF) get silently stripped by
+some tooling — it happened to this repo's own design doc, where the fa-play and
+fa-ban glyphs vanished from a table while the Plane-15 md-rhombus pair survived,
+and it read as a missing-font problem rather than lost bytes.
+
 Forcing a fallback is possible — Ghostty's `font-codepoint-map = U+25BE=Menlo` —
 but it is fixing the symptom. Of the installed monospace fonts only Menlo has
 those three glyphs at all, and even it is 0.978 cells. Using glyphs the font
@@ -339,7 +427,12 @@ sort_reversed = false
 filter = "pending"      # pending | active | all
 wrap = true
 icons = "unicode"       # nerd | unicode | ascii
+animate = true          # breathe the in-progress marker
 ```
+
+`animate` is the one setting that reaches the **event loop**, not just the
+drawing. Turning it off restores the original poll timeout exactly, so idle cost
+returns to zero rather than merely going quiet — see below.
 
 **The file is read-only.** `w`, `o`, `O` and `f` affect only the current run and
 are never written back. Persisting every toggle would mean turning wrap off for
@@ -389,6 +482,34 @@ editors add one habitually.
 indentation preservation build a local string inside `markdown::render`; the
 edit path reads `by_id[…].description`, the raw task from dex. A round-trip test
 proves the stored bytes are identical after an edit that changes nothing.
+
+## The pulse, and the guarantee it must not break
+
+In-progress markers breathe between `ACTIVE` and a bold `ACTIVE_PULSE` on a
+700ms half-period. **The glyph never changes shape** — only its colour — so the
+marker column cannot jitter, and no new codepoint had to be measured.
+
+The whole design constraint is the cost. This app redraws **only when something
+changed** and idles at zero. So `pulse::poll_timeout` clamps the loop's timeout
+to the next phase flip **only while at least one task is in progress and
+`animate` is on**; otherwise it returns the original constant, on the same code
+path. `App::is_animating` tests the `animate` flag *before* scanning the task
+list, so the opt-out is genuinely free rather than merely quiet. Measured over
+30s: 0.02s of CPU with it off, 0.27s with it on.
+
+Three things to preserve if you touch this:
+
+- **No reader thread.** The epoch is an `Instant` on the main thread. A thread
+  blocked in `event::read()` would swallow the first keystroke meant for
+  `$EDITOR`, which is the reason the loop polls at all.
+- **`Instant`, not `SystemTime`** — an NTP step or a laptop waking from sleep
+  must not jump the phase.
+- **The clamp is pinned by an exact equality**, not an inequality. The 100ms poll
+  already dominates a 700ms half-period, so the clamp looks like dead code and
+  only matters in the last 100ms before a flip. An inequality would still pass
+  with the clamp deleted; `poll_timeout(true, 680ms) == 20ms` would not.
+
+There is no spinner and there cannot be a braille one — see the glyph section.
 
 ## Mouse
 
