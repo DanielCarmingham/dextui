@@ -93,11 +93,19 @@ which `h`/`l` reach the rest.
 Optional, and there are three ways to get a file to edit:
 
 ```bash
-dex-tui --config-init          # write the template to the global config
-dex-tui --config               # print it instead, with both resolved paths
+dex-tui config init            # write the template to the global config
+dex-tui config edit            # open it in $EDITOR, creating it if needed
+dex-tui config                 # print it instead, with both resolved paths
 ```
 
-or press `,` inside the app, which opens the global file in `$EDITOR`, creating
+Add `-l` (or `--local` / `--project`) to act on the project file instead:
+
+```bash
+dex-tui config init --local    # write .dex-tui.toml at the git root
+dex-tui config edit -l
+```
+
+Or press `,` inside the app, which opens the global file in `$EDITOR`, creating
 it from the template first if it does not exist, and reloading it when you save.
 
 Both files are **read-only** to the app otherwise — `w`, `o`, `O` and `f` change
@@ -126,20 +134,27 @@ A project file need only mention what it changes:
 wrap = false
 ```
 
-`dex-tui --config` prints both paths and whether each exists — the first thing
-to check when a setting seems not to apply. `DEXTUI_ICONS` overrides the icon
-tier for a single run.
+`dex-tui config` prints both paths and whether each exists — the first thing to
+check when a setting seems not to apply. `DEXTUI_ICONS` overrides the icon tier
+for a single run.
 
 ## Command line
 
+Subcommands follow dex's own shape, including `-l`/`-g`.
+
 ```
--h, --help          Show help
--V, --version       Show the version
-    --config        Print the config paths and a commented template
-    --config-init   Write the template to the global config file
-    --force         With --config-init, overwrite an existing file
-    --icons         List the glyph tiers
-    --selftest      Print the data pipeline as text and exit (no TUI)
+dex-tui                     Run the TUI (default)
+dex-tui config              Show the config paths and a commented template
+dex-tui config init         Write a config template
+dex-tui config edit         Open a config in $EDITOR, creating it if needed
+dex-tui icons               List the glyph tiers
+dex-tui selftest            Print the data pipeline as text (no TUI)
+
+-h, --help                  Show help
+-V, --version               Show the version
+-g, --global                Act on ~/.config/dex-tui/config.toml (default)
+-l, --local, --project      Act on .dex-tui.toml at the git root
+    --force                 With `config init`, overwrite an existing file
 ```
 
 ## Descriptions
@@ -162,7 +177,7 @@ back to a *global* store outside a git repo. `dex dir` shows which one is in use
 **Tofu (`□`) instead of icons** — `icons = "nerd"` without a patched font. Use
 `unicode`, or `ascii` if that still looks wrong.
 
-**A setting seems ignored** — `dex-tui --config` shows which files were found;
+**A setting seems ignored** — `dex-tui config` shows which files were found;
 an unknown key or value is reported in the status bar at startup.
 
 ## Development
@@ -170,7 +185,7 @@ an unknown key or value is reported in the status bar at startup.
 ```bash
 cargo test
 cargo clippy --all-targets
-cargo run -- --selftest     # the whole data pipeline as text, no TUI
+cargo run -- selftest       # the whole data pipeline as text, no TUI
 
 scripts/seed-demo.sh        # a throwaway store with a realistic task tree
 scripts/render-check.sh     # render in tmux and print the pane

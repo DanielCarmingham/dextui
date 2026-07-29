@@ -28,15 +28,15 @@ cd ~/some/project && dex-tui
 # Development loop. cargo run preserves YOUR working directory, which is what
 # matters here: dex resolves its store from the cwd, so running it from another
 # project browses that project's tasks.
-cargo run -- --selftest       # data pipeline as text, no TUI
-cargo run -- --icons          # list glyph tiers
+cargo run -- selftest         # data pipeline as text, no TUI
+cargo run -- icons            # list glyph tiers
 DEXTUI_ICONS=nerd cargo run   # Nerd Font icons + powerline header
 ```
 
 `cargo install` copies the binary, so it will not pick up code changes until you
 run it again — use `cargo run` while iterating.
 
-`--selftest` resolves the store, lists tasks, builds the tree under every filter,
+`selftest` resolves the store, lists tasks, builds the tree under every filter,
 and renders the detail pane as text. Use it whenever you change the data path,
 and to check behaviour where no interactive terminal exists.
 
@@ -48,7 +48,7 @@ and to check behaviour where no interactive terminal exists.
 | `src/icons.rs` | Glyph sets in three tiers (nerd / unicode / ascii). |
 | `src/tree.rs` | Flat list → hierarchy, search and status filtering, row prefixes. |
 | `src/app.rs` | All view state, plus the refresh-survival rules. |
-| `src/ui.rs` | Immediate-mode rendering, and `--selftest`. |
+| `src/ui.rs` | Immediate-mode rendering, and `selftest`. |
 | `src/watch.rs` | Debounced FS events plus the safety poll. |
 | `src/main.rs` | Event loop and key handling. |
 
@@ -261,9 +261,15 @@ precedence so both behave the same way in the same repository:
 | global | `~/.config/dex-tui/config.toml` |
 | project | `.dex-tui.toml` at the git root |
 
-`--config` prints both paths and whether each exists; `--config-init` writes the
-template (refusing to clobber without `--force`); `,` opens the global file in
-`$EDITOR`, creating it from the template first and reloading on save.
+`config` prints both paths and whether each exists; `config init` writes the
+template (refusing to clobber without `--force`); `config edit` opens it in
+`$EDITOR`; `-l`/`--local` targets the project file. `,` does the same for the
+global file from inside the app, reloading on save.
+
+The CLI uses **subcommands and `-l`/`-g`, deliberately mirroring dex**, since the
+two are always used together and a second vocabulary would be friction for no
+gain. `--project` is accepted as an alias for `--local` because it says what it
+means.
 
 Reloading is the one moment the file's values are meant to override the runtime
 toggles — otherwise saving an edit would appear to do nothing.

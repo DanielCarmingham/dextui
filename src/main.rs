@@ -42,26 +42,29 @@ const USAGE: &str = "\
 dex-tui — browse and triage dex tasks
 
 USAGE:
-    dex-tui [OPTIONS]
+    dex-tui [COMMAND]
 
-Runs against the dex store for the current directory.
+With no command, runs the TUI against the dex store for the current directory.
+
+COMMANDS:
+    config              Show the config paths and a commented template
+    config init         Write a config template
+    config edit         Open a config in $EDITOR, creating it if needed
+    icons               List the glyph tiers
+    selftest            Print the data pipeline as text and exit (no TUI)
 
 OPTIONS:
     -h, --help          Show this help
     -V, --version       Show the version
-        --config        Print the config file paths and a commented template
-        --config-init   Write the template to the global config file
-        --force         With --config-init, overwrite an existing file
-        --icons         List the glyph tiers
-        --selftest      Print the data pipeline as text and exit (no TUI)
 
-CONFIGURATION:
-    Layered defaults < global < project < environment.
-      global    ~/.config/dex-tui/config.toml
-      project   .dex-tui.toml at the git root
+CONFIG OPTIONS:
+    -g, --global        Act on ~/.config/dex-tui/config.toml (the default)
+    -l, --local         Act on .dex-tui.toml at the git root
+        --project       Alias for --local
+        --force         With `config init`, overwrite an existing file
 
-    Press , inside the app to open the global file in $EDITOR; it is created
-    from the template if it does not exist, and reloaded when you save.
+    Settings layer defaults < global < project < environment. Inside the app,
+    `,` opens the global config in $EDITOR and reloads it when you save.
 ";
 
 #[derive(Debug)]
@@ -69,38 +72,55 @@ enum Command {
     Run,
     Help,
     Version,
-    PrintConfig,
-    InitConfig { force: bool },
+    ShowConfig,
+    InitConfig { force: bool, scope: config::Scope },
+    EditConfig { scope: config::Scope },
     Icons,
     SelfTest,
 }
 
-/// Hand-rolled rather than reaching for a parser crate: the surface is six
-/// flags. The point is that an unrecognised one is an error, not a silent
-/// fall-through into launching the TUI.
+/// Subcommands rather than flags, and `-l`/`-g` rather than invented spellings,
+/// so the vocabulary matches `dex` itself -- these two are always used together.
+///
+/// Hand-rolled: the surface is five commands, and the point is that an
+/// unrecognised argument is an error rather than a silent fall-through into
+/// launching the TUI.
 fn parse_args() -> Result<Command, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     parse(&args)
 }
 
 fn parse(args: &[String]) -> Result<Command, String> {
-    let force = args.iter().any(|a| a == "--force");
-    let mut command = Command::Run;
+    let mut words: Vec<&str> = Vec::new();
+    let mut force = false;
+    let mut scope = config::Scope::Global;
 
     for arg in args {
-        command = match arg.as_str() {
-            "-h" | "--help" => Command::Help,
-            "-V" | "--version" => Command::Version,
-            "--config" => Command::PrintConfig,
-            "--config-init" => Command::InitConfig { force },
-            "--icons" => Command::Icons,
-            "--selftest" => Command::SelfTest,
-            "--force" => continue,
-            other => return Err(format!("unknown option {other:?}")),
-        };
+        match arg.as_str() {
+            "-h" | "--help" => return Ok(Command::Help),
+            "-V" | "--version" => return Ok(Command::Version),
+            "--force" => force = true,
+            "-l" | "--local" | "--project" => scope = config::Scope::Project,
+            "-g" | "--global" => scope = config::Scope::Global,
+            other if other.starts_with('-') => {
+                return Err(format!("unknown option {other:?}"));
+            }
+            other => words.push(other),
+        }
     }
 
-    Ok(command)
+    match words.as_slice() {
+        [] => Ok(Command::Run),
+        ["config"] => Ok(Command::ShowConfig),
+        ["config", "init"] => Ok(Command::InitConfig { force, scope }),
+        ["config", "edit"] => Ok(Command::EditConfig { scope }),
+        ["config", other] => Err(format!(
+            "unknown config command {other:?}; expected `init` or `edit`"
+        )),
+        ["icons"] => Ok(Command::Icons),
+        ["selftest"] => Ok(Command::SelfTest),
+        [other, ..] => Err(format!("unknown command {other:?}")),
+    }
 }
 
 fn main() -> std::io::Result<()> {
@@ -123,7 +143,7 @@ fn main() -> std::io::Result<()> {
             println!("dex-tui {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
-        Command::PrintConfig => {
+        Command::ShowConfig => {
             let mark = |p: Option<std::path::PathBuf>| match p {
                 Some(p) => {
                     let state = if p.exists() { "present" } else { "not present" };
@@ -136,7 +156,7 @@ fn main() -> std::io::Result<()> {
             print!("{}", config::EXAMPLE);
             return Ok(());
         }
-        Command::InitConfig { force } => match config::init(force) {
+        Command::InitConfig { force, scope } => match config::init(scope, force) {
             Ok(p) => {
                 println!("wrote {}", p.display());
                 return Ok(());
@@ -146,6 +166,45 @@ fn main() -> std::io::Result<()> {
                 std::process::exit(1);
             }
         },
+        // No terminal to hand over here, unlike `,` inside the app, so the
+        // editor can simply be run.
+        Command::EditConfig { scope } => {
+            let path = match config::path_for_editing(scope) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("dex-tui: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let current = std::fs::read_to_string(&path).unwrap_or_default();
+
+            match editor::edit("config", &current) {
+                Ok(Some(text)) => {
+                    if let Err(e) = std::fs::write(&path, format!("{text}\n")) {
+                        eprintln!("dex-tui: {}: {e}", path.display());
+                        std::process::exit(1);
+                    }
+                    // Parse it back so a mistake is reported now rather than at
+                    // the next launch, where it would be easy to miss.
+                    let (_, problem) = config::load();
+                    match problem {
+                        Some(p) => {
+                            // Saved, so the edit is not lost -- but a non-zero
+                            // exit so this is not mistaken for success.
+                            eprintln!("dex-tui: saved {}, but: {p}", path.display());
+                            std::process::exit(1);
+                        }
+                        None => println!("saved {}", path.display()),
+                    }
+                }
+                Ok(None) => println!("{} unchanged", path.display()),
+                Err(e) => {
+                    eprintln!("dex-tui: {e}");
+                    std::process::exit(1);
+                }
+            }
+            return Ok(());
+        }
         Command::Icons => {
             println!("Set with icons = \"...\" in the config, or DEXTUI_ICONS\n");
             for i in icons::ALL {
@@ -354,7 +413,7 @@ fn edit_config(
     app: &mut App,
     glyphs: &mut icons::Icons,
 ) -> std::io::Result<()> {
-    let path = match config::path_for_editing() {
+    let path = match config::path_for_editing(config::Scope::Global) {
         Ok(p) => p,
         Err(e) => {
             app.mode = Mode::Error(e);
@@ -754,11 +813,12 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_option_is_an_error_not_a_silent_launch() {
-        // It used to fall through and start the TUI, so `--help` appeared to do
-        // nothing -- or panicked, when there was no terminal to initialise.
-        let err = parsed(&["--nonsense"]).unwrap_err();
-        assert!(err.contains("--nonsense"), "{err}");
+    fn an_unknown_command_or_option_is_an_error_not_a_silent_launch() {
+        // Unknown arguments used to fall through into starting the TUI, so
+        // `--help` did nothing in a terminal and panicked outside one.
+        assert!(parsed(&["--nonsense"]).unwrap_err().contains("--nonsense"));
+        assert!(parsed(&["wibble"]).unwrap_err().contains("wibble"));
+        assert!(parsed(&["config", "wibble"]).unwrap_err().contains("wibble"));
     }
 
     #[test]
@@ -770,39 +830,86 @@ mod tests {
     }
 
     #[test]
-    fn force_applies_to_config_init_in_either_order() {
+    fn help_wins_even_after_a_command() {
+        // Asking for help should never run something instead.
+        assert!(matches!(parsed(&["config", "init", "--help"]), Ok(Command::Help)));
+    }
+
+    #[test]
+    fn config_subcommands_parse() {
+        assert!(matches!(parsed(&["config"]), Ok(Command::ShowConfig)));
+        assert!(matches!(parsed(&["config", "init"]), Ok(Command::InitConfig { .. })));
+        assert!(matches!(parsed(&["config", "edit"]), Ok(Command::EditConfig { .. })));
+    }
+
+    #[test]
+    fn local_and_project_select_the_project_file() {
+        // -l matches dex's own spelling; --project says what it means.
+        for flag in ["-l", "--local", "--project"] {
+            assert!(
+                matches!(
+                    parsed(&["config", "edit", flag]),
+                    Ok(Command::EditConfig { scope: config::Scope::Project })
+                ),
+                "{flag} did not select the project scope"
+            );
+        }
+    }
+
+    #[test]
+    fn global_is_the_default_and_can_be_stated_explicitly() {
         assert!(matches!(
-            parsed(&["--config-init", "--force"]),
-            Ok(Command::InitConfig { force: true })
+            parsed(&["config", "edit"]),
+            Ok(Command::EditConfig { scope: config::Scope::Global })
         ));
+        for flag in ["-g", "--global"] {
+            assert!(matches!(
+                parsed(&["config", "edit", flag]),
+                Ok(Command::EditConfig { scope: config::Scope::Global })
+            ));
+        }
+    }
+
+    #[test]
+    fn options_may_appear_before_the_command() {
         assert!(matches!(
-            parsed(&["--force", "--config-init"]),
-            Ok(Command::InitConfig { force: true })
+            parsed(&["--local", "--force", "config", "init"]),
+            Ok(Command::InitConfig { force: true, scope: config::Scope::Project })
         ));
     }
 
     #[test]
-    fn config_init_without_force_does_not_overwrite() {
+    fn init_does_not_overwrite_unless_asked() {
         assert!(matches!(
-            parsed(&["--config-init"]),
-            Ok(Command::InitConfig { force: false })
+            parsed(&["config", "init"]),
+            Ok(Command::InitConfig { force: false, .. })
         ));
     }
 
     #[test]
-    fn every_option_in_the_usage_text_is_actually_accepted() {
-        // The usage block is the only place these are advertised, so a flag
-        // documented but not handled would be a silent lie.
+    fn every_command_in_the_usage_text_is_actually_accepted() {
+        // The usage block is the only place these are advertised, so anything
+        // listed but unparseable would be a silent lie.
         for line in USAGE.lines() {
-            for word in line.split_whitespace() {
-                let flag = word.trim_end_matches(',');
-                if flag.starts_with("--") && flag.len() > 2 {
-                    assert!(
-                        parsed(&[flag]).is_ok(),
-                        "usage advertises {flag} but the parser rejects it"
-                    );
-                }
+            let line = line.trim_end();
+            let Some(rest) = line.strip_prefix("    ") else {
+                continue;
+            };
+            if rest.starts_with(' ') || rest.is_empty() {
+                continue;
             }
+            // "config init         Write a config template" -> ["config", "init"]
+            let words: Vec<&str> = rest
+                .split_whitespace()
+                .take_while(|w| !w.starts_with('-') && w.chars().all(|c| c.is_ascii_lowercase()))
+                .collect();
+            if words.is_empty() || words[0] == "dex-tui" {
+                continue;
+            }
+            assert!(
+                parse(&words.iter().map(|w| w.to_string()).collect::<Vec<_>>()).is_ok(),
+                "usage advertises {words:?} but the parser rejects it"
+            );
         }
     }
 }

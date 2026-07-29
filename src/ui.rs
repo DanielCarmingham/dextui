@@ -715,7 +715,7 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-/// Plain-text render of the whole pipeline, for `--selftest`.
+/// Plain-text render of the whole pipeline, for `dex-tui selftest`.
 pub fn selftest(app: &App) -> String {
     use std::fmt::Write;
     let mut out = String::new();

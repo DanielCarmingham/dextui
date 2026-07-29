@@ -180,8 +180,8 @@ pub fn parse_icons(v: &str) -> Option<Icons> {
     }
 }
 
-/// Printed by `--config` and written by `--config-init`, so there is something
-/// to start from rather than invent.
+/// Printed by `config` and written by `config init`, so there is something to
+/// start from rather than invent.
 pub const EXAMPLE: &str = r#"# Starting values only. w / o / O / f still toggle freely at runtime; nothing
 # is written back, so this file stays exactly as you left it.
 #
@@ -206,13 +206,28 @@ wrap = true
 icons = "unicode"
 "#;
 
+/// Which file a command acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    Global,
+    Project,
+}
+
+pub fn target(scope: Scope) -> Result<PathBuf, String> {
+    match scope {
+        Scope::Global => path().ok_or_else(|| "could not resolve a config path (is HOME set?)".into()),
+        Scope::Project => project_path()
+            .ok_or_else(|| "not inside a git repository, so there is no project config".into()),
+    }
+}
+
 /// Creates the config file from the template.
 ///
 /// Refuses to overwrite: a preferences file is the sort of thing people edit and
 /// then forget about, and silently replacing one would be the worst outcome of a
 /// command whose whole job is convenience.
-pub fn init(force: bool) -> Result<PathBuf, String> {
-    let p = path().ok_or("could not resolve a config path (is HOME set?)")?;
+pub fn init(scope: Scope, force: bool) -> Result<PathBuf, String> {
+    let p = target(scope)?;
 
     if p.exists() && !force {
         return Err(format!(
@@ -224,19 +239,38 @@ pub fn init(force: bool) -> Result<PathBuf, String> {
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    std::fs::write(&p, EXAMPLE).map_err(|e| format!("{}: {e}", p.display()))?;
+    let template = match scope {
+        Scope::Global => EXAMPLE,
+        Scope::Project => PROJECT_EXAMPLE,
+    };
+    std::fs::write(&p, template).map_err(|e| format!("{}: {e}", p.display()))?;
     Ok(p)
 }
 
 /// Ensures a file exists to open in an editor, creating it from the template on
 /// first use so `,` works before any config has been written.
-pub fn path_for_editing() -> Result<PathBuf, String> {
-    let p = path().ok_or("could not resolve a config path (is HOME set?)")?;
+pub fn path_for_editing(scope: Scope) -> Result<PathBuf, String> {
+    let p = target(scope)?;
     if !p.exists() {
-        init(false)?;
+        init(scope, false)?;
     }
     Ok(p)
 }
+
+/// The project template is deliberately near-empty: a project file exists to
+/// override a handful of things, and a full copy would silently pin every
+/// setting against later changes to the global file.
+pub const PROJECT_EXAMPLE: &str = r#"# .dex-tui.toml — settings for this repository only.
+#
+# Layered over ~/.config/dex-tui/config.toml, so mention only what differs.
+# Anything left out falls through to the global file. See `dex-tui --config`.
+
+# wrap = false          # this repo's descriptions have wide tables
+# sort = "updated"      # priority | updated | created | name
+# sort_reversed = false
+# filter = "pending"    # pending | active | all
+# icons = "unicode"     # nerd | unicode | ascii
+"#;
 
 #[cfg(test)]
 mod tests {
