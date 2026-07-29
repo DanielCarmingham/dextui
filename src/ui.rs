@@ -17,17 +17,10 @@ use crate::app::{App, Focus, Mode};
 
 /// Colour is used only where it carries meaning. Everything else is left to the
 /// terminal, so the app inherits whatever scheme the user runs -- including a
-/// light/dark switch at runtime -- instead of imposing its own.
-///
-/// Only ANSI-16 names and `Reset` appear here: they are remapped by the user's
-/// terminal theme. Fixed `Indexed`/`Rgb` values, and `White`/`Black` for text,
-/// can only ever suit one background.
-const PLAIN: Color = Color::Reset;
-const DIM: Color = Color::DarkGray;
-const ACTIVE: Color = Color::Yellow;
-const DONE: Color = Color::Green;
-const BLOCKED: Color = Color::Red;
-const CODE: Color = Color::Cyan;
+/// light/dark switch at runtime -- instead of imposing its own. The values live
+/// in `theme`; this module decides where they go.
+use crate::theme::{ACTIVE, BLOCKED, CODE, DIM, DONE, PLAIN, TODO};
+
 use crate::icons::Icons;
 use crate::dex::{age, local_time, Status, Task};
 use crate::tree::{self, Progress};
@@ -96,7 +89,7 @@ fn status_color(s: Status) -> Color {
     match s {
         Status::Completed => DONE,
         Status::InProgress => ACTIVE,
-        Status::Pending => PLAIN,
+        Status::Pending => TODO,
     }
 }
 
@@ -823,6 +816,49 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    /// The whole point of the colour work: dex and dextui are used on the same
+    /// tasks in the same directory, so disagreeing about what colour a state is
+    /// makes them contradictory rather than merely different.
+    ///
+    /// Source of truth is dex 0.16.0 `dist/cli/formatting.js`:
+    ///   completed -> green (32), started_at -> blue (34), else -> yellow (33).
+    #[test]
+    fn status_colours_match_the_dex_cli() {
+        assert_eq!(status_color(Status::Pending), Color::Yellow, "todo");
+        assert_eq!(status_color(Status::InProgress), Color::Blue, "in progress");
+        assert_eq!(status_color(Status::Completed), Color::Green, "done");
+    }
+
+    /// This terminal follows the macOS appearance and flips light/dark *under
+    /// the running app*, so any fixed colour value is wrong half the time.
+    /// Only ANSI-16 names and Reset are remapped by the user's theme.
+    #[test]
+    fn every_theme_colour_adapts_to_the_terminal() {
+        for (name, c) in crate::theme::ALL {
+            let ok = matches!(
+                c,
+                Color::Reset
+                    | Color::Black
+                    | Color::Red
+                    | Color::Green
+                    | Color::Yellow
+                    | Color::Blue
+                    | Color::Magenta
+                    | Color::Cyan
+                    | Color::Gray
+                    | Color::DarkGray
+                    | Color::LightRed
+                    | Color::LightGreen
+                    | Color::LightYellow
+                    | Color::LightBlue
+                    | Color::LightMagenta
+                    | Color::LightCyan
+                    | Color::White
+            );
+            assert!(ok, "{name} is {c:?}: Indexed/Rgb cannot follow the theme");
+        }
     }
 
     #[test]

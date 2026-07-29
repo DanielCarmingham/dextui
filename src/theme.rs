@@ -1,0 +1,53 @@
+//! Every colour the app uses, and nothing else.
+//!
+//! `markdown` and `tree` describe what things *are*; `ui` decides how they look
+//! and takes the values from here. Keeping them in one place is what makes the
+//! colour policy checkable rather than aspirational -- see the test in `ui` that
+//! walks [`ALL`].
+//!
+//! **Only ANSI-16 names and `Reset` belong here.** This machine's terminal is
+//! configured `theme = light:"...",dark:"..."`, so it follows the macOS
+//! appearance and flips *under the running app*. ANSI names are remapped by the
+//! user's theme; `Indexed` and `Rgb` are fixed values that can only ever suit
+//! one background. `White`/`Black` for text are effectively fixed too: an
+//! earlier version rendered the task title white-on-white in light mode.
+
+use ratatui::style::Color;
+
+/// Whatever the terminal's default foreground is.
+pub const PLAIN: Color = Color::Reset;
+/// Secondary text: tree connectors, timestamps, the untouched part of a meter.
+pub const DIM: Color = Color::DarkGray;
+
+/// The four task states, matching the dex CLI exactly so the two tools cannot
+/// contradict each other. Taken from dex 0.16.0 `dist/cli/formatting.js`
+/// (`getTaskStatusDisplay`) and `~/.local/bin/dex-report` (`glyphcolor`):
+///
+/// ```text
+/// todo         yellow  33      in progress  blue   34
+/// done         green   32      blocked      red    31
+/// ```
+///
+/// These land on the **status glyph only**, never the task name -- which is
+/// what stops a mostly-unstarted tree becoming a wall of yellow, and is what
+/// dex itself does.
+pub const TODO: Color = Color::Yellow;
+pub const ACTIVE: Color = Color::Blue;
+pub const DONE: Color = Color::Green;
+pub const BLOCKED: Color = Color::Red;
+
+/// Inline code and other literal spans in rendered markdown.
+pub const CODE: Color = Color::Cyan;
+
+/// Every colour above, for the policy test. A colour missing from this list is
+/// unguarded, so add new ones here as well.
+#[cfg(test)]
+pub const ALL: [(&str, Color); 7] = [
+    ("PLAIN", PLAIN),
+    ("DIM", DIM),
+    ("TODO", TODO),
+    ("ACTIVE", ACTIVE),
+    ("DONE", DONE),
+    ("BLOCKED", BLOCKED),
+    ("CODE", CODE),
+];

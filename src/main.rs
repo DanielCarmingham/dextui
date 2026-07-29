@@ -6,6 +6,7 @@ mod dex;
 mod editor;
 mod icons;
 mod markdown;
+mod theme;
 mod tree;
 mod ui;
 mod watch;
