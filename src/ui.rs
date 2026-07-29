@@ -19,7 +19,9 @@ use crate::app::{App, Focus, Mode};
 /// terminal, so the app inherits whatever scheme the user runs -- including a
 /// light/dark switch at runtime -- instead of imposing its own. The values live
 /// in `theme`; this module decides where they go.
-use crate::theme::{ACTIVE, ACTIVE_PULSE, BLOCKED, CODE, DIM, DONE, PLAIN, TODO};
+use crate::theme::{
+    ACCENT, ACCENT_DIM, ACTIVE, ACTIVE_PULSE, BLOCKED, CODE, DIM, DONE, PLAIN, TODO,
+};
 
 use crate::icons::Icons;
 use crate::dex::{self, age, local_time, Status, Task};
@@ -335,12 +337,30 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
     let inner_width = area.width.saturating_sub(2) as usize;
     let rows = tree::visible_rows(&app.tree, &app.expanded);
 
+    // Hoisted: `selected_row` rebuilds the visible-row list on every call, so
+    // asking per row would make each frame quadratic in the size of the tree.
+    let selected = app.selected_row();
+    let accent = if app.focus == Focus::Tree {
+        ACCENT
+    } else {
+        ACCENT_DIM
+    };
+
     let items: Vec<ListItem> = rows
         .iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(i, row)| {
             let t = &row.node.task;
+            let is_selected = selected == Some(i);
 
             let mut spans = vec![
+                // Always two cells, drawn or not, so selecting a row cannot
+                // shift its name out of the column its siblings sit in.
+                if is_selected {
+                    Span::styled(format!("{} ", ic.gutter), Style::default().fg(accent))
+                } else {
+                    Span::raw("  ")
+                },
                 Span::styled(row.prefix.clone(), Style::default().fg(DIM)),
                 Span::styled(
                     format!("{} ", ic.marker(row.has_children, row.is_open)),
@@ -352,7 +372,7 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
                 ),
             ];
 
-            let name_style = if !row.node.is_match {
+            let mut name_style = if !row.node.is_match {
                 // Scaffolding: kept only because a descendant matched.
                 Style::default().fg(DIM)
             } else if t.completed {
@@ -362,6 +382,13 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
             } else {
                 Style::default().fg(PLAIN)
             };
+            // Weight, not colour: the name has no colour of its own to brighten,
+            // and bold is the one emphasis that survives a dim or struck-through
+            // name. It stays on when the pane loses focus, so the selection is
+            // still findable while you are reading the detail pane.
+            if is_selected {
+                name_style = name_style.add_modifier(Modifier::BOLD);
+            }
 
             spans.push(Span::styled(t.name.clone(), name_style));
 
@@ -405,21 +432,19 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
     // The offset is carried across frames rather than recomputed from zero, so
     // the list does not jump and a click maps to the row actually on screen.
     let mut state = ListState::default().with_offset(app.tree_offset);
-    state.select(app.selected_row());
+    // Still selected even though the highlight draws nothing: this is what
+    // scrolls the selection into view, and what keeps `tree_offset` truthful so
+    // a click lands on the row actually drawn.
+    state.select(selected);
 
-    // REVERSED inverts whatever the terminal's current colours are, so the
-    // selected row stays readable in light and dark alike. A fixed background
-    // can only ever be right for one of them.
-    // REVERSED inverts whatever the terminal's current colours are, so the
-    // selected row is readable on a light and a dark background alike. A fixed
-    // background can only ever be right for one of them.
-    frame.render_stateful_widget(
-        List::new(items)
-            .block(block)
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
-        area,
-        &mut state,
-    );
+    // No `highlight_style`, and no `highlight_symbol`. The row builds its own
+    // cursor above, for two reasons. `highlight_style` is stamped across the
+    // whole row *after* the item renders, so it could only ever emphasise the
+    // meter and the status glyph along with the name -- which is what ruled out
+    // the REVERSED this replaces. And `highlight_symbol` narrows the item area
+    // by the symbol's width while the right-hand gutter here is measured against
+    // the full inner width, so the meter would be pushed off the right edge.
+    frame.render_stateful_widget(List::new(items).block(block), area, &mut state);
 
     app.tree_offset = state.offset();
 
@@ -1053,6 +1078,27 @@ mod tests {
         }
     }
 
+    /// The selection accent is a *cursor*, not a state. Every other colour in
+    /// the tree means something about the task; if the gutter shared a hue with
+    /// one of them, "where am I" and "what is this" would be the same signal and
+    /// a selected row could read as blocked.
+    #[test]
+    fn the_selection_accent_is_not_a_status_colour() {
+        use crate::theme::{ACCENT, ACCENT_DIM};
+        for (n, c) in [("ACCENT", ACCENT), ("ACCENT_DIM", ACCENT_DIM)] {
+            for (sn, s) in [
+                ("TODO", TODO),
+                ("ACTIVE", ACTIVE),
+                ("ACTIVE_PULSE", ACTIVE_PULSE),
+                ("DONE", DONE),
+                ("BLOCKED", BLOCKED),
+            ] {
+                assert_ne!(c, s, "{n} is the same colour as {sn}");
+            }
+        }
+        assert_ne!(ACCENT, ACCENT_DIM, "an unfocused pane must look different");
+    }
+
     #[test]
     fn a_frame_actually_draws_something() {
         // Regression: the app once ran happily while painting an empty screen.
@@ -1505,6 +1551,236 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(text(&off), text(&on), "the prompt redrew differently");
+    }
+
+    /// Draws a real frame with `select` selected and `focus` focused, and hands
+    /// back both the styled buffer and the `App` the renderer wrote its geometry
+    /// into. Styling is the entire subject of the selection tests, and the plain
+    /// `render` helper throws it away.
+    fn render_selection(
+        tasks: Vec<Task>,
+        select: &str,
+        focus: Focus,
+        ic: &Icons,
+        w: u16,
+        h: u16,
+    ) -> (ratatui::buffer::Buffer, App) {
+        let mut app = App::new(tasks, "demo".into(), crate::config::Config::default());
+        app.filter = tree::Filter::All;
+        app.rebuild();
+        app.selected = Some(select.to_string());
+        app.focus = focus;
+
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| draw(f, &mut app, ic)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (buf, app)
+    }
+
+    /// The buffer row `name` was drawn on.
+    fn row_of(buf: &ratatui::buffer::Buffer, name: &str) -> u16 {
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            if line.contains(name) {
+                return y;
+            }
+        }
+        panic!("{name:?} was never drawn");
+    }
+
+    /// The column `name` starts at on row `y`.
+    ///
+    /// Counted in cells, not bytes: the tree draws multibyte box characters, and
+    /// a byte offset would differ between two rows whose names line up perfectly
+    /// on screen.
+    fn col_of(buf: &ratatui::buffer::Buffer, y: u16, name: &str) -> usize {
+        let cells: Vec<&str> = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+        let line: String = cells.concat();
+        let byte = line
+            .find(name)
+            .unwrap_or_else(|| panic!("{name:?} is not on row {y}: {line:?}"));
+        let mut at = 0;
+        for (i, c) in cells.iter().enumerate() {
+            if at == byte {
+                return i;
+            }
+            at += c.len();
+        }
+        panic!("{name:?} does not start on a cell boundary on row {y}")
+    }
+
+    /// Every cell of row `y` that lies inside the tree pane.
+    fn tree_cells<'a>(
+        buf: &'a ratatui::buffer::Buffer,
+        app: &App,
+        y: u16,
+    ) -> Vec<&'a ratatui::buffer::Cell> {
+        (1..app.divider_x).map(|x| &buf[(x, y)]).collect()
+    }
+
+    /// Selection is carried by a rail in the left margin and a bold name, not by
+    /// inverting the row. Inversion is the thing being replaced, so its absence
+    /// is asserted rather than assumed -- and the gutter is a *reserved* column
+    /// on every row, so selecting one must not shift its name relative to its
+    /// siblings.
+    #[test]
+    fn the_selected_row_is_marked_by_a_gutter_not_by_inverting_it() {
+        let ic = &crate::icons::UNICODE;
+        let tasks = vec![
+            task("alpha", None, "Alpha task"),
+            task("beta", None, "Beta task"),
+        ];
+
+        let (buf, app) = render_selection(tasks, "alpha", Focus::Tree, ic, 100, 20);
+        let sel = row_of(&buf, "Alpha task");
+        let other = row_of(&buf, "Beta task");
+
+        // x = 0 is the pane border, so the gutter is the first cell inside it.
+        assert_eq!(buf[(1, sel)].symbol(), ic.gutter, "no gutter on the selection");
+        assert_eq!(buf[(1, other)].symbol(), " ", "an unselected row drew a gutter");
+
+        for cell in tree_cells(&buf, &app, sel) {
+            assert!(
+                !cell.style().add_modifier.contains(Modifier::REVERSED),
+                "the selected row still inverts: {cell:?}"
+            );
+        }
+
+        assert_eq!(
+            col_of(&buf, sel, "Alpha task"),
+            col_of(&buf, other, "Beta task"),
+            "selecting a row moved its name out of the column"
+        );
+
+        let name_x = col_of(&buf, sel, "Alpha task") as u16;
+        assert!(
+            buf[(name_x, sel)]
+                .style()
+                .add_modifier
+                .contains(Modifier::BOLD),
+            "the selected name is not bold"
+        );
+        assert!(
+            !buf[(col_of(&buf, other, "Beta task") as u16, other)]
+                .style()
+                .add_modifier
+                .contains(Modifier::BOLD),
+            "an unselected name is bold"
+        );
+    }
+
+    /// Focus follows the border, and the gutter has to agree with it -- otherwise
+    /// two panes both claim a cursor. Easy to forget, because the tree is focused
+    /// by default and every other test would pass without this.
+    #[test]
+    fn the_selection_gutter_dims_when_the_tree_is_unfocused() {
+        let ic = &crate::icons::UNICODE;
+        let tasks = || vec![task("alpha", None, "Alpha task")];
+
+        let (focused, _) = render_selection(tasks(), "alpha", Focus::Tree, ic, 100, 20);
+        let y = row_of(&focused, "Alpha task");
+        assert_eq!(focused[(1, y)].style().fg, Some(crate::theme::ACCENT));
+
+        let (unfocused, _) = render_selection(tasks(), "alpha", Focus::Detail, ic, 100, 20);
+        let y = row_of(&unfocused, "Alpha task");
+        assert_eq!(unfocused[(1, y)].style().fg, Some(crate::theme::ACCENT_DIM));
+        assert_eq!(
+            unfocused[(1, y)].symbol(),
+            ic.gutter,
+            "an unfocused pane still knows where the cursor is"
+        );
+    }
+
+    /// The reason inversion had to go. The status glyph and all three meter runs
+    /// set explicit foregrounds, and `REVERSED` swapped every one of them with
+    /// the background -- so on the selected row the colour language inverted
+    /// exactly where progress is quantified. This is the row that has both.
+    #[test]
+    fn selection_does_not_recolour_the_meter_or_the_status_glyph() {
+        let ic = &crate::icons::UNICODE;
+
+        let mut finished = task("done", Some("root"), "Finished child");
+        finished.completed = true;
+        let mut running = task("run", Some("root"), "Running child");
+        running.started_at = Some("2026-01-01T00:00:00Z".into());
+
+        let tasks = vec![
+            task("root", None, "Parent task"),
+            finished,
+            running,
+            task("todo", Some("root"), "Pending child"),
+        ];
+
+        let (buf, app) = render_selection(tasks, "root", Focus::Tree, ic, 120, 20);
+        let y = row_of(&buf, "Parent task");
+        let cells = tree_cells(&buf, &app, y);
+
+        assert_eq!(buf[(1, y)].symbol(), ic.gutter, "fixture: the parent is selected");
+
+        let fg_of = |sym: &str| -> Vec<Option<Color>> {
+            cells
+                .iter()
+                .filter(|c| c.symbol() == sym)
+                .map(|c| c.style().fg)
+                .collect()
+        };
+
+        // 1 done + 1 in flight of 3 gives two green cells, two blue, a blue
+        // partial and a dim remainder -- every colour the meter can speak.
+        assert!(
+            fg_of("\u{2588}").contains(&Some(DONE)),
+            "no green in the meter: {:?}",
+            fg_of("\u{2588}")
+        );
+        assert!(
+            fg_of("\u{2588}").contains(&Some(ACTIVE)),
+            "no blue in the meter: {:?}",
+            fg_of("\u{2588}")
+        );
+        assert_eq!(
+            fg_of("\u{2591}"),
+            vec![Some(DIM); 2],
+            "the untouched remainder lost its colour"
+        );
+
+        // The parent is neither started nor completed nor blocked, so its own
+        // marker is the yellow todo glyph.
+        assert_eq!(
+            fg_of(ic.pending),
+            vec![Some(status_color(Status::Pending))],
+            "the status glyph was recoloured by the selection"
+        );
+
+        for cell in &cells {
+            assert!(
+                !cell.style().add_modifier.contains(Modifier::REVERSED),
+                "inversion would swap every one of those foregrounds: {cell:?}"
+            );
+        }
+    }
+
+    /// Nothing else ties the renderer's actual output to the hit test: the
+    /// `app.rs` click tests use a hand-written geometry stand-in. Written before
+    /// the selection gutter existed, so a layout change that broke click
+    /// mapping would show up here as a flip from green to red.
+    #[test]
+    fn a_click_still_selects_the_row_that_was_drawn() {
+        let ic = &crate::icons::UNICODE;
+        let tasks = vec![
+            task("alpha", None, "Alpha task"),
+            task("beta", None, "Beta task"),
+        ];
+
+        let (buf, mut app) = render_selection(tasks, "alpha", Focus::Tree, ic, 100, 20);
+        let y = row_of(&buf, "Beta task");
+
+        app.select_at_row(y);
+        assert_eq!(
+            app.selected.as_deref(),
+            Some("beta"),
+            "clicking row {y} selected {:?}",
+            app.selected
+        );
     }
 
     /// The tree pane's content for each row, without the two pane borders.

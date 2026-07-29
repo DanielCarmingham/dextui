@@ -44,10 +44,22 @@ pub const ACTIVE_PULSE: Color = Color::LightBlue;
 /// Inline code and other literal spans in rendered markdown.
 pub const CODE: Color = Color::Cyan;
 
+/// The selection gutter: where you are, as opposed to what anything *is*.
+///
+/// Magenta is the one ANSI hue carrying no meaning here -- the four states take
+/// yellow, blue, green and red, and [`CODE`] takes cyan -- so a selected row can
+/// never be misread as a state. A test asserts that separation.
+///
+/// The unfocused pane dims *within the hue* rather than falling back to [`DIM`],
+/// which is exactly the colour of the `│└├` tree connectors sitting one cell to
+/// the gutter's right; an unfocused cursor would disappear into them.
+pub const ACCENT: Color = Color::LightMagenta;
+pub const ACCENT_DIM: Color = Color::Magenta;
+
 /// Every colour above, for the policy test. A colour missing from this list is
 /// unguarded, so add new ones here as well.
 #[cfg(test)]
-pub const ALL: [(&str, Color); 8] = [
+pub const ALL: [(&str, Color); 10] = [
     ("PLAIN", PLAIN),
     ("DIM", DIM),
     ("TODO", TODO),
@@ -56,4 +68,6 @@ pub const ALL: [(&str, Color); 8] = [
     ("DONE", DONE),
     ("BLOCKED", BLOCKED),
     ("CODE", CODE),
+    ("ACCENT", ACCENT),
+    ("ACCENT_DIM", ACCENT_DIM),
 ];

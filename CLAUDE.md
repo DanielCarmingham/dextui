@@ -188,10 +188,56 @@ The rules, in `src/ui.rs`:
 - Use only `Color::Reset` and the ANSI-16 names. The terminal remaps those per
   mode. `Indexed`/`Rgb` are fixed values and cannot adapt.
 - Never `Color::White`/`Color::Black` for text — effectively fixed.
-- The selected row uses `Modifier::REVERSED`, which inverts whatever the current
-  colours are. A fixed background can only ever suit one mode.
+- The selected row carries a **`┃` accent gutter and a bold name**, never a
+  background band. See below for why, and for what it replaced.
 - `COLORFGBG` is unset here and there is no reliable way to detect the
   background, so do not try — adapt instead of detecting.
+
+### The selected row: a gutter, not an inversion
+
+`theme::ACCENT` paints a `┃` in a two-cell column reserved on **every** tree row
+and drawn only on the selected one, and the name goes bold. An unfocused pane
+drops to `ACCENT_DIM`.
+
+`Modifier::REVERSED` used to do this job, and on the face of it it was the safer
+choice: it inverts whatever the terminal's current colours are, so it cannot be
+wrong in either mode. It was replaced because it inverts *everything on the row*,
+including the two things that now carry meaning there — the coloured status glyph
+and the three-colour progress meter. A selected parent's meter turned into a
+solid green band, which is precisely the row where the colour language matters
+most.
+
+**This was decided by looking at it, not by reasoning about it.** The captures
+were rendered to PNG in the user's actual Ghostty schemes (`GitHub Light
+Default` / `GitHub Dark Default`), focused and unfocused, on rows carrying a
+meter, a red blocked marker, and a completed strikethrough. If a future change
+makes the gutter unreadable, **`REVERSED` is the documented fallback and
+reverting to it is not a failure** — it is the only emphasis guaranteed to adapt.
+If you do revert, invert the "no `REVERSED`" assertions in `ui.rs` rather than
+deleting them.
+
+Two things that look like the obvious implementation and are not:
+
+- `List::highlight_style` is stamped across the whole row *after* the item
+  renders, so it can only emphasise the meter and glyph along with the name —
+  the same defect as the `REVERSED` it would be reintroducing.
+- `List::highlight_symbol` narrows the item area by the symbol's width, while
+  the right-hand meter gutter is measured against the full inner width. The
+  meter would be pushed off the right edge.
+
+Hence the gutter is the first span of each `ListItem`: `used` already sums every
+span, so the right-alignment arithmetic stays self-consistent for free.
+`state.select(...)` still has to be set — it is what scrolls the selection into
+view and what keeps `tree_offset` truthful, which is what makes a click land on
+the row actually drawn.
+
+Magenta is the accent because it is the one ANSI hue with no other job here
+(yellow, blue, green and red are the four states, cyan is inline code), so a
+cursor can never be misread as a state. The unfocused pane dims *within* the hue
+rather than to `DIM`, which is exactly the colour of the `│└├` connectors one
+cell to the gutter's right. That difference is deliberately slight: focus is
+already carried by the pane border, and the selection has to stay findable while
+you are reading the detail pane.
 
 ## Glyphs: verify, never assume
 

@@ -51,6 +51,10 @@ pub struct Icons {
     pub app: &'static str,
     pub project: &'static str,
 
+    /// The selected row's left-margin rail. A reserved column on every row,
+    /// painted only on the selected one.
+    pub gutter: &'static str,
+
     // Meter
     pub meter: Meter,
 }
@@ -86,6 +90,11 @@ pub const NERD: Icons = Icons {
     blocked: "\u{f05e}",  // fa-ban
     app: "\u{f0ae}",     // fa tasks
     project: "\u{f07b}", // fa folder
+    // Heavy vertical, deliberately NOT `│` U+2502 -- that is already both the
+    // pane border and the tree indent guide, so a gutter drawn with it would be
+    // indistinguishable from either. Verified present in FiraCode Nerd Font and
+    // native at exactly 1.00 cells.
+    gutter: "\u{2503}", // ┃
     // The progress-bar kit Nerd Fonts 3.3.0 added: open left cap / mid / right
     // cap at U+EE00-EE02, filled at U+EE03-EE05. Composing by position gives a
     // properly capped, seamless bar rather than seven stamped cells.
@@ -113,6 +122,7 @@ pub const UNICODE: Icons = Icons {
     blocked: "\u{00d7}", // ×  (✗ and ⊗ are unavailable)
     app: "",
     project: "",
+    gutter: "\u{2503}", // ┃
     // dex-report's stacked bar exactly: `█` for both done and in-flight, with
     // colour doing the separating, and `░` for the untouched remainder. The
     // eighth-blocks give the outer edge sub-cell precision.
@@ -141,6 +151,7 @@ pub const ASCII: Icons = Icons {
     blocked: "!",
     app: "",
     project: "",
+    gutter: "|",
     // Whole cells only -- sub-cell precision has no 7-bit representation. In
     // exchange this is the one tier where done and in-flight differ by shape as
     // well as colour, which is what it is for.
@@ -297,6 +308,27 @@ mod tests {
         }
     }
 
+    /// The selection gutter is a reserved column on *every* row, drawn only on
+    /// the selected one, so a two-cell glyph there would shift that row's name
+    /// out of line with the rest of the tree -- the same column discipline the
+    /// state markers are held to.
+    #[test]
+    fn every_tier_has_a_one_cell_gutter() {
+        assert_eq!(NERD.gutter, "\u{2503}");
+        assert_eq!(UNICODE.gutter, "\u{2503}");
+        assert_eq!(ASCII.gutter, "|");
+
+        for ic in ALL {
+            assert_eq!(
+                ic.gutter.chars().count(),
+                1,
+                "tier {}: gutter is {:?}, not a single character",
+                name(ic.tier),
+                ic.gutter
+            );
+        }
+    }
+
     /// The whole point of the ascii tier is terminals and fonts where nothing
     /// above 7-bit can be trusted.
     #[test]
@@ -314,7 +346,7 @@ mod tests {
             .chain(m.active.iter())
             .chain(m.empty.iter())
             .chain(m.partial.iter());
-        for g in [ASCII.expanded, ASCII.collapsed, ASCII.leaf]
+        for g in [ASCII.expanded, ASCII.collapsed, ASCII.leaf, ASCII.gutter]
             .iter()
             .chain(meter)
         {
