@@ -9,9 +9,9 @@
 //! Note that `✗` U+2717, `✘` U+2718 and `⊗` U+2297 are also missing, so there is
 //! no pure-Unicode cross available; the unicode tier uses `×` U+00D7.
 //!
-//! Tier is chosen with `DEXTUI_ICONS=nerd|unicode|ascii`. The default is
-//! `unicode`, because a Nerd Font cannot be reliably detected at runtime and
-//! guessing wrong yields a screen full of tofu.
+//! The tier comes from the config file or `DEXTUI_ICONS`; `config` owns that
+//! precedence. The default is `unicode`, because a Nerd Font cannot be reliably
+//! detected at runtime and guessing wrong yields a screen full of tofu.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
@@ -126,11 +126,3 @@ pub fn about(tier: Tier) -> &'static str {
     }
 }
 
-/// Resolves `DEXTUI_ICONS`, defaulting to the tier that cannot produce tofu.
-pub fn from_env() -> Icons {
-    match std::env::var("DEXTUI_ICONS").ok().as_deref() {
-        Some("nerd") => NERD,
-        Some("ascii") => ASCII,
-        _ => UNICODE,
-    }
-}

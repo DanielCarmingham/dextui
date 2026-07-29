@@ -572,8 +572,8 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Vec<Line<'a>> {
 /// It emits only `Reset`, `dark_gray` and `cyan` — ANSI names the terminal
 /// remaps per mode — so it does not reintroduce the fixed-colour problem that
 /// made the old theme palettes unreadable on a light background.
-fn markdown_lines(text: &str) -> Vec<Line<'_>> {
-    tui_markdown::from_str(text).lines
+fn markdown_lines(text: &str) -> Vec<Line<'static>> {
+    crate::markdown::render(text)
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
@@ -792,6 +792,7 @@ mod tests {
                 task("kid", Some("root"), "Child task"),
             ],
             "demo".into(),
+            crate::config::Config::default(),
         );
 
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -851,6 +852,7 @@ mod tests {
                 ..Default::default()
             }],
             "demo".into(),
+            crate::config::Config::default(),
         );
 
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();

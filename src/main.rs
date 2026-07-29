@@ -1,8 +1,10 @@
 //! dex-tui — a two-pane terminal browser for dex tasks.
 
 mod app;
+mod config;
 mod dex;
 mod icons;
+mod markdown;
 mod tree;
 mod ui;
 mod watch;
@@ -53,7 +55,21 @@ fn main() -> std::io::Result<()> {
         }
     };
 
-    let mut app = App::new(tasks, store_label(&store_dir));
+    let (cfg, config_problem) = config::load();
+
+    if std::env::args().any(|a| a == "--config") {
+        match config::path() {
+            Some(p) => println!("# {}\n", p.display()),
+            None => println!("# (could not resolve a config path)\n"),
+        }
+        print!("{}", config::EXAMPLE);
+        return Ok(());
+    }
+
+    let mut app = App::new(tasks, store_label(&store_dir), cfg);
+    if let Some(msg) = config_problem {
+        app.status = format!("config: {msg}");
+    }
 
     if std::env::args().any(|a| a == "--icons") {
         println!("Set with DEXTUI_ICONS=<tier>\n");
@@ -106,7 +122,7 @@ fn main() -> std::io::Result<()> {
         });
     }
 
-    let glyphs = icons::from_env();
+    let glyphs = cfg.icons;
     let mut terminal = ratatui::init();
 
     while !app.should_quit {

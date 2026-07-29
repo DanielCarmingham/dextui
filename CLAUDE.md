@@ -242,6 +242,39 @@ unreachable.
 Changing selection resets the scroll, or you land halfway down a task you have
 not read.
 
+## Preferences
+
+`~/.config/dex-tui/config.toml` sets **starting values**. `--config` prints a
+commented example along with the resolved path.
+
+```toml
+sort = "priority"       # priority | updated | created | name
+sort_reversed = false
+filter = "pending"      # pending | active | all
+wrap = true
+icons = "unicode"       # nerd | unicode | ascii
+```
+
+**The file is read-only.** `w`, `o`, `O` and `f` affect only the current run and
+are never written back. Persisting every toggle would mean turning wrap off for
+one wide table silently changed your default forever, and it would clobber
+comments in a file you had hand-edited.
+
+Precedence is defaults < file < `DEXTUI_*` env, so `DEXTUI_ICONS=nerd` still
+works as a one-off override. `config` owns that precedence; other modules just
+receive a resolved `Config`.
+
+Failure is deliberately soft. A missing file is normal and silent; a malformed
+one, or an unknown value, is reported in the status bar and then ignored.
+Refusing to start over a typo in a preferences file would be the worse failure.
+Unknown *keys* are an error (`deny_unknown_fields`) rather than a silent no-op,
+so a misspelled setting tells you instead of pretending to work.
+
+Soft line breaks are **not** configurable: a single newline is always a line
+break. Descriptions are frequently not markdown at all, and plain text should
+survive as written — joining lines was a regression from the tui-markdown swap,
+and a switch to re-enable a regression has no use.
+
 ## Sorting
 
 `o` cycles the order, `O` reverses it, and the current one shows in the header.

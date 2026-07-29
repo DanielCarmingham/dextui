@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::config::Config;
 use crate::dex::Task;
 use crate::tree::{self, Filter, Node, Progress, Sort};
 
@@ -128,7 +129,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(tasks: Vec<Task>, store_label: String) -> Self {
+    pub fn new(tasks: Vec<Task>, store_label: String, cfg: Config) -> Self {
         let mut app = Self {
             by_id: index(&tasks),
             tasks,
@@ -136,9 +137,9 @@ impl App {
             progress: HashMap::new(),
             expanded: HashSet::new(),
             selected: None,
-            filter: Filter::Pending,
-            sort: Sort::Priority,
-            sort_reversed: false,
+            filter: cfg.filter,
+            sort: cfg.sort,
+            sort_reversed: cfg.sort_reversed,
             query: TextInput::default(),
             mode: Mode::Normal,
             status: String::new(),
@@ -146,7 +147,7 @@ impl App {
             should_quit: false,
             focus: Focus::Tree,
             detail_scroll: (0, 0),
-            wrap: true,
+            wrap: cfg.wrap,
             detail_content_height: 0,
             detail_viewport_height: 0,
             pending_refresh: false,
@@ -490,7 +491,7 @@ mod tests {
     }
 
     fn app_with(tasks: Vec<Task>, selected: &str) -> App {
-        let mut app = App::new(tasks, "test".into());
+        let mut app = App::new(tasks, "test".into(), Config::default());
         app.selected = Some(selected.to_string());
         app
     }
@@ -628,6 +629,7 @@ mod tests {
         let app = App::new(
             vec![task("root", None, &["kid"]), task("kid", Some("root"), &[])],
             "test".into(),
+            Config::default(),
         );
 
         assert!(app.expanded.contains("root"));
@@ -648,7 +650,7 @@ mod tests {
 
     #[test]
     fn tab_moves_focus_between_the_panes() {
-        let mut app = App::new(vec![task("a", None, &[])], "t".into());
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
         assert_eq!(app.focus, Focus::Tree);
         app.toggle_focus();
         assert_eq!(app.focus, Focus::Detail);
@@ -658,7 +660,7 @@ mod tests {
 
     #[test]
     fn detail_scroll_is_clamped_to_the_content() {
-        let mut app = App::new(vec![task("a", None, &[])], "t".into());
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
         app.detail_content_height = 30;
         app.detail_viewport_height = 10;
 
@@ -671,7 +673,7 @@ mod tests {
 
     #[test]
     fn content_shorter_than_the_pane_does_not_scroll() {
-        let mut app = App::new(vec![task("a", None, &[])], "t".into());
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
         app.detail_content_height = 4;
         app.detail_viewport_height = 20;
 
@@ -683,7 +685,7 @@ mod tests {
     fn horizontal_scroll_is_ignored_while_wrapping() {
         // Wrapping removes the overflow there would be anything to scroll to,
         // so accepting an offset would just move content off-screen for nothing.
-        let mut app = App::new(vec![task("a", None, &[])], "t".into());
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
         assert!(app.wrap);
 
         app.scroll_detail(0, 10);
@@ -696,7 +698,7 @@ mod tests {
 
     #[test]
     fn turning_wrap_back_on_resets_the_horizontal_offset() {
-        let mut app = App::new(vec![task("a", None, &[])], "t".into());
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
         app.toggle_wrap();
         app.scroll_detail(0, 12);
         assert_eq!(app.detail_scroll.1, 12);
@@ -711,6 +713,7 @@ mod tests {
         let mut app = App::new(
             vec![task("a", None, &[]), task("b", None, &[])],
             "t".into(),
+            Config::default(),
         );
         app.detail_content_height = 50;
         app.detail_viewport_height = 10;
@@ -723,7 +726,7 @@ mod tests {
 
     #[test]
     fn re_selecting_the_same_task_keeps_your_place() {
-        let mut app = App::new(vec![task("a", None, &[])], "t".into());
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
         app.detail_content_height = 50;
         app.detail_viewport_height = 10;
         app.scroll_detail(15, 0);
