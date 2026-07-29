@@ -249,8 +249,22 @@ not read.
 
 ## Preferences
 
-`~/.config/dex-tui/config.toml` sets **starting values**. `--config` prints a
-commented example along with the resolved path.
+Layered **defaults < global < project < environment**, matching dex's own
+precedence so both behave the same way in the same repository:
+
+| layer | path |
+| --- | --- |
+| global | `~/.config/dex-tui/config.toml` |
+| project | `.dex-tui.toml` at the git root |
+
+`--config` prints both paths, whether each exists, and a commented example. A
+project file need only mention what it changes; everything else falls through to
+the global file. A bad value in one layer is reported and leaves the layer
+beneath intact, rather than resetting to the built-in default.
+
+The git root is found by walking up for a `.git` entry rather than shelling out
+to git — no process spawn, and it matches worktrees too, where `.git` is a file
+rather than a directory.
 
 ```toml
 sort = "priority"       # priority | updated | created | name

@@ -63,10 +63,15 @@ fn main() -> std::io::Result<()> {
     let (cfg, config_problem) = config::load();
 
     if std::env::args().any(|a| a == "--config") {
-        match config::path() {
-            Some(p) => println!("# {}\n", p.display()),
-            None => println!("# (could not resolve a config path)\n"),
-        }
+        let mark = |p: Option<std::path::PathBuf>| match p {
+            Some(p) => {
+                let state = if p.exists() { "present" } else { "not present" };
+                format!("{}  ({state})", p.display())
+            }
+            None => "(could not resolve)".to_string(),
+        };
+        println!("# global   {}", mark(config::path()));
+        println!("# project  {}\n", mark(config::project_path()));
         print!("{}", config::EXAMPLE);
         return Ok(());
     }

@@ -50,7 +50,25 @@ impl Default for Config {
     }
 }
 
-/// Where the config lives, honouring `XDG_CONFIG_HOME` like dex itself does.
+/// The per-project file, `.dex-tui.toml` at the git root.
+///
+/// Mirrors how dex layers `.dex/config.toml` over its global file, so "in this
+/// repo, start unwrapped" is expressible. The root is found by walking up for a
+/// `.git` entry rather than shelling out to git: no process spawn, and it also
+/// matches worktrees, where `.git` is a file rather than a directory.
+pub fn project_path() -> Option<PathBuf> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir.join(".dex-tui.toml"));
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// Where the global config lives, honouring `XDG_CONFIG_HOME` like dex does.
 pub fn path() -> Option<PathBuf> {
     let base = match std::env::var_os("XDG_CONFIG_HOME") {
         Some(x) if !x.is_empty() => PathBuf::from(x),
@@ -59,62 +77,74 @@ pub fn path() -> Option<PathBuf> {
     Some(base.join("dex-tui").join("config.toml"))
 }
 
-/// Loads the config, returning it plus any problem worth telling the user about.
+/// Applies one file's values over `cfg`, recording anything unrecognised.
 ///
-/// Never fails: an unreadable or invalid file yields defaults and a message.
-pub fn load() -> (Config, Option<String>) {
-    let Some(p) = path() else {
-        return (Config::default(), None);
-    };
-
-    let raw = match std::fs::read_to_string(&p) {
-        Ok(text) => match toml::from_str::<Raw>(&text) {
-            Ok(raw) => raw,
-            Err(e) => {
-                return (
-                    Config::default(),
-                    Some(format!("{}: {}", p.display(), first_line(&e.to_string()))),
-                );
-            }
-        },
-        // Absent is the normal case and not worth mentioning.
-        Err(_) => Raw::default(),
-    };
-
-    let mut cfg = Config::default();
-    let mut problem = None;
-
+/// Only keys actually present are applied, so a partial project file overrides
+/// exactly what it mentions and leaves the rest of the global file intact.
+fn apply(cfg: &mut Config, raw: Raw, problems: &mut Vec<String>) {
     if let Some(v) = raw.sort.as_deref() {
         match parse_sort(v) {
             Some(s) => cfg.sort = s,
-            None => problem = Some(format!("unknown sort {v:?}; using the default")),
+            None => problems.push(format!("unknown sort {v:?}")),
         }
     }
     if let Some(v) = raw.filter.as_deref() {
         match parse_filter(v) {
             Some(f) => cfg.filter = f,
-            None => problem = Some(format!("unknown filter {v:?}; using the default")),
+            None => problems.push(format!("unknown filter {v:?}")),
         }
     }
     if let Some(v) = raw.icons.as_deref() {
         match parse_icons(v) {
             Some(i) => cfg.icons = i,
-            None => problem = Some(format!("unknown icons {v:?}; using the default")),
+            None => problems.push(format!("unknown icons {v:?}")),
         }
     }
-
     if let Some(v) = raw.sort_reversed {
         cfg.sort_reversed = v;
     }
     if let Some(v) = raw.wrap {
         cfg.wrap = v;
     }
+}
 
-    // Environment last, so it overrides the file for a one-off run.
+/// Reads one file, or `None` if it is absent. A parse failure is reported and
+/// treated as absent.
+fn read(path: Option<&PathBuf>, problems: &mut Vec<String>) -> Option<Raw> {
+    let p = path?;
+    let text = std::fs::read_to_string(p).ok()?;
+    match toml::from_str::<Raw>(&text) {
+        Ok(raw) => Some(raw),
+        Err(e) => {
+            problems.push(format!("{}: {}", p.display(), first_line(&e.to_string())));
+            None
+        }
+    }
+}
+
+/// Loads the config, returning it plus anything worth telling the user about.
+///
+/// Layered defaults < global < project < environment, matching dex's own
+/// precedence so the two behave the same way in the same repository.
+///
+/// Never fails: an unreadable or invalid file yields the layer beneath it.
+pub fn load() -> (Config, Option<String>) {
+    let mut cfg = Config::default();
+    let mut problems: Vec<String> = Vec::new();
+
+    if let Some(raw) = read(path().as_ref(), &mut problems) {
+        apply(&mut cfg, raw, &mut problems);
+    }
+    if let Some(raw) = read(project_path().as_ref(), &mut problems) {
+        apply(&mut cfg, raw, &mut problems);
+    }
+
+    // Environment last, so it overrides both files for a one-off run.
     if let Some(i) = std::env::var("DEXTUI_ICONS").ok().and_then(|v| parse_icons(&v)) {
         cfg.icons = i;
     }
 
+    let problem = (!problems.is_empty()).then(|| problems.join("; "));
     (cfg, problem)
 }
 
@@ -151,10 +181,13 @@ pub fn parse_icons(v: &str) -> Option<Icons> {
 }
 
 /// Printed by `--config` so there is something to copy rather than invent.
-pub const EXAMPLE: &str = r#"# ~/.config/dex-tui/config.toml
-#
-# Starting values only. w / o / O / f still toggle freely at runtime; nothing
+pub const EXAMPLE: &str = r#"# Starting values only. w / o / O / f still toggle freely at runtime; nothing
 # is written back, so this file stays exactly as you left it.
+#
+# Layered defaults < global < project < environment:
+#   global   ~/.config/dex-tui/config.toml
+#   project  .dex-tui.toml at the git root
+# A project file need only mention what it changes.
 
 # priority | updated | created | name
 sort = "priority"
@@ -251,5 +284,71 @@ mod tests {
         let raw: Raw = toml::from_str("wrap = false").unwrap();
         assert_eq!(raw.wrap, Some(false));
         assert!(raw.sort.is_none());
+    }
+
+    fn raw(toml_src: &str) -> Raw {
+        toml::from_str(toml_src).expect("test fixture should parse")
+    }
+
+    #[test]
+    fn a_project_file_overrides_only_what_it_mentions() {
+        // The point of layering: "in this repo, start unwrapped" without
+        // restating every other preference.
+        let mut cfg = Config::default();
+        let mut problems = Vec::new();
+
+        apply(&mut cfg, raw("sort = \"updated\"\nfilter = \"all\""), &mut problems);
+        apply(&mut cfg, raw("wrap = false"), &mut problems);
+
+        assert!(!cfg.wrap, "project value not applied");
+        assert_eq!(cfg.sort, Sort::Updated, "global value was lost");
+        assert_eq!(cfg.filter, Filter::All, "global value was lost");
+        assert!(problems.is_empty());
+    }
+
+    #[test]
+    fn the_later_layer_wins_on_the_same_key() {
+        let mut cfg = Config::default();
+        let mut problems = Vec::new();
+
+        apply(&mut cfg, raw("sort = \"name\""), &mut problems);
+        apply(&mut cfg, raw("sort = \"created\""), &mut problems);
+
+        assert_eq!(cfg.sort, Sort::Created);
+    }
+
+    #[test]
+    fn an_empty_layer_changes_nothing() {
+        let mut cfg = Config::default();
+        let mut problems = Vec::new();
+        apply(&mut cfg, raw("sort = \"name\""), &mut problems);
+
+        apply(&mut cfg, raw(""), &mut problems);
+
+        assert_eq!(cfg.sort, Sort::Name);
+    }
+
+    #[test]
+    fn a_bad_value_is_reported_and_leaves_the_layer_beneath_intact() {
+        let mut cfg = Config::default();
+        let mut problems = Vec::new();
+
+        apply(&mut cfg, raw("sort = \"updated\""), &mut problems);
+        apply(&mut cfg, raw("sort = \"nonsense\""), &mut problems);
+
+        assert_eq!(cfg.sort, Sort::Updated, "a typo should not reset to the default");
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].contains("nonsense"));
+    }
+
+    #[test]
+    fn problems_from_several_layers_are_all_reported() {
+        let mut cfg = Config::default();
+        let mut problems = Vec::new();
+
+        apply(&mut cfg, raw("sort = \"bogus\""), &mut problems);
+        apply(&mut cfg, raw("filter = \"bogus\""), &mut problems);
+
+        assert_eq!(problems.len(), 2);
     }
 }
