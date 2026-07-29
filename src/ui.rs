@@ -19,7 +19,7 @@ use crate::app::{App, Focus, Mode};
 /// terminal, so the app inherits whatever scheme the user runs -- including a
 /// light/dark switch at runtime -- instead of imposing its own. The values live
 /// in `theme`; this module decides where they go.
-use crate::theme::{ACTIVE, BLOCKED, CODE, DIM, DONE, PLAIN, TODO};
+use crate::theme::{ACTIVE, ACTIVE_PULSE, BLOCKED, CODE, DIM, DONE, PLAIN, TODO};
 
 use crate::icons::Icons;
 use crate::dex::{self, age, local_time, Status, Task};
@@ -92,6 +92,25 @@ fn status_color(s: Status) -> Color {
         Status::InProgress => ACTIVE,
         Status::Blocked => BLOCKED,
         Status::Pending => TODO,
+    }
+}
+
+/// The status marker's style for the current animation frame.
+///
+/// **The glyph never changes shape; only its intensity breathes.** A marker that
+/// changed shape between frames would shift the column every task name lines up
+/// in -- the same failure that rules out a braille spinner, which macOS
+/// substitutes at 1.11 cells.
+///
+/// Only in progress pulses. It is the one state that is *happening*, and making
+/// the rest move too would turn a signal into screen flicker.
+fn status_style(s: Status, pulse: bool) -> Style {
+    if s == Status::InProgress && pulse {
+        Style::default()
+            .fg(ACTIVE_PULSE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(status_color(s))
     }
 }
 
@@ -329,7 +348,7 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
                 ),
                 Span::styled(
                     format!("{} ", glyph(dex::status(t, &app.by_id), ic)),
-                    Style::default().fg(status_color(dex::status(t, &app.by_id))),
+                    status_style(dex::status(t, &app.by_id), app.pulse_on),
                 ),
             ];
 
@@ -1363,6 +1382,129 @@ mod tests {
     fn the_fraction_stays_beside_the_bar() {
         let spans = meter_spans(Progress { done: 3, active: 0, total: 8 }, &crate::icons::UNICODE);
         assert_eq!(spans.last().unwrap().content.as_ref(), " 3/8");
+    }
+
+    fn started(id: &str, name: &str) -> Task {
+        Task {
+            started_at: Some("2026-01-01T00:00:00Z".into()),
+            ..task(id, None, name)
+        }
+    }
+
+    /// A whole frame as a `Buffer`, which keeps the per-cell styling the plain
+    /// `render` helper throws away -- and styling is the entire subject here.
+    fn render_frame(tasks: Vec<Task>, pulse_on: bool, ic: &Icons) -> ratatui::buffer::Buffer {
+        let mut app = App::new(tasks, "demo".into(), crate::config::Config::default());
+        app.filter = tree::Filter::All;
+        app.rebuild();
+        app.pulse_on = pulse_on;
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|f| draw(f, &mut app, ic)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// Where `symbol` is drawn, and how, in the tree pane.
+    fn find_cell(buf: &ratatui::buffer::Buffer, symbol: &str) -> ((u16, u16), Style) {
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if buf[(x, y)].symbol() == symbol {
+                    return ((x, y), buf[(x, y)].style());
+                }
+            }
+        }
+        panic!("{symbol:?} was never drawn");
+    }
+
+    /// The shape assertion is the point. A glyph that changed between frames
+    /// would shift the column every task name lines up in, which is the exact
+    /// failure that rules out a braille spinner here.
+    #[test]
+    fn an_in_progress_row_renders_in_both_phases_without_changing_shape() {
+        let ic = &crate::icons::UNICODE;
+        let tasks = || vec![task("a", None, "Idle task"), started("b", "Running task")];
+
+        let (off_at, off_style) = find_cell(&render_frame(tasks(), false, ic), ic.active);
+        let (on_at, on_style) = find_cell(&render_frame(tasks(), true, ic), ic.active);
+
+        assert_eq!(off_at, on_at, "the marker moved between frames");
+
+        assert_eq!(off_style.fg, Some(ACTIVE));
+        assert!(!off_style.add_modifier.contains(Modifier::BOLD));
+
+        assert_eq!(on_style.fg, Some(crate::theme::ACTIVE_PULSE));
+        assert!(on_style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    /// Without this the pulse could quietly become a whole-screen flicker rather
+    /// than a signal about one row.
+    #[test]
+    fn only_the_in_progress_glyph_pulses() {
+        let mut done = task("done", None, "Finished task");
+        done.completed = true;
+        let mut blocked = task("blocked", None, "Blocked task");
+        blocked.blocked_by = vec!["pending".into()];
+
+        let tasks = || {
+            vec![
+                task("pending", None, "Pending task"),
+                done.clone(),
+                blocked.clone(),
+            ]
+        };
+
+        for ic in crate::icons::ALL {
+            assert_eq!(
+                render_frame(tasks(), false, &ic),
+                render_frame(tasks(), true, &ic),
+                "tier {} repaints with nothing running",
+                crate::icons::name(ic.tier)
+            );
+        }
+    }
+
+    /// A pulse repaint can now land while a dialog is open, which never happened
+    /// before. Immediate-mode rendering makes it safe by construction -- the
+    /// prompt is redrawn from `app.mode` with the same value -- but "safe by
+    /// construction" is an argument, and this is a check.
+    #[test]
+    fn a_pulse_repaint_does_not_disturb_an_open_prompt() {
+        let ic = &crate::icons::UNICODE;
+
+        let frame = |pulse_on: bool| {
+            let mut app = App::new(
+                vec![started("b", "Running task")],
+                "demo".into(),
+                crate::config::Config::default(),
+            );
+            app.mode = Mode::Prompt(crate::app::Prompt {
+                title: "Rename: Running task".into(),
+                label: "Name".into(),
+                input: crate::app::TextInput::new("half-typed"),
+                pending: crate::app::Pending::EditName { id: "b".into() },
+            });
+            app.pulse_on = pulse_on;
+
+            let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+            terminal.draw(|f| draw(f, &mut app, ic)).unwrap();
+            let cursor = terminal.get_cursor_position().unwrap();
+            (terminal.backend().buffer().clone(), cursor)
+        };
+
+        let (off, off_cursor) = frame(false);
+        let (on, on_cursor) = frame(true);
+
+        assert_eq!(off_cursor, on_cursor, "the cursor moved mid-typing");
+        let text = |b: &ratatui::buffer::Buffer| {
+            (0..b.area.height)
+                .map(|y| {
+                    (0..b.area.width)
+                        .map(|x| b[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(text(&off), text(&on), "the prompt redrew differently");
     }
 
     /// The tree pane's content for each row, without the two pane borders.

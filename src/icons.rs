@@ -9,6 +9,18 @@
 //! Note that `✗` U+2717, `✘` U+2718 and `⊗` U+2297 are also missing, so there is
 //! no pure-Unicode cross available; the unicode tier uses `×` U+00D7.
 //!
+//! **There is no spinner here, and there cannot be a braille one.** FiraCode
+//! Nerd Font contains no braille at all, so `⠋⠙⠹` — what `ora`, and therefore
+//! yarn and npm, use — is font-fallbacked by macOS to Apple Braille at **1.11
+//! cells**. That is fine in yarn, where the spinner is one transient glyph at
+//! the end of a line with nothing aligned beneath it; here the status marker
+//! sits in a column, so an 11%-oversized glyph would make the whole tree jitter
+//! as tasks start and stop. Nerd Fonts 3.3.0 *does* ship a real 6-frame arc
+//! spinner at U+EE06–EE0B, native at exactly 1.00 cells (see [`NERD`]), and it
+//! is deliberately unused: it exists in this tier alone, and a second animation
+//! model for one tier is not worth two code paths. Motion is instead carried
+//! entirely by colour — see `pulse` — so the glyph never changes shape.
+//!
 //! The tier comes from the config file or `DEXTUI_ICONS`; `config` owns that
 //! precedence. The default is `unicode`, because a Nerd Font cannot be reliably
 //! detected at runtime and guessing wrong yields a screen full of tofu.

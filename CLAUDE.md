@@ -50,6 +50,7 @@ and to check behaviour where no interactive terminal exists.
 | `src/app.rs` | All view state, plus the refresh-survival rules. |
 | `src/ui.rs` | Immediate-mode rendering, and `selftest`. |
 | `src/watch.rs` | Debounced FS events plus the safety poll. |
+| `src/pulse.rs` | The animation clock, and the guard on its idle cost. |
 | `src/main.rs` | Event loop and key handling. |
 
 Tests live in `#[cfg(test)]` modules beside the code they cover.

@@ -6,13 +6,13 @@ mod dex;
 mod editor;
 mod icons;
 mod markdown;
+mod pulse;
 mod theme;
 mod tree;
 mod ui;
 mod watch;
 
 use std::sync::mpsc::{channel, Sender};
-use std::time::Duration;
 use std::sync::Arc;
 use std::thread;
 
@@ -283,9 +283,21 @@ fn main() -> std::io::Result<()> {
 
     // Polled rather than run from a reader thread. A thread blocked in
     // `event::read()` would swallow the first keystroke intended for $EDITOR,
-    // because both it and the child would be reading the same terminal.
+    // because both it and the child would be reading the same terminal. The
+    // pulse deliberately does not change that: it is arithmetic on this thread,
+    // not a timer thread, so nothing else can ever reach for the terminal.
+    //
+    // `Instant`, not `SystemTime`: monotonic, so an NTP step or a laptop waking
+    // from sleep cannot jump the animation's phase.
+    let epoch = std::time::Instant::now();
     let mut dirty = true;
     while !app.should_quit {
+        // The only redraw animation ever causes, and only while something is
+        // actually in progress.
+        if app.pulse_tick(epoch.elapsed()) {
+            dirty = true;
+        }
+
         if dirty {
             terminal.draw(|f| ui::draw(f, &mut app, &glyphs))?;
             dirty = false;
@@ -293,7 +305,10 @@ fn main() -> std::io::Result<()> {
 
         // The timeout bounds how long a store change waits to be noticed; it is
         // not a redraw interval, since nothing is drawn unless something changed.
-        if event::poll(Duration::from_millis(100))? {
+        // While a task is running it is additionally clamped to the next phase
+        // flip, which can only ever shorten it -- when nothing is running this
+        // is the same 100ms it has always been, and the idle cost stays zero.
+        if event::poll(pulse::poll_timeout(app.is_animating(), epoch.elapsed()))? {
             match event::read()? {
                 CtEvent::Key(key) if key.kind == KeyEventKind::Press => {
                     handle_key(&mut app, key, &dex, &tx);

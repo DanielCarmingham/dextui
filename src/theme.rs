@@ -36,17 +36,23 @@ pub const ACTIVE: Color = Color::Blue;
 pub const DONE: Color = Color::Green;
 pub const BLOCKED: Color = Color::Red;
 
+/// The bright end of the in-progress breath. In-progress markers alternate
+/// between [`ACTIVE`] and this, bolded, every `pulse::HALF_PERIOD`; the glyph
+/// itself never changes shape, so the marker column cannot jitter.
+pub const ACTIVE_PULSE: Color = Color::LightBlue;
+
 /// Inline code and other literal spans in rendered markdown.
 pub const CODE: Color = Color::Cyan;
 
 /// Every colour above, for the policy test. A colour missing from this list is
 /// unguarded, so add new ones here as well.
 #[cfg(test)]
-pub const ALL: [(&str, Color); 7] = [
+pub const ALL: [(&str, Color); 8] = [
     ("PLAIN", PLAIN),
     ("DIM", DIM),
     ("TODO", TODO),
     ("ACTIVE", ACTIVE),
+    ("ACTIVE_PULSE", ACTIVE_PULSE),
     ("DONE", DONE),
     ("BLOCKED", BLOCKED),
     ("CODE", CODE),

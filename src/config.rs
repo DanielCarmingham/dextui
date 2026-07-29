@@ -27,6 +27,7 @@ pub struct Raw {
     filter: Option<String>,
     wrap: Option<bool>,
     icons: Option<String>,
+    animate: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -36,6 +37,9 @@ pub struct Config {
     pub filter: Filter,
     pub wrap: bool,
     pub icons: Icons,
+    /// Whether in-progress rows breathe. Off restores the pre-animation event
+    /// loop exactly -- see `pulse::poll_timeout`.
+    pub animate: bool,
 }
 
 impl Default for Config {
@@ -46,6 +50,7 @@ impl Default for Config {
             filter: Filter::Pending,
             wrap: true,
             icons: icons::UNICODE,
+            animate: true,
         }
     }
 }
@@ -106,6 +111,9 @@ fn apply(cfg: &mut Config, raw: Raw, problems: &mut Vec<String>) {
     if let Some(v) = raw.wrap {
         cfg.wrap = v;
     }
+    if let Some(v) = raw.animate {
+        cfg.animate = v;
+    }
 }
 
 /// Reads one file, or `None` if it is absent. A parse failure is reported and
@@ -143,6 +151,9 @@ pub fn load() -> (Config, Option<String>) {
     if let Some(i) = std::env::var("DEXTUI_ICONS").ok().and_then(|v| parse_icons(&v)) {
         cfg.icons = i;
     }
+    if let Some(v) = std::env::var("DEXTUI_ANIMATE").ok().and_then(|v| parse_bool(&v)) {
+        cfg.animate = v;
+    }
 
     let problem = (!problems.is_empty()).then(|| problems.join("; "));
     (cfg, problem)
@@ -167,6 +178,18 @@ pub fn parse_filter(v: &str) -> Option<Filter> {
         "pending" => Some(Filter::Pending),
         "active" | "in-progress" | "in_progress" => Some(Filter::InProgress),
         "all" => Some(Filter::All),
+        _ => None,
+    }
+}
+
+/// Only for the environment layer: TOML already has a real boolean, so a file
+/// cannot spell one wrongly. An unrecognised env value is ignored in silence,
+/// matching `DEXTUI_ICONS` -- files report their problems, the environment does
+/// not, because it is a one-off override rather than something you maintain.
+pub fn parse_bool(v: &str) -> Option<bool> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
         _ => None,
     }
 }
@@ -204,6 +227,10 @@ wrap = true
 
 # nerd | unicode | ascii   (DEXTUI_ICONS overrides this for one run)
 icons = "unicode"
+
+# Breathe the marker on in-progress tasks. Costs nothing while nothing is
+# running.  (DEXTUI_ANIMATE overrides this for one run)
+animate = true
 "#;
 
 /// Which file a command acts on.
@@ -270,6 +297,7 @@ pub const PROJECT_EXAMPLE: &str = r#"# .dextui.toml — settings for this reposi
 # sort_reversed = false
 # filter = "pending"    # pending | active | all
 # icons = "unicode"     # nerd | unicode | ascii
+# animate = false       # no pulse on in-progress rows in this repo
 "#;
 
 #[cfg(test)]
@@ -406,6 +434,64 @@ mod tests {
         assert_eq!(cfg.sort, Sort::Updated, "a typo should not reset to the default");
         assert_eq!(problems.len(), 1);
         assert!(problems[0].contains("nonsense"));
+    }
+
+    /// The pulse is the app's only motion, and it is calm by design, so it is on
+    /// unless someone asks otherwise.
+    #[test]
+    fn animation_is_on_by_default() {
+        assert!(Config::default().animate);
+    }
+
+    #[test]
+    fn animate_can_be_turned_off_in_a_file() {
+        let mut cfg = Config::default();
+        let mut problems = Vec::new();
+
+        apply(&mut cfg, raw("animate = false"), &mut problems);
+
+        assert!(!cfg.animate);
+        assert!(problems.is_empty());
+    }
+
+    /// The opt-out has to be reachable per repository too: one noisy project is
+    /// exactly the case where you would turn it off without touching the global
+    /// file.
+    #[test]
+    fn a_project_file_can_override_animate() {
+        let mut cfg = Config::default();
+        let mut problems = Vec::new();
+
+        apply(&mut cfg, raw("animate = true"), &mut problems);
+        apply(&mut cfg, raw("animate = false"), &mut problems);
+
+        assert!(!cfg.animate);
+    }
+
+    /// `deny_unknown_fields` means the template and the struct cannot drift
+    /// apart -- but only if the template actually mentions the key.
+    #[test]
+    fn the_example_file_documents_animate() {
+        let raw: Raw = toml::from_str(EXAMPLE).expect("EXAMPLE must parse");
+        assert_eq!(raw.animate, Some(true));
+    }
+
+    /// `DEXTUI_ANIMATE` itself is deliberately not tested through `load()`: env
+    /// vars are process-global and `cargo test` runs threads in parallel, so
+    /// such a test would be flaky -- which is why `DEXTUI_ICONS` has none
+    /// either. Keeping `load()` a thin wiring line over a tested parser is what
+    /// makes that acceptable.
+    #[test]
+    fn parse_bool_accepts_the_usual_spellings() {
+        for v in ["true", "1", "yes", "on", " TRUE ", "On"] {
+            assert_eq!(parse_bool(v), Some(true), "{v:?}");
+        }
+        for v in ["false", "0", "no", "off", " FALSE ", "Off"] {
+            assert_eq!(parse_bool(v), Some(false), "{v:?}");
+        }
+        for v in ["maybe", "", "2"] {
+            assert_eq!(parse_bool(v), None, "{v:?}");
+        }
     }
 
     #[test]

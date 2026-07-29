@@ -142,6 +142,11 @@ pub struct App {
     pub detail_viewport_height: u16,
     /// Set when a refresh arrives while a dialog is open; applied on close.
     pub pending_refresh: bool,
+    /// Whether in-progress rows breathe at all. From the config, and the opt-out
+    /// reaches the event loop's timeout rather than only the colour.
+    pub animate: bool,
+    /// Which of the pulse's two frames the renderer should draw.
+    pub pulse_on: bool,
 }
 
 impl App {
@@ -176,6 +181,8 @@ impl App {
             detail_content_height: 0,
             detail_viewport_height: 0,
             pending_refresh: false,
+            animate: cfg.animate,
+            pulse_on: false,
         };
 
         // Everything is "new" on first load, so the collapse-new-tasks rule would
@@ -414,6 +421,33 @@ impl App {
         (pending, active)
     }
 
+    /// Whether anything on screen is currently breathing.
+    ///
+    /// `animate` is tested first on purpose, so the opt-out costs nothing at all
+    /// -- otherwise turning it off would still pay for the scan on every wakeup.
+    pub fn is_animating(&self) -> bool {
+        self.animate && self.tasks.iter().any(|t| t.is_in_progress())
+    }
+
+    /// Advances the pulse, returning true when the frame needs repainting.
+    ///
+    /// That return value is the *only* redraw animation ever causes, which is
+    /// what keeps the cost of this feature to a number you can state.
+    ///
+    /// `elapsed` is passed in rather than read from a clock so the schedule is
+    /// deterministically testable, and it folds in the settle case for free:
+    /// when the last in-progress task finishes, `is_animating` goes false and
+    /// the marker returns to its base state in one final repaint rather than
+    /// freezing bright.
+    pub fn pulse_tick(&mut self, elapsed: std::time::Duration) -> bool {
+        let want = self.is_animating() && crate::pulse::phase(elapsed);
+        if want == self.pulse_on {
+            return false;
+        }
+        self.pulse_on = want;
+        true
+    }
+
     pub fn cycle_sort(&mut self) {
         self.sort = self.sort.next();
         self.rebuild();
@@ -469,6 +503,7 @@ impl App {
         self.sort_reversed = cfg.sort_reversed;
         self.filter = cfg.filter;
         self.wrap = cfg.wrap;
+        self.animate = cfg.animate;
         self.rebuild();
     }
 
@@ -707,6 +742,101 @@ mod tests {
 
         assert!(app.expanded.contains("root"));
         assert_eq!(app.row_ids().len(), 2);
+    }
+
+    fn started(id: &str) -> Task {
+        Task {
+            started_at: Some("2026-01-01T00:00:00Z".to_string()),
+            ..task(id, None, &[])
+        }
+    }
+
+    /// The strongest form of the idle-cost guard, written as an exact repaint
+    /// count rather than a comment: a store with nothing running must never ask
+    /// for a frame, no matter how long it sits there.
+    #[test]
+    fn an_idle_store_never_repaints_itself() {
+        let mut app = app_with(vec![task("a", None, &[]), task("b", None, &[])], "a");
+
+        for ms in (0..5000).step_by(37) {
+            assert!(
+                !app.pulse_tick(std::time::Duration::from_millis(ms)),
+                "an idle store asked to repaint at {ms}ms"
+            );
+        }
+    }
+
+    /// The cost budget, written down. Two full breaths are four flips and
+    /// therefore four repaints -- an exact number, not "it ticks".
+    #[test]
+    fn a_running_store_repaints_exactly_once_per_phase() {
+        let mut app = app_with(vec![started("a")], "a");
+
+        let repaints = (0..=2800)
+            .filter(|ms| app.pulse_tick(std::time::Duration::from_millis(*ms)))
+            .count();
+
+        assert_eq!(repaints, 4, "~1.4 repaints/sec is the whole budget");
+    }
+
+    /// `started_at` survives completion, so a naive `started_at.is_some()` would
+    /// animate a finished store forever.
+    #[test]
+    fn a_completed_task_does_not_keep_the_pulse_running() {
+        let mut done = started("a");
+        done.completed = true;
+        let app = app_with(vec![done], "a");
+
+        assert!(!app.is_animating());
+    }
+
+    /// The opt-out must reach the idle cost, not merely the colour.
+    #[test]
+    fn turning_animation_off_stops_the_tick_even_with_work_in_progress() {
+        let mut app = app_with(vec![started("a")], "a");
+        assert!(app.is_animating(), "fixture should animate to begin with");
+
+        app.animate = false;
+
+        assert!(!app.is_animating());
+        for ms in (0..3000).step_by(50) {
+            assert!(!app.pulse_tick(std::time::Duration::from_millis(ms)), "{ms}ms");
+        }
+    }
+
+    /// Otherwise `,`-reload would silently ignore the key, which is exactly the
+    /// moment a preference file is meant to win.
+    #[test]
+    fn reloading_the_config_carries_the_animate_setting() {
+        let mut app = app_with(vec![started("a")], "a");
+        assert!(app.animate);
+
+        app.apply_config(Config {
+            animate: false,
+            ..Config::default()
+        });
+
+        assert!(!app.animate);
+        assert!(!app.is_animating());
+    }
+
+    /// When the last in-progress task finishes, the marker must settle back to
+    /// its base state rather than freezing bright.
+    #[test]
+    fn the_pulse_settles_when_the_last_task_stops() {
+        let mut app = app_with(vec![started("a")], "a");
+        app.pulse_tick(std::time::Duration::from_millis(700));
+        assert!(app.pulse_on, "fixture should be mid-breath");
+
+        let mut done = started("a");
+        done.completed = true;
+        app.apply_tasks(vec![done]);
+
+        assert!(
+            app.pulse_tick(std::time::Duration::from_millis(700)),
+            "the settling frame is a repaint"
+        );
+        assert!(!app.pulse_on);
     }
 
     #[test]
