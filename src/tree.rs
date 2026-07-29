@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::dex::{Status, Task};
+use crate::dex::Task;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Filter {
@@ -189,7 +189,7 @@ fn matches(t: &Task, query: Option<&str>, filter: Filter) -> bool {
     let status_ok = match filter {
         Filter::All => true,
         Filter::Pending => !t.completed,
-        Filter::InProgress => t.status() == Status::InProgress,
+        Filter::InProgress => t.is_in_progress(),
     };
 
     if !status_ok {

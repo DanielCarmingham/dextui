@@ -22,7 +22,7 @@ use crate::app::{App, Focus, Mode};
 use crate::theme::{ACTIVE, BLOCKED, CODE, DIM, DONE, PLAIN, TODO};
 
 use crate::icons::Icons;
-use crate::dex::{age, local_time, Status, Task};
+use crate::dex::{self, age, local_time, Status, Task};
 use crate::tree::{self, Progress};
 
 const SHORTCUTS: &str =
@@ -81,6 +81,7 @@ fn glyph(s: Status, ic: &Icons) -> &'static str {
     match s {
         Status::Completed => ic.done,
         Status::InProgress => ic.active,
+        Status::Blocked => ic.blocked,
         Status::Pending => ic.pending,
     }
 }
@@ -89,6 +90,7 @@ fn status_color(s: Status) -> Color {
     match s {
         Status::Completed => DONE,
         Status::InProgress => ACTIVE,
+        Status::Blocked => BLOCKED,
         Status::Pending => TODO,
     }
 }
@@ -222,8 +224,8 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
                     Style::default().fg(DIM),
                 ),
                 Span::styled(
-                    format!("{} ", glyph(t.status(), ic)),
-                    Style::default().fg(status_color(t.status())),
+                    format!("{} ", glyph(dex::status(t, &app.by_id), ic)),
+                    Style::default().fg(status_color(dex::status(t, &app.by_id))),
                 ),
             ];
 
@@ -239,7 +241,12 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
             };
 
             spans.push(Span::styled(t.name.clone(), name_style));
-            if t.is_blocked() {
+
+            // Only when the status glyph cannot carry it itself. A started task
+            // that is also blocked reads as in progress -- dex's precedence --
+            // so there the trailing marker is the only signal. Repeating it on
+            // a row whose glyph already says blocked is just noise.
+            if dex::is_blocked(t, &app.by_id) && dex::status(t, &app.by_id) != Status::Blocked {
                 spans.push(Span::styled(
                     format!(" {}", ic.blocked),
                     Style::default().fg(BLOCKED),
@@ -251,7 +258,7 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
             // row would bury the signal it exists to give.
             let trailing: Vec<Span> = match app.progress.get(&t.id) {
                 Some(progress) => meter_spans(*progress, ic),
-                None if t.status() == Status::InProgress => match age(&t.started_at) {
+                None if t.is_in_progress() => match age(&t.started_at) {
                     Some(a) => vec![Span::styled(a, Style::default().fg(ACTIVE))],
                     None => vec![],
                 },
@@ -407,12 +414,13 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Vec<Line<'a>> {
     ];
 
     // One status line reads faster than three separate label/value rows.
+    let st = dex::status(t, &app.by_id);
     let mut summary = vec![Span::styled(
-        format!("{} {}", glyph(t.status(), ic), t.status().label()),
-        Style::default().fg(status_color(t.status())),
+        format!("{} {}", glyph(st, ic), st.label()),
+        Style::default().fg(status_color(st)),
     )];
 
-    if t.status() == Status::InProgress
+    if t.is_in_progress()
         && let Some(a) = age(&t.started_at) {
             summary.push(Span::styled(" · ", Style::default().fg(DIM)));
             summary.push(Span::styled(
@@ -465,7 +473,7 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Vec<Line<'a>> {
         field("parent", parent.name.clone(), Style::default().fg(PLAIN));
     }
 
-    if t.is_blocked() {
+    if dex::is_blocked(t, &app.by_id) {
         let names: Vec<String> = t
             .blocked_by
             .iter()
@@ -764,7 +772,7 @@ fn print_node(node: &tree::Node, depth: usize, app: &App, ic: &Icons, out: &mut 
         out,
         "{}{} {}{}{}",
         "  ".repeat(depth),
-        glyph(node.task.status(), ic),
+        glyph(dex::status(&node.task, &app.by_id), ic),
         node.task.name,
         rollup,
         scaffold
@@ -790,6 +798,67 @@ mod tests {
             created_at: Some("2026-01-01T00:00:00Z".into()),
             ..Default::default()
         }
+    }
+
+    fn render_tasks(tasks: Vec<Task>, w: u16, h: u16, ic: &Icons) -> Vec<String> {
+        let mut app = App::new(tasks, "demo".into(), crate::config::Config::default());
+        app.filter = tree::Filter::All;
+        app.rebuild();
+
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| draw(f, &mut app, ic)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// The status glyph already says "blocked", so repeating it after the name
+    /// is noise -- except when the glyph says something else. A started task
+    /// that is also blocked renders as in-progress (dex's own precedence), and
+    /// then the trailing marker is the only thing carrying the fact.
+    #[test]
+    fn the_trailing_blocked_marker_appears_only_when_the_glyph_cannot_say_it() {
+        let blocker = task("blocker", None, "Blocker");
+
+        let mut idle = task("idle", None, "Idle and blocked");
+        idle.blocked_by = vec!["blocker".into()];
+
+        let mut started = task("started", None, "Started but blocked");
+        started.blocked_by = vec!["blocker".into()];
+        started.started_at = Some("2026-01-01T00:00:00Z".into());
+
+        let ic = &crate::icons::UNICODE;
+        let rows = render_tasks(vec![blocker, idle, started], 100, 12, ic);
+
+        let row_for = |name: &str| -> String {
+            rows.iter()
+                .find(|r| r.contains(name))
+                .unwrap_or_else(|| panic!("no row for {name}:\n{}", rows.join("\n")))
+                .clone()
+        };
+
+        let idle_row = row_for("Idle and blocked");
+        assert_eq!(
+            idle_row.matches(ic.blocked).count(),
+            1,
+            "glyph already says blocked, so the marker should not repeat: {idle_row:?}"
+        );
+
+        let started_row = row_for("Started but blocked");
+        assert!(
+            started_row.contains(ic.active),
+            "a started task reads as in progress: {started_row:?}"
+        );
+        assert_eq!(
+            started_row.matches(ic.blocked).count(),
+            1,
+            "the glyph cannot say blocked here, so the marker must: {started_row:?}"
+        );
     }
 
     /// Renders a full frame and returns it as plain text, one String per row.

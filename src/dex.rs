@@ -3,6 +3,7 @@
 //! Reads and writes both go through the CLI rather than touching `tasks.jsonl`
 //! directly, so dex's own validation and its GitHub/Shortcut sync hooks always run.
 
+use std::collections::HashMap;
 use std::process::Command;
 
 use serde::Deserialize;
@@ -10,6 +11,7 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Pending,
+    Blocked,
     InProgress,
     Completed,
 }
@@ -19,8 +21,46 @@ impl Status {
         match self {
             Status::Completed => "completed",
             Status::InProgress => "in progress",
+            Status::Blocked => "blocked",
             Status::Pending => "pending",
         }
+    }
+}
+
+/// Whether anything is still holding this task up.
+///
+/// dex never clears `blockedBy` when a blocker finishes, so the list alone says
+/// nothing -- the blockers have to be resolved against the rest of the set and
+/// checked. This mirrors dex's own `isBlocked` in `core/task-relationships.js`:
+/// ids absent from the set are skipped (`t !== undefined` there), as are
+/// completed blockers.
+///
+/// Only *direct* blockers count, exactly as in dex. That also means a blocking
+/// cycle -- which dex refuses to create, but a hand-edited store could hold --
+/// cannot recurse.
+pub fn is_blocked(task: &Task, by_id: &HashMap<String, Task>) -> bool {
+    task.blocked_by
+        .iter()
+        .filter_map(|id| by_id.get(id))
+        .any(|blocker| !blocker.completed)
+}
+
+/// dex has no status field; it is implied by `completed`, `started_at` and the
+/// state of whatever `blockedBy` points at.
+///
+/// The order is dex's own, from `cli/status.js`: in progress is tested *before*
+/// blocked, so a started-but-blocked task reads as in progress. Work is
+/// actually happening on it, which is the more useful signal than the fact that
+/// something else nominally holds it up.
+pub fn status(task: &Task, by_id: &HashMap<String, Task>) -> Status {
+    if task.completed {
+        Status::Completed
+    } else if task.started_at.is_some() {
+        Status::InProgress
+    } else if is_blocked(task, by_id) {
+        Status::Blocked
+    } else {
+        Status::Pending
     }
 }
 
@@ -123,19 +163,10 @@ impl Default for Task {
 }
 
 impl Task {
-    /// dex has no status field; it is implied by `completed` and `started_at`.
-    pub fn status(&self) -> Status {
-        if self.completed {
-            Status::Completed
-        } else if self.started_at.is_some() {
-            Status::InProgress
-        } else {
-            Status::Pending
-        }
-    }
-
-    pub fn is_blocked(&self) -> bool {
-        !self.blocked_by.is_empty()
+    /// Started and not yet finished. Self-contained, exactly like dex's own
+    /// `isInProgress` -- unlike blocked-ness, this needs no view of the set.
+    pub fn is_in_progress(&self) -> bool {
+        self.started_at.is_some() && !self.completed
     }
 
     pub fn commit(&self) -> Option<&CommitMeta> {
@@ -525,7 +556,6 @@ mod tests {
         assert_eq!(tasks[0].parent_id.as_deref(), Some("b4d5gfpl"));
         // ...and a camelCase key in the very same payload.
         assert_eq!(tasks[1].blocked_by, vec!["s7rngopd"]);
-        assert!(tasks[1].is_blocked());
     }
 
     #[test]
@@ -544,9 +574,111 @@ mod tests {
     fn status_is_derived_from_completed_and_started_at() {
         let fake = Fake::new(REAL_JSON, "", 0);
         let tasks = dex_with(&fake).list().unwrap();
+        let all = set(tasks.clone());
 
-        assert_eq!(tasks[0].status(), Status::Pending);
-        assert_eq!(tasks[1].status(), Status::Completed);
+        assert_eq!(status(&tasks[0], &all), Status::Pending);
+        assert_eq!(status(&tasks[1], &all), Status::Completed);
+    }
+
+    /// Builds a set keyed by id, the way `App` holds it.
+    fn set(tasks: Vec<Task>) -> HashMap<String, Task> {
+        tasks.into_iter().map(|t| (t.id.clone(), t)).collect()
+    }
+
+    fn t(id: &str) -> Task {
+        Task {
+            id: id.into(),
+            name: id.into(),
+            ..Default::default()
+        }
+    }
+
+    fn blocked_on(id: &str, blockers: &[&str]) -> Task {
+        Task {
+            blocked_by: blockers.iter().map(|s| s.to_string()).collect(),
+            ..t(id)
+        }
+    }
+
+    /// The rule is dex's own `isBlocked` (core/task-relationships.js): resolve
+    /// `blockedBy`, drop ids that are absent from the set, drop blockers that
+    /// are completed, and report blocked if any remain.
+    #[test]
+    fn an_incomplete_blocker_blocks() {
+        let all = set(vec![t("blocker"), blocked_on("victim", &["blocker"])]);
+        assert!(is_blocked(&all["victim"], &all));
+    }
+
+    /// The reason `blocked_by.is_empty()` was not good enough: dex never clears
+    /// `blockedBy` when a blocker finishes, so a task would read as blocked for
+    /// the rest of its life.
+    #[test]
+    fn a_completed_blocker_stops_blocking() {
+        let mut blocker = t("blocker");
+        blocker.completed = true;
+        let all = set(vec![blocker, blocked_on("victim", &["blocker"])]);
+        assert!(!is_blocked(&all["victim"], &all));
+    }
+
+    /// A dangling reference is not a blocker. dex filters these out with
+    /// `t !== undefined` for the same reason.
+    #[test]
+    fn a_blocker_missing_from_the_set_does_not_block() {
+        let all = set(vec![blocked_on("victim", &["ghost"])]);
+        assert!(!is_blocked(&all["victim"], &all));
+    }
+
+    #[test]
+    fn one_incomplete_blocker_is_enough_among_several() {
+        let mut done = t("done");
+        done.completed = true;
+        let all = set(vec![done, t("open"), blocked_on("victim", &["done", "open"])]);
+        assert!(is_blocked(&all["victim"], &all));
+    }
+
+    /// Precedence matches dex's own `status.js`, which tests in-progress first:
+    /// work is actually happening on the task, which is the more useful signal
+    /// than the fact that something else is nominally holding it up.
+    #[test]
+    fn a_started_task_reads_as_in_progress_even_when_blocked() {
+        let mut victim = blocked_on("victim", &["blocker"]);
+        victim.started_at = Some("2026-01-01T00:00:00Z".into());
+        let all = set(vec![t("blocker"), victim]);
+        assert_eq!(status(&all["victim"], &all), Status::InProgress);
+    }
+
+    #[test]
+    fn completed_wins_over_every_other_signal() {
+        let mut victim = blocked_on("victim", &["blocker"]);
+        victim.started_at = Some("2026-01-01T00:00:00Z".into());
+        victim.completed = true;
+        let all = set(vec![t("blocker"), victim]);
+        assert_eq!(status(&all["victim"], &all), Status::Completed);
+    }
+
+    #[test]
+    fn an_unstarted_task_with_a_live_blocker_is_blocked() {
+        let all = set(vec![t("blocker"), blocked_on("victim", &["blocker"])]);
+        assert_eq!(status(&all["victim"], &all), Status::Blocked);
+    }
+
+    #[test]
+    fn a_task_with_nothing_holding_it_up_is_pending() {
+        let all = set(vec![t("lonely")]);
+        assert_eq!(status(&all["lonely"], &all), Status::Pending);
+    }
+
+    /// dex refuses to create blocking cycles, but a hand-edited store could
+    /// still contain one. The derivation looks only at direct blockers, so a
+    /// cycle cannot recurse -- this pins that down.
+    #[test]
+    fn a_blocking_cycle_terminates() {
+        let all = set(vec![
+            blocked_on("a", &["b"]),
+            blocked_on("b", &["a"]),
+        ]);
+        assert_eq!(status(&all["a"], &all), Status::Blocked);
+        assert_eq!(status(&all["b"], &all), Status::Blocked);
     }
 
     #[test]
