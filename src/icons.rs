@@ -40,9 +40,26 @@ pub struct Icons {
     pub project: &'static str,
 
     // Meter
-    pub meter_done: &'static str,
-    pub meter_active: &'static str,
-    pub meter_empty: &'static str,
+    pub meter: Meter,
+}
+
+/// The inline progress meter's glyph table.
+///
+/// The cell arithmetic is shared across every tier; only this table and whether
+/// `partial` is populated differ. Each run is `[left cap, middle, right cap]`,
+/// indexed by the cell's position in the bar, so a tier that draws a real
+/// capped bar (nerd) and one that stamps the same block seven times (unicode,
+/// ascii) go through identical code.
+#[derive(Debug, Clone, Copy)]
+pub struct Meter {
+    pub done: [&'static str; 3],
+    pub active: [&'static str; 3],
+    pub empty: [&'static str; 3],
+    /// Left-aligned fractions, 1/8 .. 7/8, indexed `partial[eighths - 1]`.
+    /// Empty in tiers that have no sub-cell glyphs, which makes the bar snap to
+    /// whole cells there. A capped tier must leave this empty -- a fraction on
+    /// the last cell would eat the right cap.
+    pub partial: &'static [&'static str],
 }
 
 /// Nerd Font: chevrons and Font Awesome state icons.
@@ -57,9 +74,19 @@ pub const NERD: Icons = Icons {
     blocked: "\u{f05e}",  // fa-ban
     app: "\u{f0ae}",     // fa tasks
     project: "\u{f07b}", // fa folder
-    meter_done: "\u{2593}",
-    meter_active: "\u{2592}",
-    meter_empty: "\u{2591}",
+    // The progress-bar kit Nerd Fonts 3.3.0 added: open left cap / mid / right
+    // cap at U+EE00-EE02, filled at U+EE03-EE05. Composing by position gives a
+    // properly capped, seamless bar rather than seven stamped cells.
+    //
+    // Its 6-frame arc spinner at U+EE06-EE0B is native at 1.00 cells too, and
+    // is deliberately unused: it exists only in this tier, and a second
+    // animation model for one tier is not worth two code paths.
+    meter: Meter {
+        done: ["\u{ee03}", "\u{ee04}", "\u{ee05}"],
+        active: ["\u{ee03}", "\u{ee04}", "\u{ee05}"],
+        empty: ["\u{ee00}", "\u{ee01}", "\u{ee02}"],
+        partial: &[],
+    },
 };
 
 /// Plain Unicode, verified present in FiraCode Nerd Font.
@@ -74,9 +101,17 @@ pub const UNICODE: Icons = Icons {
     blocked: "\u{00d7}", // ×  (✗ and ⊗ are unavailable)
     app: "",
     project: "",
-    meter_done: "\u{2593}",
-    meter_active: "\u{2592}",
-    meter_empty: "\u{2591}",
+    // dex-report's stacked bar exactly: `█` for both done and in-flight, with
+    // colour doing the separating, and `░` for the untouched remainder. The
+    // eighth-blocks give the outer edge sub-cell precision.
+    meter: Meter {
+        done: ["\u{2588}"; 3],
+        active: ["\u{2588}"; 3],
+        empty: ["\u{2591}"; 3],
+        partial: &[
+            "\u{258f}", "\u{258e}", "\u{258d}", "\u{258c}", "\u{258b}", "\u{258a}", "\u{2589}",
+        ],
+    },
 };
 
 /// Nothing above 7-bit. For terminals or fonts where the rest cannot be trusted.
@@ -94,9 +129,15 @@ pub const ASCII: Icons = Icons {
     blocked: "!",
     app: "",
     project: "",
-    meter_done: "#",
-    meter_active: "+",
-    meter_empty: ".",
+    // Whole cells only -- sub-cell precision has no 7-bit representation. In
+    // exchange this is the one tier where done and in-flight differ by shape as
+    // well as colour, which is what it is for.
+    meter: Meter {
+        done: ["#"; 3],
+        active: ["+"; 3],
+        empty: ["."; 3],
+        partial: &[],
+    },
 };
 
 impl Icons {
@@ -254,8 +295,104 @@ mod tests {
                 "ascii tier: {state} is {g:?}, which is not 7-bit"
             );
         }
-        for g in [ASCII.expanded, ASCII.collapsed, ASCII.leaf, ASCII.meter_done] {
+        let m = ASCII.meter;
+        let meter = m
+            .done
+            .iter()
+            .chain(m.active.iter())
+            .chain(m.empty.iter())
+            .chain(m.partial.iter());
+        for g in [ASCII.expanded, ASCII.collapsed, ASCII.leaf]
+            .iter()
+            .chain(meter)
+        {
             assert!(g.is_ascii(), "ascii tier: {g:?} is not 7-bit");
+        }
+    }
+
+    /// Every meter codepoint was checked twice, per the project rule: present in
+    /// FiraCode Nerd Font via fontTools, *and* resolving natively at exactly
+    /// 1.00 cells via CoreText. Pinning the tables here is what stops a later
+    /// "tidy-up" swapping in a lookalike that macOS silently font-falls back.
+    #[test]
+    fn the_meter_glyphs_are_the_verified_codepoints() {
+        // dex-report draws done and in-flight with the same full block and lets
+        // colour separate them; we follow it, so the two tiers with a solid
+        // block use one glyph for both.
+        assert_eq!(UNICODE.meter.done, ["\u{2588}"; 3]);
+        assert_eq!(UNICODE.meter.active, ["\u{2588}"; 3]);
+        assert_eq!(UNICODE.meter.empty, ["\u{2591}"; 3]);
+        assert_eq!(
+            UNICODE.meter.partial,
+            [
+                "\u{258f}", "\u{258e}", "\u{258d}", "\u{258c}", "\u{258b}", "\u{258a}", "\u{2589}"
+            ]
+        );
+
+        // The Nerd Fonts 3.3.0 progress-bar kit: open cap/mid/cap, then filled.
+        assert_eq!(NERD.meter.done, ["\u{ee03}", "\u{ee04}", "\u{ee05}"]);
+        assert_eq!(NERD.meter.active, ["\u{ee03}", "\u{ee04}", "\u{ee05}"]);
+        assert_eq!(NERD.meter.empty, ["\u{ee00}", "\u{ee01}", "\u{ee02}"]);
+        assert!(NERD.meter.partial.is_empty());
+
+        assert_eq!(ASCII.meter.done, ["#"; 3]);
+        assert_eq!(ASCII.meter.active, ["+"; 3]);
+        assert_eq!(ASCII.meter.empty, ["."; 3]);
+        assert!(ASCII.meter.partial.is_empty());
+    }
+
+    /// A capped tier draws a different glyph at each end, so a fractional cell
+    /// landing on the last position would eat the right cap and the bar would
+    /// stop looking like one object. Impossible today only because the nerd kit
+    /// has no eighth-blocks; this makes it impossible on purpose.
+    #[test]
+    fn a_capped_tier_has_no_partial_cells() {
+        for ic in ALL {
+            let m = ic.meter;
+            let capped = [m.done, m.active, m.empty]
+                .iter()
+                .any(|run| run[0] != run[1] || run[1] != run[2]);
+            if capped {
+                assert!(
+                    m.partial.is_empty(),
+                    "tier {}: a capped bar cannot carry a partial cell",
+                    name(ic.tier)
+                );
+            }
+        }
+    }
+
+    /// The eighth-block codepoints *descend* as the glyph widens (U+258F is the
+    /// thinnest), so the table is written out rather than computed -- and an
+    /// off-by-one here would silently draw the wrong fraction with nothing else
+    /// to catch it. Indexing is `partial[eighths - 1]`, so the order is the
+    /// whole contract.
+    #[test]
+    fn the_partial_cells_run_from_thinnest_to_widest() {
+        for ic in ALL {
+            let p = ic.meter.partial;
+            if p.is_empty() {
+                continue;
+            }
+            assert_eq!(p.len(), 7, "tier {}: 1/8 .. 7/8 is seven cells", name(ic.tier));
+            let mut prev: Option<char> = None;
+            for (i, g) in p.iter().enumerate() {
+                let mut cs = g.chars();
+                let c = cs.next().unwrap_or_else(|| panic!("tier {}: partial {i} is empty", name(ic.tier)));
+                assert!(
+                    cs.next().is_none(),
+                    "tier {}: partial {i} is {g:?}, not a single character",
+                    name(ic.tier)
+                );
+                if let Some(prev) = prev {
+                    assert!(
+                        c < prev,
+                        "tier {}: partial {i} is {g:?}, which does not widen the run",
+                        name(ic.tier)
+                    );
+                }
+                prev = Some(c);
+            }
         }
     }
 }

@@ -95,36 +95,140 @@ fn status_color(s: Status) -> Color {
     }
 }
 
-/// A compact meter plus the raw fraction, e.g. `▓▓▓░░░░ 2/7`.
+/// How a stacked bar divides into cells. Tier-independent: the glyph table in
+/// `icons` decides what each cell looks like, this decides how many there are.
+///
+/// Width is a parameter rather than `METER_WIDTH` so a wider bar can reuse it.
+#[derive(Debug, Clone, Copy)]
+struct Bar {
+    done: usize,
+    active: usize,
+    /// Eighths of a cell spilling past the last whole one, `0..=7`. Drawn once,
+    /// at the outer edge, in the colour of the run it extends.
+    partial: usize,
+    empty: usize,
+}
+
+impl Bar {
+    /// Both coloured runs are laid out from one rounding of their *combined*
+    /// extent, not two separate ones. That is what keeps the sub-cell remainder
+    /// at the outer edge: rounding each run on its own would put a fraction at
+    /// the done->active boundary too, and colouring that cell would need a
+    /// background (fg=green on bg=blue), which the colour policy forbids and the
+    /// selected row's styling would invert. So done->active always snaps.
+    fn new(progress: Progress, width: usize, partials: bool) -> Bar {
+        let Progress {
+            done,
+            active,
+            total,
+        } = progress;
+
+        if total == 0 || done + active == 0 {
+            return Bar {
+                done: 0,
+                active: 0,
+                partial: 0,
+                empty: width,
+            };
+        }
+
+        let eighths = |n: usize| (n as f64 / total as f64 * width as f64 * 8.0).round() as usize;
+
+        // Anything non-zero gets at least a whole cell, so a single finished or
+        // in-flight subtask out of a hundred is never rounded away to nothing.
+        let floor = (usize::from(done > 0) + usize::from(active > 0)) * 8;
+        let mut outer = eighths(done + active).clamp(floor, width * 8);
+        if !partials {
+            // No sub-cell glyphs in this tier, so snap to the nearest cell. Both
+            // clamp bounds are multiples of 8, so this stays inside them.
+            outer = (outer as f64 / 8.0).round() as usize * 8;
+        }
+
+        let whole = outer / 8;
+        let partial = outer % 8;
+
+        // `whole >= 1` per non-zero run, from the floor above, so neither
+        // subtraction can wrap.
+        let done_cells = if done == 0 {
+            0
+        } else {
+            let want = ((done as f64 / total as f64) * width as f64).round().max(1.0) as usize;
+            want.min(whole - usize::from(active > 0))
+        };
+
+        Bar {
+            done: done_cells,
+            active: whole - done_cells,
+            partial,
+            // `partial` is 0 whenever `whole == width`, since `outer` is capped
+            // at `width * 8`.
+            empty: width - whole - usize::from(partial > 0),
+        }
+    }
+}
+
+/// Which of `[left cap, middle, right cap]` a cell at `i` draws.
+fn cap(i: usize, width: usize) -> usize {
+    if i == 0 {
+        0
+    } else if i + 1 == width {
+        2
+    } else {
+        1
+    }
+}
+
+/// A compact meter plus the raw fraction, e.g. `██▋░░░░ 3/8`.
+///
+/// dex-report's stacked bar, in the colours the rest of the UI uses: green for
+/// done, blue for in flight, dim for untouched.
 ///
 /// The number is shown alongside the bar on purpose: at seven cells a bar cannot
 /// distinguish 2/7 from 3/7, and for triage the exact count is the useful part.
 fn meter_spans(progress: Progress, ic: &Icons) -> Vec<Span<'static>> {
-    let cells = |n: usize| -> usize {
-        if n == 0 {
-            0
-        } else {
-            // Anything non-zero gets at least one cell, so a single finished or
-            // in-flight subtask is never rounded away to an empty bar.
-            ((n as f64 / progress.total as f64) * METER_WIDTH as f64).round().max(1.0) as usize
-        }
+    let m = &ic.meter;
+    let bar = Bar::new(progress, METER_WIDTH, !m.partial.is_empty());
+
+    let run = |glyphs: [&'static str; 3], from: usize, len: usize| -> String {
+        (from..from + len).map(|i| glyphs[cap(i, METER_WIDTH)]).collect()
     };
 
-    let done = cells(progress.done).min(METER_WIDTH);
-    let active = cells(progress.active).min(METER_WIDTH - done);
+    let mut spans = Vec::new();
+    let mut at = 0;
 
-    vec![
-        Span::styled(ic.meter_done.repeat(done), Style::default().fg(DONE)),
-        Span::styled(ic.meter_active.repeat(active), Style::default().fg(ACTIVE)),
-        Span::styled(
-            ic.meter_empty.repeat(METER_WIDTH - done - active),
+    if bar.done > 0 {
+        spans.push(Span::styled(
+            run(m.done, at, bar.done),
+            Style::default().fg(DONE),
+        ));
+        at += bar.done;
+    }
+    if bar.active > 0 {
+        spans.push(Span::styled(
+            run(m.active, at, bar.active),
+            Style::default().fg(ACTIVE),
+        ));
+        at += bar.active;
+    }
+    if bar.partial > 0 {
+        // Extends whichever run reaches the outer edge, so the fraction reads
+        // as more of that state rather than as a state of its own.
+        let fg = if bar.active > 0 { ACTIVE } else { DONE };
+        spans.push(Span::styled(m.partial[bar.partial - 1], Style::default().fg(fg)));
+        at += 1;
+    }
+    if bar.empty > 0 {
+        spans.push(Span::styled(
+            run(m.empty, at, bar.empty),
             Style::default().fg(DIM),
-        ),
-        Span::styled(
-            format!(" {}/{}", progress.done, progress.total),
-            Style::default().fg(DIM),
-        ),
-    ]
+        ));
+    }
+
+    spans.push(Span::styled(
+        format!(" {}/{}", progress.done, progress.total),
+        Style::default().fg(DIM),
+    ));
+    spans
 }
 
 /// The header: app identity, which store you are in, and what is outstanding.
@@ -1020,9 +1124,307 @@ mod tests {
     #[test]
     fn a_very_narrow_pane_does_not_panic() {
         // The right-hand gutter must be dropped rather than overflow the row.
-        for w in [20u16, 30, 40] {
-            let _ = render(w, 12, &crate::icons::UNICODE);
+        // Every tier, because the nerd cap kit is new geometry in that gutter.
+        for ic in crate::icons::ALL {
+            for w in [20u16, 30, 40] {
+                let _ = render(w, 12, &ic);
+            }
         }
+    }
+
+    /// Every `Progress` a real store can produce, at both sub-cell settings.
+    fn every_bar(mut f: impl FnMut(Progress, Bar, bool)) {
+        for total in 1..=60usize {
+            for done in 0..=total {
+                for active in 0..=(total - done) {
+                    let p = Progress {
+                        done,
+                        active,
+                        total,
+                    };
+                    for partials in [false, true] {
+                        f(p, Bar::new(p, METER_WIDTH, partials), partials);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The bar is a fixed-width column in the right-hand gutter; a run that does
+    /// not add up shifts everything after it. This is also the underflow guard:
+    /// the cell arithmetic subtracts `usize`s, so a slip panics here rather than
+    /// wrapping to a four-billion-cell `repeat` in the renderer.
+    #[test]
+    fn a_bar_always_fills_exactly_the_meter_width() {
+        every_bar(|p, b, partials| {
+            assert_eq!(
+                b.done + b.active + usize::from(b.partial > 0) + b.empty,
+                METER_WIDTH,
+                "{p:?} partials={partials} -> {b:?}"
+            );
+            assert!(
+                b.done + b.active <= METER_WIDTH,
+                "coloured runs overflow the bar: {p:?} partials={partials} -> {b:?}"
+            );
+        });
+    }
+
+    /// One finished subtask out of a hundred is the single most useful thing a
+    /// meter can say, and rounding would erase it. The rule predates this bar;
+    /// moving to eighths must not quietly downgrade it to a 1/8 sliver.
+    #[test]
+    fn a_non_zero_count_never_rounds_away_to_nothing() {
+        every_bar(|p, b, partials| {
+            if p.done > 0 {
+                assert!(b.done >= 1, "{p:?} partials={partials} -> {b:?}");
+            }
+            if p.active > 0 {
+                assert!(b.active >= 1, "{p:?} partials={partials} -> {b:?}");
+            }
+        });
+
+        let one = Bar::new(Progress { done: 1, active: 0, total: 100 }, METER_WIDTH, true);
+        assert_eq!((one.done, one.partial), (1, 0), "{one:?}");
+
+        let both = Bar::new(Progress { done: 1, active: 1, total: 100 }, METER_WIDTH, true);
+        assert_eq!((both.done, both.active), (1, 1), "{both:?}");
+    }
+
+    /// `partial` indexes `Meter::partial[eighths - 1]`, a seven-entry table, so
+    /// an eighth of 8 would panic. It cannot arise because the remainder is
+    /// taken modulo 8 rather than patched after rounding whole cells -- the
+    /// naive scheme reaches 8/8 at, for instance, 16 done and 16 active of 45.
+    #[test]
+    fn the_partial_cell_never_exceeds_seven_eighths() {
+        every_bar(|p, b, partials| {
+            assert!(b.partial <= 7, "{p:?} partials={partials} -> {b:?}");
+        });
+
+        let b = Bar::new(Progress { done: 16, active: 16, total: 45 }, METER_WIDTH, true);
+        assert!(b.partial <= 7, "{b:?}");
+    }
+
+    /// Nerd and ascii have no eighth-blocks, so their bars must land on whole
+    /// cells -- and still round to the nearest one rather than truncating.
+    #[test]
+    fn a_tier_without_partial_glyphs_snaps_to_whole_cells() {
+        every_bar(|p, b, partials| {
+            if !partials {
+                assert_eq!(b.partial, 0, "{p:?} -> {b:?}");
+            }
+        });
+
+        let b = Bar::new(Progress { done: 3, active: 0, total: 8 }, METER_WIDTH, false);
+        assert_eq!((b.done, b.active, b.partial, b.empty), (3, 0, 0, 4), "{b:?}");
+    }
+
+    /// A true sub-cell colour boundary would need fg=green on bg=blue, which
+    /// introduces a background the colour policy forbids and which the selected
+    /// row's styling would invert. So the fraction lives at the outer edge only
+    /// and done->active snaps.
+    ///
+    /// This also pins a deliberate behaviour change: the outer edge rounds on
+    /// the *combined* extent (1+1 of 3 is 4.67 cells, so 5) rather than summing
+    /// two separately-rounded runs (2 + 2 = 4).
+    #[test]
+    fn the_partial_sits_at_the_outer_edge_not_the_done_active_boundary() {
+        let b = Bar::new(Progress { done: 1, active: 1, total: 3 }, METER_WIDTH, true);
+        assert_eq!((b.done, b.active, b.partial, b.empty), (2, 2, 5, 2), "{b:?}");
+    }
+
+    /// The reason the sub-cell edge exists at all: without it 13 of 14 fills
+    /// every cell and reads as finished.
+    #[test]
+    fn the_outer_edge_carries_the_sub_cell_remainder() {
+        let b = Bar::new(Progress { done: 3, active: 0, total: 8 }, METER_WIDTH, true);
+        assert_eq!((b.done, b.active, b.partial, b.empty), (2, 0, 5, 4), "{b:?}");
+
+        let nearly = Bar::new(Progress { done: 13, active: 0, total: 14 }, METER_WIDTH, true);
+        assert_eq!(nearly.done, 6, "{nearly:?}");
+        assert!(nearly.partial > 0, "a full bar would read as finished: {nearly:?}");
+        assert_eq!(nearly.empty, 0, "{nearly:?}");
+    }
+
+    #[test]
+    fn an_untouched_parent_is_all_trough_and_a_finished_one_is_all_bar() {
+        let none = Bar::new(Progress { done: 0, active: 0, total: 4 }, METER_WIDTH, true);
+        assert_eq!((none.done, none.active, none.partial, none.empty), (0, 0, 0, METER_WIDTH));
+
+        let all = Bar::new(Progress { done: 7, active: 0, total: 7 }, METER_WIDTH, true);
+        assert_eq!((all.done, all.partial, all.empty), (METER_WIDTH, 0, 0));
+    }
+
+    /// The bar's spans, without the trailing ` n/total`, as (text, foreground).
+    fn meter_bar(p: Progress, ic: &Icons) -> Vec<(String, Option<Color>)> {
+        let mut spans = meter_spans(p, ic);
+        spans.pop();
+        spans
+            .into_iter()
+            .map(|s| (s.content.into_owned(), s.style.fg))
+            .collect()
+    }
+
+    /// The bar sits in a fixed column in the tree's right gutter, and the gutter
+    /// is sized with `chars().count()`. A glyph the terminal measures as double
+    /// width would shift every row -- the exact failure already documented for
+    /// `▾ ▸ ⊘`, and the live risk with the nerd tier's Private Use Area kit.
+    /// `Span::width` goes through unicode-width, so this catches both that and a
+    /// plain arithmetic slip.
+    #[test]
+    fn the_meter_is_exactly_seven_cells_wide_in_every_tier() {
+        let cases = [
+            Progress { done: 0, active: 0, total: 4 },
+            Progress { done: 3, active: 0, total: 8 },
+            Progress { done: 1, active: 1, total: 3 },
+            Progress { done: 1, active: 0, total: 100 },
+            Progress { done: 13, active: 0, total: 14 },
+            Progress { done: 7, active: 0, total: 7 },
+        ];
+        for ic in crate::icons::ALL {
+            for p in cases {
+                let bar = meter_bar(p, &ic);
+                let cells: usize = bar.iter().map(|(t, _)| Span::raw(t.clone()).width()).sum();
+                let chars: usize = bar.iter().map(|(t, _)| t.chars().count()).sum();
+                assert_eq!(
+                    cells,
+                    METER_WIDTH,
+                    "tier {} {p:?}: {bar:?}",
+                    crate::icons::name(ic.tier)
+                );
+                assert_eq!(
+                    chars,
+                    METER_WIDTH,
+                    "tier {} {p:?}: the gutter is measured in chars: {bar:?}",
+                    crate::icons::name(ic.tier)
+                );
+            }
+        }
+    }
+
+    /// The point of the whole change: the one place progress is quantified now
+    /// speaks the same colour language as the status glyphs.
+    #[test]
+    fn the_meter_paints_done_in_flight_and_untouched_in_the_status_colours() {
+        let p = Progress { done: 2, active: 2, total: 7 };
+        for ic in crate::icons::ALL {
+            let fgs: Vec<_> = meter_bar(p, &ic).into_iter().map(|(_, fg)| fg).collect();
+            assert_eq!(
+                fgs,
+                vec![Some(DONE), Some(ACTIVE), Some(DIM)],
+                "tier {}",
+                crate::icons::name(ic.tier)
+            );
+        }
+
+        let spans = meter_spans(p, &crate::icons::UNICODE);
+        assert_eq!(spans.last().unwrap().style.fg, Some(DIM), "the fraction is secondary");
+    }
+
+    /// The fraction is a sliver of *more of the same state*, not a state of its
+    /// own, so it takes the colour of whichever run reaches the outer edge.
+    #[test]
+    fn the_partial_cell_takes_the_colour_of_the_run_it_extends() {
+        let ic = &crate::icons::UNICODE;
+
+        let done_only = meter_bar(Progress { done: 3, active: 0, total: 8 }, ic);
+        assert_eq!(
+            done_only.iter().map(|(_, fg)| *fg).collect::<Vec<_>>(),
+            vec![Some(DONE), Some(DONE), Some(DIM)],
+            "{done_only:?}"
+        );
+        assert_eq!(done_only[1].0, "\u{258b}", "5/8 of a cell: {done_only:?}");
+
+        let mixed = meter_bar(Progress { done: 1, active: 1, total: 3 }, ic);
+        assert_eq!(
+            mixed.iter().map(|(_, fg)| *fg).collect::<Vec<_>>(),
+            vec![Some(DONE), Some(ACTIVE), Some(ACTIVE), Some(DIM)],
+            "{mixed:?}"
+        );
+    }
+
+    /// Position, not just fill, chooses the glyph: the nerd kit's caps are what
+    /// make seven cells read as one bar rather than seven stamps.
+    #[test]
+    fn the_nerd_meter_is_capped_at_both_ends() {
+        let bar: String = meter_bar(Progress { done: 2, active: 0, total: 7 }, &crate::icons::NERD)
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
+        assert_eq!(
+            bar,
+            "\u{ee03}\u{ee04}\u{ee01}\u{ee01}\u{ee01}\u{ee01}\u{ee02}",
+            "{bar:?}"
+        );
+    }
+
+    /// At seven cells a bar cannot distinguish 2/7 from 3/7, so the exact count
+    /// is the part that is actually useful for triage.
+    #[test]
+    fn the_fraction_stays_beside_the_bar() {
+        let spans = meter_spans(Progress { done: 3, active: 0, total: 8 }, &crate::icons::UNICODE);
+        assert_eq!(spans.last().unwrap().content.as_ref(), " 3/8");
+    }
+
+    /// The tree pane's content for each row, without the two pane borders.
+    fn tree_rows(rows: &[String]) -> Vec<String> {
+        rows.iter()
+            .map(|r| {
+                let mut it = r.match_indices('│');
+                match (it.next(), it.next()) {
+                    (Some((a, _)), Some((b, _))) => r[a + '│'.len_utf8()..b].to_string(),
+                    _ => String::new(),
+                }
+            })
+            .collect()
+    }
+
+    /// A rollup over nothing is meaningless, so a leaf gets no meter at all.
+    /// `░` is safe to look for: ratatui's scrollbar draws `█` and `│`, never it.
+    #[test]
+    fn a_leaf_gets_no_meter() {
+        let rows = tree_rows(&render(120, 20, &crate::icons::UNICODE));
+        let row = |name: &str| {
+            rows.iter()
+                .find(|r| r.contains(name))
+                .unwrap_or_else(|| panic!("no row for {name}:\n{}", rows.join("\n")))
+                .clone()
+        };
+        assert!(row("Parent task").contains('░'), "{:?}", row("Parent task"));
+        assert!(!row("Child task").contains('░'), "{:?}", row("Child task"));
+    }
+
+    /// Rollups come from the *unfiltered* task list: hiding completed subtasks
+    /// is exactly when you most want to see how many there were.
+    #[test]
+    fn a_meter_counts_the_unfiltered_tree() {
+        let mut finished = task("done", Some("root"), "Finished child");
+        finished.completed = true;
+
+        let app_tasks = vec![
+            task("root", None, "Parent task"),
+            finished,
+            task("kid", Some("root"), "Pending child"),
+        ];
+        let mut app = App::new(app_tasks, "demo".into(), crate::config::Config::default());
+        assert_eq!(app.filter, tree::Filter::Pending, "fixture assumes the default filter");
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        terminal
+            .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        let rows = tree_rows(&rows);
+        let text = rows.join("\n");
+
+        assert!(!text.contains("Finished child"), "the filter should hide it:\n{text}");
+        let parent = rows.iter().find(|r| r.contains("Parent task")).unwrap();
+        assert!(
+            parent.contains("1/2"),
+            "the rollup must count the hidden child: {parent:?}"
+        );
     }
 }
 
