@@ -49,7 +49,14 @@ pub fn draw(frame: &mut Frame, app: &mut App, ic: &Icons) {
     draw_header(frame, app, ic, top);
 
     let [left, right] =
-        Layout::horizontal([Constraint::Percentage(45), Constraint::Fill(1)]).areas(body);
+        Layout::horizontal([Constraint::Percentage(app.split_percent), Constraint::Fill(1)])
+            .areas(body);
+
+    // Published for mouse handling: the divider sits where the two borders meet.
+    app.divider_x = right.x;
+    app.terminal_width = frame.area().width;
+    app.body_top = body.y;
+    app.body_bottom = body.y + body.height;
 
     draw_tree(frame, app, ic, left);
     draw_detail(frame, app, ic, right);
@@ -196,7 +203,7 @@ fn draw_header(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
     );
 }
 
-fn draw_tree(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
+fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
     // No title: the header already says which store this is, and repeating it
     // on the pane border was the same fact twice.
     let block = Block::bordered().border_style(Style::default().fg(if app.focus
@@ -272,7 +279,9 @@ fn draw_tree(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
         })
         .collect();
 
-    let mut state = ListState::default();
+    // The offset is carried across frames rather than recomputed from zero, so
+    // the list does not jump and a click maps to the row actually on screen.
+    let mut state = ListState::default().with_offset(app.tree_offset);
     state.select(app.selected_row());
 
     // REVERSED inverts whatever the terminal's current colours are, so the
@@ -288,6 +297,8 @@ fn draw_tree(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
         area,
         &mut state,
     );
+
+    app.tree_offset = state.offset();
 
     // Only worth drawing when there is something off-screen.
     let visible = area.height.saturating_sub(2) as usize;

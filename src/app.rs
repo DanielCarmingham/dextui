@@ -115,6 +115,18 @@ pub struct App {
     /// Set by `E`; the main loop picks it up and hands off to $EDITOR, which
     /// cannot happen mid-draw because the terminal has to be released first.
     pub pending_editor: Option<String>,
+    /// Width of the tree pane as a percentage. Dragged with the mouse.
+    pub split_percent: u16,
+    pub dragging_split: bool,
+    /// Geometry the renderer publishes so mouse maths can be exact rather than
+    /// re-derived from assumptions about the layout.
+    pub divider_x: u16,
+    pub body_top: u16,
+    pub body_bottom: u16,
+    pub terminal_width: u16,
+    /// The list's scroll offset, kept across frames so a click maps to the row
+    /// actually under the cursor.
+    pub tree_offset: usize,
     pub focus: Focus,
     /// (vertical, horizontal) offset into the detail pane.
     pub detail_scroll: (u16, u16),
@@ -148,6 +160,13 @@ impl App {
             store_label,
             should_quit: false,
             pending_editor: None,
+            split_percent: 45,
+            dragging_split: false,
+            divider_x: 0,
+            body_top: 0,
+            body_bottom: 0,
+            terminal_width: 0,
+            tree_offset: 0,
             focus: Focus::Tree,
             detail_scroll: (0, 0),
             wrap: cfg.wrap,
@@ -400,6 +419,41 @@ impl App {
     pub fn toggle_sort_direction(&mut self) {
         self.sort_reversed = !self.sort_reversed;
         self.rebuild();
+    }
+
+    /// Clamped so neither pane can be dragged away entirely.
+    pub fn set_split(&mut self, column: u16, total_width: u16) {
+        if total_width == 0 {
+            return;
+        }
+        let pct = (column as f32 / total_width as f32 * 100.0).round() as i32;
+        self.split_percent = pct.clamp(20, 80) as u16;
+    }
+
+    /// True when `column` is on (or beside) the divider, so it is grabbable
+    /// without demanding single-cell precision.
+    pub fn on_divider(&self, column: u16) -> bool {
+        self.divider_x > 0 && column.abs_diff(self.divider_x) <= 1
+    }
+
+    pub fn in_body(&self, row: u16) -> bool {
+        row >= self.body_top && row < self.body_bottom
+    }
+
+    /// Selects the task drawn on `row`, if any.
+    pub fn select_at_row(&mut self, row: u16) {
+        // +1 skips the pane's top border.
+        let Some(index) = row
+            .checked_sub(self.body_top + 1)
+            .map(|r| r as usize + self.tree_offset)
+        else {
+            return;
+        };
+
+        let rows = self.row_ids();
+        if let Some(id) = rows.get(index) {
+            self.select(Some(id.clone()));
+        }
     }
 
     pub fn toggle_focus(&mut self) {
@@ -736,5 +790,116 @@ mod tests {
 
         app.select_first(); // already selected
         assert_eq!(app.detail_scroll.0, 15);
+    }
+
+    fn geo(app: &mut App) {
+        // Stand-in for what the renderer publishes each frame.
+        app.terminal_width = 100;
+        app.divider_x = 45;
+        app.body_top = 1;
+        app.body_bottom = 21;
+    }
+
+    #[test]
+    fn the_divider_is_grabbable_without_pixel_precision() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
+        geo(&mut app);
+
+        for col in [44, 45, 46] {
+            assert!(app.on_divider(col), "column {col} should grab the divider");
+        }
+        for col in [10, 43, 47, 90] {
+            assert!(!app.on_divider(col), "column {col} should not");
+        }
+    }
+
+    #[test]
+    fn dragging_cannot_collapse_either_pane() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
+        geo(&mut app);
+
+        app.set_split(0, 100);
+        assert_eq!(app.split_percent, 20, "tree pane collapsed");
+
+        app.set_split(100, 100);
+        assert_eq!(app.split_percent, 80, "detail pane collapsed");
+
+        app.set_split(60, 100);
+        assert_eq!(app.split_percent, 60);
+    }
+
+    #[test]
+    fn a_zero_width_terminal_does_not_divide_by_zero() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
+        let before = app.split_percent;
+        app.set_split(10, 0);
+        assert_eq!(app.split_percent, before);
+    }
+
+    #[test]
+    fn clicking_a_row_selects_the_task_drawn_there() {
+        let mut app = App::new(
+            vec![task("a", None, &[]), task("b", None, &[]), task("c", None, &[])],
+            "t".into(),
+            Config::default(),
+        );
+        geo(&mut app);
+
+        // body_top is the border, so the first task is on the next row.
+        app.select_at_row(app.body_top + 1);
+        assert_eq!(app.selected.as_deref(), Some("a"));
+
+        app.select_at_row(app.body_top + 3);
+        assert_eq!(app.selected.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn clicking_past_the_last_row_changes_nothing() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
+        geo(&mut app);
+
+        app.select_at_row(app.body_top + 15);
+        assert_eq!(app.selected.as_deref(), Some("a"), "selection moved to nothing");
+    }
+
+    #[test]
+    fn clicking_the_border_row_selects_nothing_rather_than_the_first_task() {
+        let mut app = App::new(
+            vec![task("a", None, &[]), task("b", None, &[])],
+            "t".into(),
+            Config::default(),
+        );
+        geo(&mut app);
+        app.select(Some("b".into()));
+
+        app.select_at_row(app.body_top);
+        assert_eq!(app.selected.as_deref(), Some("b"), "border click moved selection");
+    }
+
+    #[test]
+    fn a_scrolled_list_maps_clicks_through_the_offset() {
+        // Without honouring the offset, every click would address the top of the
+        // list rather than what is actually drawn.
+        let mut app = App::new(
+            vec![task("a", None, &[]), task("b", None, &[]), task("c", None, &[])],
+            "t".into(),
+            Config::default(),
+        );
+        geo(&mut app);
+        app.tree_offset = 2;
+
+        app.select_at_row(app.body_top + 1);
+        assert_eq!(app.selected.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn in_body_excludes_the_header_and_status_rows() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
+        geo(&mut app);
+
+        assert!(!app.in_body(0), "header row");
+        assert!(app.in_body(1));
+        assert!(app.in_body(20));
+        assert!(!app.in_body(21), "status row");
     }
 }

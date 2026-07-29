@@ -309,6 +309,33 @@ indentation preservation build a local string inside `markdown::render`; the
 edit path reads `by_id[…].description`, the raw task from dex. A round-trip test
 proves the stored bytes are identical after an edit that changes nothing.
 
+## Mouse
+
+Capture is enabled explicitly — `ratatui::init` only sets raw mode and the
+alternate screen, so mouse reporting is opt-in and ratatui has no mouse layer of
+its own; the events come from crossterm.
+
+- **Drag the divider** to resize the panes, clamped to 20–80% so neither can be
+  dragged away.
+- **Wheel** acts on the pane under the pointer regardless of focus, which is
+  what people expect.
+- **Click** focuses a pane, and in the tree selects the row under the cursor.
+
+The trade-off: while captured, the terminal stops doing its own text selection.
+Hold **Shift** to bypass it, as most terminals allow.
+
+Two things this requires:
+
+- The renderer publishes geometry (`divider_x`, `body_top/bottom`,
+  `terminal_width`) each frame, so mouse maths is exact rather than re-derived
+  from assumptions about the layout.
+- `tree_offset` persists the list's scroll offset across frames. Without it the
+  offset restarted at zero every frame, and a click would address the top of the
+  list rather than the row actually drawn.
+
+Capture is disabled around `$EDITOR` and on exit; the child must own the
+terminal completely.
+
 ## Sorting
 
 `o` cycles the order, `O` reverses it, and the current one shows in the header.

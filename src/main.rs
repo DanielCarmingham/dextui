@@ -15,7 +15,11 @@ use std::time::Duration;
 use std::sync::Arc;
 use std::thread;
 
-use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event as CtEvent, KeyCode, KeyEvent,
+    KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use crossterm::execute;
 
 use app::{App, Focus, Mode, Pending, Prompt, TextInput};
 use dex::{store_label, Dex, Task};
@@ -113,6 +117,10 @@ fn main() -> std::io::Result<()> {
 
     let glyphs = cfg.icons;
     let mut terminal = ratatui::init();
+    // ratatui::init only sets raw mode and the alternate screen; mouse
+    // reporting is opt-in. While captured, the terminal stops doing its own
+    // text selection -- hold Shift to bypass it, as most terminals allow.
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
 
     // Polled rather than run from a reader thread. A thread blocked in
     // `event::read()` would swallow the first keystroke intended for $EDITOR,
@@ -130,6 +138,10 @@ fn main() -> std::io::Result<()> {
             match event::read()? {
                 CtEvent::Key(key) if key.kind == KeyEventKind::Press => {
                     handle_key(&mut app, key, &dex, &tx);
+                    dirty = true;
+                }
+                CtEvent::Mouse(m) => {
+                    handle_mouse(&mut app, m);
                     dirty = true;
                 }
                 CtEvent::Resize(..) => dirty = true,
@@ -150,8 +162,54 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     Ok(())
+}
+
+fn handle_mouse(app: &mut App, m: MouseEvent) {
+    match m.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if app.on_divider(m.column) {
+                app.dragging_split = true;
+            } else if app.in_body(m.row) {
+                // Click to focus, and in the tree also to select the row.
+                if m.column < app.divider_x {
+                    app.focus = Focus::Tree;
+                    app.select_at_row(m.row);
+                } else {
+                    app.focus = Focus::Detail;
+                }
+            }
+        }
+
+        MouseEventKind::Drag(MouseButton::Left) if app.dragging_split => {
+            app.set_split(m.column, app.terminal_width);
+        }
+
+        MouseEventKind::Up(_) => app.dragging_split = false,
+
+        // The wheel acts on whichever pane is under the pointer, which is what
+        // people expect regardless of where focus happens to be.
+        MouseEventKind::ScrollDown => {
+            if m.column < app.divider_x {
+                app.move_selection(1);
+            } else {
+                app.scroll_detail(1, 0);
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            if m.column < app.divider_x {
+                app.move_selection(-1);
+            } else {
+                app.scroll_detail(-1, 0);
+            }
+        }
+        MouseEventKind::ScrollLeft => app.scroll_detail(0, -4),
+        MouseEventKind::ScrollRight => app.scroll_detail(0, 4),
+
+        _ => {}
+    }
 }
 
 fn handle_msg(app: &mut App, msg: Msg, dex: &Arc<Dex>, tx: &Sender<Msg>) {
@@ -200,9 +258,12 @@ fn run_editor(
         .and_then(|t| t.description.clone())
         .unwrap_or_default();
 
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     let outcome = editor::edit(id, &current);
     *terminal = ratatui::init();
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
     terminal.clear()?;
 
     match outcome {
