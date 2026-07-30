@@ -585,6 +585,23 @@ its own; the events come from crossterm.
   why this has to be checked on a list long enough to move: a first attempt at
   verifying it used an 11-row store in a 14-row terminal and showed nothing.
 - **Click** focuses a pane, and in the tree selects the row under the cursor.
+- **The header row is clickable**: a word of the filter menu picks that filter,
+  and the sort label cycles on the left button and reverses on the right,
+  mirroring `o` and `O`.
+
+  `ui` publishes `header_zones` each frame by walking the spans it *actually
+  drew*, so the degradation ladder is not restated anywhere — a rung that
+  dropped the menu contains no filter words and therefore offers no zones. The
+  block's vocabulary is closed and tiny, so matching a span's content against
+  the sort label and `Filter::MENU` is exact rather than a guess.
+
+  Finding exactly **one** filter word means the header fell back to naming the
+  current filter with no menu around it; there is nothing to pick from, so that
+  zone cycles instead. The zones are cleared while the search box owns row 0,
+  or a click would act on a menu that is not on screen.
+
+  A click that hits no zone must do **nothing** — not steal focus, not move the
+  selection. `click_header` returns whether it acted, and a test pins it.
 
 The trade-off: while captured, the terminal stops doing its own text selection.
 Hold **Shift** to bypass it, as most terminals allow.

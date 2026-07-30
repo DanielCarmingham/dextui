@@ -348,6 +348,16 @@ fn main() -> std::io::Result<()> {
 
 fn handle_mouse(app: &mut App, m: MouseEvent) {
     match m.kind {
+        // The header row, before anything else: it is above the body, so the
+        // divider and pane tests below never see it.
+        MouseEventKind::Down(MouseButton::Right) if m.row == 0 => {
+            app.click_header(m.column, true);
+        }
+
+        MouseEventKind::Down(MouseButton::Left) if m.row == 0 => {
+            app.click_header(m.column, false);
+        }
+
         MouseEventKind::Down(MouseButton::Left) => {
             if app.on_divider(m.column) {
                 app.dragging_split = true;

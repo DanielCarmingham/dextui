@@ -13,7 +13,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::app::{App, Counts, Focus, Mode};
+use crate::app::{App, Counts, Focus, HeaderZone, Mode};
 
 /// Colour is used only where it carries meaning. Everything else is left to the
 /// terminal, so the app inherits whatever scheme the user runs -- including a
@@ -305,6 +305,91 @@ fn counts_floor(c: Counts, ic: &Icons) -> usize {
         .unwrap_or(0)
 }
 
+/// Where each clickable word of the right-hand block ended up.
+///
+/// Derived by walking the spans that were *actually rendered*, so the header's
+/// degradation ladder does not need restating here -- a rung that dropped the
+/// menu simply contains no filter words, and one that dropped the sort contains
+/// no sort word. The block's vocabulary is closed and tiny (one sort label plus
+/// filter names, which never collide), so matching on content is exact.
+///
+/// A single filter word means the header fell back to naming the current filter
+/// with no menu around it. There is nothing to pick from, so that word cycles.
+fn right_zones(right: &[Span], x0: u16, sort_label: &str) -> Vec<(u16, u16, HeaderZone)> {
+    let mut found: Vec<(u16, u16, HeaderZone)> = Vec::new();
+    let mut x = x0;
+
+    for span in right {
+        let w = span.content.chars().count() as u16;
+        if w > 0 {
+            let zone = if span.content == sort_label {
+                Some(HeaderZone::Sort)
+            } else {
+                tree::Filter::MENU
+                    .iter()
+                    .find(|f| f.name() == span.content)
+                    .map(|f| HeaderZone::Filter(*f))
+            };
+            if let Some(z) = zone {
+                found.push((x, x + w - 1, z));
+            }
+        }
+        x += w;
+    }
+
+    let filters = found
+        .iter()
+        .filter(|(_, _, z)| matches!(z, HeaderZone::Filter(_)))
+        .count();
+    if filters == 1 {
+        for entry in found.iter_mut() {
+            if matches!(entry.2, HeaderZone::Filter(_)) {
+                entry.2 = HeaderZone::FilterCycle;
+            }
+        }
+    }
+    found
+}
+
+/// One filter's name, marked if it is the one in force.
+///
+/// The mark is weight plus the colour of the state it shows -- yellow for
+/// pending, blue for active -- so the menu speaks the same colour language as
+/// the rows beneath it. `all` is not a state and gets no colour of its own; it
+/// is marked by weight alone.
+///
+/// This replaced UPPERCASING the active one, which was the only mark available
+/// when the whole menu was a single baked string.
+fn filter_name(f: tree::Filter, current: bool) -> Span<'static> {
+    if !current {
+        return Span::styled(f.name(), Style::default().fg(DIM));
+    }
+    let fg = match f {
+        tree::Filter::Pending => TODO,
+        tree::Filter::InProgress => ACTIVE,
+        tree::Filter::All => PLAIN,
+    };
+    Span::styled(f.name(), Style::default().fg(fg).add_modifier(Modifier::BOLD))
+}
+
+/// The whole menu, `[ all  pending  active ]`, as one span per word.
+///
+/// Per-word spans are what let the current one be styled differently *and* what
+/// let a click be resolved to the word under it -- the two asks that produced
+/// this turned out to need the same thing.
+fn filter_menu(current: tree::Filter) -> Vec<Span<'static>> {
+    let dim = || Style::default().fg(DIM);
+    let mut spans = vec![Span::styled("[ ", dim())];
+    for (i, f) in tree::Filter::MENU.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(filter_name(*f, *f == current));
+    }
+    spans.push(Span::styled(" ]", dim()));
+    spans
+}
+
 /// A leading icon and its trailing space, or nothing in the tiers that have none.
 fn icon_span(glyph: &str) -> Vec<Span<'static>> {
     if glyph.is_empty() {
@@ -381,24 +466,23 @@ fn header_identity(store: &str, ic: &Icons, room: usize) -> Vec<Span<'static>> {
 /// replaced.
 fn right_candidates(sort: &str, filter: tree::Filter) -> [Vec<Span<'static>>; 4] {
     let dim = || Style::default().fg(DIM);
-    let with_sort = |label: &'static str| -> Vec<Span<'static>> {
-        vec![
-            Span::raw(" "),
-            Span::styled(sort.to_string(), dim()),
-            Span::raw("  "),
-            Span::styled(label, dim()),
-            Span::raw(" "),
+    let with_sort = |rest: Vec<Span<'static>>| -> Vec<Span<'static>> {
+        [
+            vec![
+                Span::raw(" "),
+                Span::styled(sort.to_string(), dim()),
+                Span::raw("  "),
+            ],
+            rest,
+            vec![Span::raw(" ")],
         ]
+        .concat()
     };
 
     [
-        with_sort(filter.label()),
-        with_sort(filter.name()),
-        vec![
-            Span::raw(" "),
-            Span::styled(filter.name(), dim()),
-            Span::raw(" "),
-        ],
+        with_sort(filter_menu(filter)),
+        with_sort(vec![filter_name(filter, true)]),
+        vec![Span::raw(" "), filter_name(filter, true), Span::raw(" ")],
         Vec::new(),
     ]
 }
@@ -530,7 +614,11 @@ fn header_counts(c: Counts, room: usize, ic: &Icons) -> Vec<Vec<Span<'static>>> 
 ///
 /// While searching, the search box takes the whole line over. That is why the
 /// header costs no vertical space: the two are never needed at once.
-fn draw_header(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
+fn draw_header(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
+    // Nothing in the header is on screen while the search box owns the row, so a
+    // stale zone would act on a menu that is not there.
+    app.header_zones.clear();
+
     if matches!(app.mode, Mode::Search) {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
@@ -575,6 +663,8 @@ fn draw_header(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
         spans.push(sep());
         spans.extend(part);
     }
+
+    app.header_zones = right_zones(&right, right_area.x, app.sort.label(app.sort_reversed));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), left_area);
     frame.render_widget(Paragraph::new(Line::from(right)), right_area);
@@ -1398,6 +1488,109 @@ mod tests {
         assert!(rows[0].contains("ready"), "header row: {:?}", rows[0]);
     }
 
+    /// Renders a frame and returns the header zones the renderer published.
+    fn zones_for(w: u16, filter: tree::Filter, mode: Mode) -> Vec<(u16, u16, HeaderZone)> {
+        let mut app = App::new(
+            vec![task("root", None, "Parent task")],
+            "demo".into(),
+            crate::config::Config::default(),
+        );
+        app.filter = filter;
+        app.mode = mode;
+        app.rebuild();
+
+        let mut terminal = Terminal::new(TestBackend::new(w, 12)).unwrap();
+        terminal
+            .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+            .unwrap();
+        app.header_zones.clone()
+    }
+
+    /// The mark on the active filter is weight plus its state's colour, which is
+    /// what replaced UPPERCASING it. Every other option stays dim, so exactly one
+    /// word can ever read as current.
+    #[test]
+    fn exactly_one_filter_is_marked_and_it_is_the_current_one() {
+        for current in tree::Filter::MENU {
+            let menu = filter_menu(current);
+            let marked: Vec<&str> = menu
+                .iter()
+                .filter(|s| s.style.add_modifier.contains(Modifier::BOLD))
+                .map(|s| s.content.as_ref())
+                .collect();
+            assert_eq!(marked, vec![current.name()], "current = {current:?}");
+
+            for f in tree::Filter::MENU {
+                if f == current {
+                    continue;
+                }
+                let span = menu.iter().find(|s| s.content == f.name()).unwrap();
+                assert_eq!(span.style.fg, Some(DIM), "{f:?} should be dim");
+            }
+        }
+
+        // The colours are the states', so the menu speaks the same language as
+        // the rows below it. `all` is not a state and gets no colour.
+        assert_eq!(filter_name(tree::Filter::Pending, true).style.fg, Some(TODO));
+        assert_eq!(filter_name(tree::Filter::InProgress, true).style.fg, Some(ACTIVE));
+        assert_eq!(filter_name(tree::Filter::All, true).style.fg, Some(PLAIN));
+    }
+
+    /// A click has to land on the word you can see, so the zones must match what
+    /// was drawn rather than a second calculation of where it should have been.
+    #[test]
+    fn every_menu_word_is_clickable_where_it_is_drawn() {
+        let zones = zones_for(120, tree::Filter::Pending, Mode::Normal);
+
+        for f in tree::Filter::MENU {
+            let z = zones
+                .iter()
+                .find(|(_, _, z)| *z == HeaderZone::Filter(f))
+                .unwrap_or_else(|| panic!("no zone for {f:?} in {zones:?}"));
+            assert_eq!(
+                (z.1 - z.0 + 1) as usize,
+                f.name().chars().count(),
+                "zone for {f:?} is not the width of its word"
+            );
+        }
+
+        assert!(
+            zones.iter().any(|(_, _, z)| *z == HeaderZone::Sort),
+            "the sort label is clickable too: {zones:?}"
+        );
+
+        // Zones must not overlap, or a click would be ambiguous.
+        let mut spans: Vec<(u16, u16)> = zones.iter().map(|(a, b, _)| (*a, *b)).collect();
+        spans.sort();
+        for pair in spans.windows(2) {
+            assert!(pair[0].1 < pair[1].0, "zones overlap: {spans:?}");
+        }
+    }
+
+    /// Row 0 belongs to the search box while searching. A zone left over from the
+    /// previous frame would act on a menu that is not on screen.
+    #[test]
+    fn the_header_offers_nothing_to_click_while_searching() {
+        assert!(zones_for(120, tree::Filter::Pending, Mode::Search).is_empty());
+    }
+
+    /// Too narrow for the menu, the header names the current filter alone. With
+    /// no options on screen there is nothing to pick, so that word cycles.
+    #[test]
+    fn the_collapsed_filter_label_cycles_instead_of_picking() {
+        let zones = zones_for(46, tree::Filter::Pending, Mode::Normal);
+        assert!(
+            zones.iter().any(|(_, _, z)| *z == HeaderZone::FilterCycle),
+            "narrow header should offer a cycling zone: {zones:?}"
+        );
+        assert!(
+            !zones
+                .iter()
+                .any(|(_, _, z)| matches!(z, HeaderZone::Filter(_))),
+            "nothing to pick from when only one word is drawn: {zones:?}"
+        );
+    }
+
     /// The floor is what every rung of the header's ladder reserves, so it must
     /// be exactly the narrowest layout that still says something -- reserving
     /// more would push the filter menu out early, reserving less would let the
@@ -1642,7 +1835,7 @@ mod tests {
             cs[i].iter().map(|s| s.content.to_string()).collect()
         };
 
-        assert!(text(0).contains(filter.label()), "{:?}", text(0));
+        assert!(text(0).contains("[ all  pending  active ]"), "{:?}", text(0));
 
         assert!(!text(1).contains('['), "the menu should have gone: {:?}", text(1));
         assert!(text(1).contains("priority"), "{:?}", text(1));

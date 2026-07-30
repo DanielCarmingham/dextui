@@ -96,6 +96,22 @@ pub enum Focus {
     Detail,
 }
 
+/// Something in the header you can click.
+///
+/// Published by the renderer each frame from **what it actually drew**, the same
+/// way `divider_x` is, so the header's degradation ladder needs no second copy
+/// of itself here: a rung that dropped the menu simply publishes no zones for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderZone {
+    /// Left cycles the order, right reverses it -- mirroring `o` and `O`.
+    Sort,
+    /// One word of the menu. Picks that filter outright.
+    Filter(Filter),
+    /// The lone filter name a narrow header falls back to. With no options on
+    /// screen there is nothing to pick, so a click advances instead.
+    FilterCycle,
+}
+
 /// What the header reports about the whole store. See [`App::counts`] for why
 /// `ready + blocked` deliberately does not equal `pending`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -164,6 +180,10 @@ pub struct App {
     pub animate: bool,
     /// Which of the pulse's two frames the renderer should draw.
     pub pulse_on: bool,
+    /// Clickable regions of the header row, as `(first_x, last_x, what)`.
+    /// Rewritten every frame; empty while the search box owns the row, so a
+    /// click can never act on a menu that is not on screen.
+    pub header_zones: Vec<(u16, u16, HeaderZone)>,
 }
 
 impl App {
@@ -200,6 +220,7 @@ impl App {
             pending_refresh: false,
             animate: cfg.animate,
             pulse_on: false,
+            header_zones: Vec::new(),
         };
 
         // Everything is "new" on first load, so the collapse-new-tasks rule would
@@ -564,6 +585,36 @@ impl App {
         row >= self.body_top && row < self.body_bottom
     }
 
+    /// What sits under `column` on the header row, if anything.
+    pub fn header_zone_at(&self, column: u16) -> Option<HeaderZone> {
+        self.header_zones
+            .iter()
+            .find(|(from, to, _)| column >= *from && column <= *to)
+            .map(|(_, _, z)| *z)
+    }
+
+    /// Acts on a header click. `secondary` is the right button, which reverses
+    /// the sort rather than cycling it -- mirroring `o` and `O`.
+    ///
+    /// Returns whether anything changed, so a click on empty header space stays
+    /// genuinely inert: it must not steal focus or move the selection.
+    pub fn click_header(&mut self, column: u16, secondary: bool) -> bool {
+        let Some(zone) = self.header_zone_at(column) else {
+            return false;
+        };
+        match zone {
+            HeaderZone::Sort if secondary => self.sort_reversed = !self.sort_reversed,
+            HeaderZone::Sort => self.sort = self.sort.next(),
+            // Picking a filter with the right button would be a surprise; only
+            // the sort has a second action.
+            _ if secondary => return false,
+            HeaderZone::Filter(f) => self.filter = f,
+            HeaderZone::FilterCycle => self.filter = self.filter.next(),
+        }
+        self.rebuild();
+        true
+    }
+
     /// Selects the task drawn on `row`, if any.
     pub fn select_at_row(&mut self, row: u16) {
         // +1 skips the pane's top border.
@@ -687,6 +738,84 @@ mod tests {
 
     fn counted(tasks: Vec<Task>) -> App {
         App::new(tasks, "demo".into(), Config::default())
+    }
+
+    fn clickable(zones: Vec<(u16, u16, HeaderZone)>) -> App {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.header_zones = zones;
+        app
+    }
+
+    #[test]
+    fn clicking_a_filter_word_selects_that_filter() {
+        let mut app = clickable(vec![(10, 12, HeaderZone::Filter(Filter::All))]);
+        app.filter = Filter::Pending;
+
+        assert!(app.click_header(11, false));
+        assert_eq!(app.filter, Filter::All);
+    }
+
+    /// The collapsed label has nothing to pick from, so it advances instead.
+    #[test]
+    fn clicking_the_collapsed_filter_label_cycles() {
+        let mut app = clickable(vec![(0, 6, HeaderZone::FilterCycle)]);
+        app.filter = Filter::Pending;
+
+        assert!(app.click_header(3, false));
+        assert_eq!(app.filter, Filter::Pending.next());
+    }
+
+    /// Mirrors `o` and `O`: the two buttons are the two keys.
+    #[test]
+    fn the_sort_zone_cycles_on_left_and_reverses_on_right() {
+        let mut app = clickable(vec![(4, 11, HeaderZone::Sort)]);
+        let order = app.sort;
+
+        assert!(app.click_header(5, false));
+        assert_eq!(app.sort, order.next());
+        assert!(!app.sort_reversed, "cycling must not also reverse");
+
+        let after_cycle = app.sort;
+        assert!(app.click_header(5, true));
+        assert!(app.sort_reversed);
+        assert_eq!(app.sort, after_cycle, "reversing must not also cycle");
+    }
+
+    /// Right-clicking a filter would be a surprise -- only the sort has a second
+    /// action -- so it does nothing rather than picking.
+    #[test]
+    fn the_right_button_does_nothing_outside_the_sort_zone() {
+        let mut app = clickable(vec![(10, 12, HeaderZone::Filter(Filter::All))]);
+        app.filter = Filter::Pending;
+
+        assert!(!app.click_header(11, true));
+        assert_eq!(app.filter, Filter::Pending);
+    }
+
+    /// Dead space in the header must stay dead: clicking it cannot steal focus
+    /// or disturb the selection, which is what the whole app is built around.
+    #[test]
+    fn clicking_empty_header_space_changes_nothing() {
+        let mut app = clickable(vec![(40, 47, HeaderZone::Sort)]);
+        let before = (app.filter, app.sort, app.sort_reversed, app.selected.clone());
+
+        assert!(!app.click_header(3, false));
+        assert!(!app.click_header(39, false));
+        assert!(!app.click_header(48, false));
+
+        assert_eq!(
+            (app.filter, app.sort, app.sort_reversed, app.selected.clone()),
+            before
+        );
+    }
+
+    #[test]
+    fn a_zone_covers_its_last_column() {
+        let app = clickable(vec![(10, 12, HeaderZone::Sort)]);
+        assert_eq!(app.header_zone_at(9), None);
+        assert_eq!(app.header_zone_at(10), Some(HeaderZone::Sort));
+        assert_eq!(app.header_zone_at(12), Some(HeaderZone::Sort));
+        assert_eq!(app.header_zone_at(13), None);
     }
 
     /// The header mirrors the `dex list --ready` / `dex list --blocked` pair,

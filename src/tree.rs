@@ -23,24 +23,24 @@ impl Filter {
         }
     }
 
-    /// All three render at the same width so a fixed-width label cannot truncate.
-    pub fn label(self) -> &'static str {
-        match self {
-            Filter::All => "[ ALL  pending  active ]",
-            Filter::InProgress => "[ all  pending  ACTIVE ]",
-            Filter::Pending => "[ all  PENDING  active ]",
-        }
-    }
+    /// Menu order, which is not cycle order: the menu reads widest-to-narrowest
+    /// scope so it looks like a scale, while `next` steps from where you usually
+    /// are. Both are deliberate and neither should be derived from the other.
+    pub const MENU: [Filter; 3] = [Filter::All, Filter::Pending, Filter::InProgress];
 
-    /// The active filter alone, for a header too narrow for the whole menu. The
-    /// menu is an affordance; *which filter is on* is the fact, and a filter
-    /// silently hiding tasks with nothing on screen saying so is the most
-    /// confusing state this app has.
+    /// The name alone. It is also the whole menu's vocabulary -- `ui` draws the
+    /// three of these and marks the current one, rather than being handed a
+    /// pre-rendered string it cannot style or hit-test a part of.
+    ///
+    /// Lowercase: the current filter is marked with weight and colour, so
+    /// shouting is no longer how you tell. A filter silently hiding tasks with
+    /// nothing on screen saying so is the most confusing state this app has, and
+    /// the mark is what prevents it.
     pub fn name(self) -> &'static str {
         match self {
-            Filter::All => "ALL",
-            Filter::InProgress => "ACTIVE",
-            Filter::Pending => "PENDING",
+            Filter::All => "all",
+            Filter::InProgress => "active",
+            Filter::Pending => "pending",
         }
     }
 }

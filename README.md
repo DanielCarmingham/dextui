@@ -121,6 +121,11 @@ Acting on the selected task:
 | `a` | new subtask of the selection |
 | `d` | delete, with confirmation |
 
+**The header is clickable.** Click a word in `[ all  pending  active ]` to switch
+filter, or the sort label to cycle it — right-click the sort label to reverse it,
+the same pair as `o` and `O`. When the terminal is too narrow to show the whole
+menu, clicking the one filter name it does show cycles instead.
+
 **Mouse**: drag the divider to resize the panes; the wheel or a trackpad drag
 scrolls whichever pane is under the pointer, content moving with your fingers in
 both; click selects. Mouse capture means the terminal no longer does its own text
