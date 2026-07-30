@@ -8,11 +8,6 @@ A terminal UI for browsing and triaging [dex](https://dex.rip/) tasks. Rust,
 with [ratatui](https://ratatui.rs) + crossterm. Two panes: task tree on the left,
 full task detail on the right, with a search/filter bar on top.
 
-> There was previously a .NET + Terminal.Gui implementation. It was replaced by
-> this one and remains at the `v0.1.0-dotnet` tag. See
-> [docs/rust-vs-dotnet.md](docs/rust-vs-dotnet.md) for the measured comparison
-> and what the rewrite actually bought.
-
 ## Build, test, run
 
 ```bash
@@ -130,8 +125,8 @@ selection, collapse an expanded node, or interrupt typing.
 - New tasks always arrive **collapsed**, so an agent creating subtasks in the
   background cannot explode the tree under the cursor.
 - **First load is the exception**: everything is new then, so `App::new` expands
-  once up front. Skipping this opens the app onto a single collapsed root — it
-  was a real bug in the .NET version.
+  once up front. Skipping this opens the app onto a single collapsed root, which
+  has been shipped as a bug once already.
 - While a dialog is open, refreshes set `pending_refresh` and are applied on
   close. Never let one land mid-dialog.
 
