@@ -33,6 +33,11 @@ const SHORTCUTS: &str =
 /// Width of the inline progress meter, in cells.
 const METER_WIDTH: usize = 7;
 
+/// What separates the header's parts, and the detail pane's summary fields.
+/// Named because the header's width arithmetic has to account for it, and a
+/// bare `+ 3` there is a number nobody can check.
+const SEP: &str = " · ";
+
 pub fn draw(frame: &mut Frame, app: &mut App, ic: &Icons) {
     let [top, body, bottom] = Layout::vertical([
         Constraint::Length(1),
@@ -277,6 +282,29 @@ fn span_width(spans: &[Span]) -> usize {
     spans.iter().map(|s| s.content.chars().count()).sum()
 }
 
+/// What a `·`-separated group of parts will occupy once the caller has joined
+/// them, separators included.
+///
+/// Shared with the test that asserts the header never exceeds its room -- if the
+/// test re-derived this, the two would agree about a wrong answer and it would
+/// prove nothing.
+fn parts_width(parts: &[Vec<Span<'static>>]) -> usize {
+    parts.iter().map(|p| span_width(p)).sum::<usize>() + parts.len() * SEP.chars().count()
+}
+
+/// The narrowest room in which the counts still draw something.
+///
+/// Every rung of the header's ladder reserves this much, so the right-hand menu
+/// can never outbid the numbers the header exists to show.
+fn counts_floor(c: Counts, ic: &Icons) -> usize {
+    count_candidates(c, ic)
+        .iter()
+        .filter(|parts| !parts.is_empty())
+        .map(|parts| parts_width(parts))
+        .min()
+        .unwrap_or(0)
+}
+
 /// A leading icon and its trailing space, or nothing in the tiers that have none.
 fn icon_span(glyph: &str) -> Vec<Span<'static>> {
     if glyph.is_empty() {
@@ -312,7 +340,7 @@ fn header_identity(store: &str, ic: &Icons, room: usize) -> Vec<Span<'static>> {
         icon_span(ic.app),
         vec![
             Span::styled("dextui", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(" · ", Style::default().fg(DIM)),
+            Span::styled(SEP, Style::default().fg(DIM)),
         ],
         icon_span(ic.project),
         vec![Span::styled(store.to_string(), Style::default().fg(PLAIN))],
@@ -390,12 +418,6 @@ fn right_candidates(sort: &str, filter: tree::Filter) -> [Vec<Span<'static>>; 4]
 /// outlives the sort order, because it is the only one of the three that changes
 /// *what you can see*. The app's own name outlives none of them: you know what
 /// you launched.
-/// The narrowest room in which the counts draw anything at all.
-fn counts_floor(c: Counts, ic: &Icons) -> usize {
-    (1..=16)
-        .find(|&room| !header_counts(c, room, ic).is_empty())
-        .unwrap_or(0)
-}
 fn header_sides(
     store: &str,
     ic: &Icons,
@@ -432,7 +454,11 @@ fn header_sides(
     (header_identity(store, ic, width), Vec::new())
 }
 
-fn header_counts(c: Counts, room: usize, ic: &Icons) -> Vec<Vec<Span<'static>>> {
+/// Every layout the counts can take, widest first, ending in nothing.
+///
+/// Built once and shared by both callers: [`header_counts`] takes the first that
+/// fits, and [`counts_floor`] measures the narrowest that still says something.
+fn count_candidates(c: Counts, ic: &Icons) -> Vec<Vec<Vec<Span<'static>>>> {
     const BAR: usize = 10;
 
     let numbers = |worded: bool| -> Vec<Vec<Span<'static>>> {
@@ -477,24 +503,20 @@ fn header_counts(c: Counts, room: usize, ic: &Icons) -> Vec<Vec<Span<'static>>> 
         s
     };
 
-    // Widest first; the first that fits wins.
-    let candidates: Vec<Vec<Vec<Span<'static>>>> = vec![
+    vec![
         [vec![bar()], numbers(true)].concat(),
         [vec![pct()], numbers(true)].concat(),
         numbers(true),
         numbers(false),
         vec![pct()],
         vec![],
-    ];
+    ]
+}
 
-    for parts in candidates {
-        let w: usize = parts
-            .iter()
-            .flatten()
-            .map(|s| s.content.chars().count())
-            .sum::<usize>()
-            + parts.len() * 3; // the separators the caller will add
-        if w <= room {
+/// The widest layout of the counts that fits in `room`.
+fn header_counts(c: Counts, room: usize, ic: &Icons) -> Vec<Vec<Span<'static>>> {
+    for parts in count_candidates(c, ic) {
+        if parts_width(&parts) <= room {
             return parts;
         }
     }
@@ -525,7 +547,7 @@ fn draw_header(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
     }
 
     let c = app.counts();
-    let sep = || Span::styled(" · ", Style::default().fg(DIM));
+    let sep = || Span::styled(SEP, Style::default().fg(DIM));
 
     // These were once two Paragraphs over the *same* Rect -- identity left,
     // sort/filter right-aligned -- with only the counts reserving any room for
@@ -587,6 +609,9 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
         .map(|(i, row)| {
             let t = &row.node.task;
             let is_selected = selected == Some(i);
+            // Once per row: deriving this resolves every blocker against the
+            // store, and the row needs it three times over.
+            let st = dex::status(t, &app.by_id);
 
             let mut spans = vec![
                 // Always two cells, drawn or not, so selecting a row cannot
@@ -602,8 +627,8 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
                     Style::default().fg(DIM),
                 ),
                 Span::styled(
-                    format!("{} ", glyph(dex::status(t, &app.by_id), ic)),
-                    status_style(dex::status(t, &app.by_id), app.pulse_on),
+                    format!("{} ", glyph(st, ic)),
+                    status_style(st, app.pulse_on),
                 ),
             ];
 
@@ -631,7 +656,7 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
             // that is also blocked reads as in progress -- dex's precedence --
             // so there the trailing marker is the only signal. Repeating it on
             // a row whose glyph already says blocked is just noise.
-            if dex::is_blocked(t, &app.by_id) && dex::status(t, &app.by_id) != Status::Blocked {
+            if st != Status::Blocked && dex::is_blocked(t, &app.by_id) {
                 spans.push(Span::styled(
                     format!(" {}", ic.blocked),
                     Style::default().fg(BLOCKED),
@@ -651,8 +676,8 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
             };
 
             if !trailing.is_empty() {
-                let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-                let tail: usize = trailing.iter().map(|s| s.content.chars().count()).sum();
+                let used = span_width(&spans);
+                let tail = span_width(&trailing);
                 // Drop the gutter rather than wrap when the pane is too narrow.
                 if used + tail + 2 <= inner_width {
                     spans.push(Span::raw(" ".repeat(inner_width - used - tail)));
@@ -820,7 +845,7 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Vec<Line<'a>> {
 
     if t.is_in_progress()
         && let Some(a) = age(&t.started_at) {
-            summary.push(Span::styled(" · ", Style::default().fg(DIM)));
+            summary.push(Span::styled(SEP, Style::default().fg(DIM)));
             summary.push(Span::styled(
                 format!("started {}", since(&a)),
                 Style::default().fg(ACTIVE),
@@ -829,14 +854,14 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Vec<Line<'a>> {
 
     // How long it actually took, which reads better than two raw timestamps.
     if let Some(took) = t.worked_duration() {
-        summary.push(Span::styled(" · ", Style::default().fg(DIM)));
+        summary.push(Span::styled(SEP, Style::default().fg(DIM)));
         summary.push(Span::styled(
             format!("took {took}"),
             Style::default().fg(DONE),
         ));
     }
 
-    summary.push(Span::styled(" · ", Style::default().fg(DIM)));
+    summary.push(Span::styled(SEP, Style::default().fg(DIM)));
     summary.push(Span::styled(
         format!("priority {}", t.priority),
         Style::default().fg(DIM),
@@ -1373,6 +1398,61 @@ mod tests {
         assert!(rows[0].contains("ready"), "header row: {:?}", rows[0]);
     }
 
+    /// The floor is what every rung of the header's ladder reserves, so it must
+    /// be exactly the narrowest layout that still says something -- reserving
+    /// more would push the filter menu out early, reserving less would let the
+    /// menu outbid the numbers.
+    ///
+    /// It stays six cells however busy the store is, because the narrowest
+    /// layout is the percentage alone and a percentage is at most four
+    /// characters. That independence is worth pinning: it is why the reservation
+    /// can be a constant-ish cost rather than something that grows with the
+    /// task count and squeezes the header on exactly the projects that need it.
+    #[test]
+    fn the_counts_floor_is_the_narrowest_layout_that_still_says_something() {
+        let ic = &crate::icons::UNICODE;
+
+        let small = Counts {
+            total: 10,
+            completed: 4,
+            pending: 6,
+            active: 1,
+            blocked: 2,
+            ready: 3,
+            percent: 40,
+        };
+        let busy = Counts {
+            total: 4000,
+            completed: 1200,
+            pending: 2800,
+            active: 137,
+            blocked: 421,
+            ready: 2242,
+            percent: 30,
+        };
+
+        for c in [small, busy] {
+            let floor = counts_floor(c, ic);
+            assert!(floor > 0, "reserved nothing for {c:?}");
+            // The floor must actually be enough: at exactly that room the counts
+            // draw, and one cell narrower they do not.
+            assert!(
+                !header_counts(c, floor, ic).is_empty(),
+                "floor {floor} draws nothing for {c:?}"
+            );
+            assert!(
+                header_counts(c, floor - 1, ic).is_empty(),
+                "floor {floor} is not the narrowest for {c:?}"
+            );
+        }
+
+        assert_eq!(
+            counts_floor(small, ic),
+            counts_floor(busy, ic),
+            "the floor must not grow with the store"
+        );
+    }
+
     /// The header shares its row with the sort and filter labels drawn right-
     /// aligned over the same area, so the counts must yield rather than collide.
     /// They are dropped in order of what carries least: bar, then percentage,
@@ -1390,14 +1470,9 @@ mod tests {
         };
         let ic = &crate::icons::UNICODE;
 
-        let width = |parts: &[Vec<Span<'static>>]| -> usize {
-            parts
-                .iter()
-                .flatten()
-                .map(|s| s.content.chars().count())
-                .sum::<usize>()
-                + parts.len() * 3
-        };
+        // Deliberately the production helper, not a copy of it: a re-derived
+        // formula would agree with a wrong one.
+        let width = parts_width;
 
         let mut seen: Vec<usize> = Vec::new();
         for room in (0..=60).rev() {
