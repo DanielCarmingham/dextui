@@ -31,6 +31,18 @@ impl Filter {
             Filter::Pending => "[ all  PENDING  active ]",
         }
     }
+
+    /// The active filter alone, for a header too narrow for the whole menu. The
+    /// menu is an affordance; *which filter is on* is the fact, and a filter
+    /// silently hiding tasks with nothing on screen saying so is the most
+    /// confusing state this app has.
+    pub fn name(self) -> &'static str {
+        match self {
+            Filter::All => "ALL",
+            Filter::InProgress => "ACTIVE",
+            Filter::Pending => "PENDING",
+        }
+    }
 }
 
 /// How siblings are ordered. Applied at every level, so the hierarchy, the

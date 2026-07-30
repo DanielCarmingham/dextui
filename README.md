@@ -89,8 +89,12 @@ does its own text selection — hold **Shift** to select and copy as usual.
 - The **header** counts what you can act on: `2 active · 5 ready · 1 blocked`.
   *Ready* means unstarted with nothing in its way. A parent with unfinished
   children is neither ready nor blocked — you cannot pick up an epic — so those
-  three numbers deliberately do not add up to the total outstanding. Narrow the
-  terminal and the bar, then the percentage, then the words drop away in turn.
+  three numbers deliberately do not add up to the total outstanding.
+- **Narrowing the terminal** sheds the header in order of what carries least: the
+  bar, then the percentage, then the words behind the counts, then the filter
+  menu collapses to just the active filter's name, then the sort order goes, then
+  `dextui` itself. Which project you are in survives all of it, and is elided with
+  a `…` rather than clipped silently if even that will not fit.
 - The selected row is marked by a `┃` in the left margin rather than a
   highlight bar, so the status colours stay readable on it.
 

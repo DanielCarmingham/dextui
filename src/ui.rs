@@ -272,6 +272,166 @@ fn bar_spans(progress: Progress, ic: &Icons, width: usize) -> Vec<Span<'static>>
 /// rather than shown as `0`, following dex-report.
 ///
 /// Returns one group per `·`-separated part; the caller inserts the separators.
+/// Cells a run of spans will occupy.
+fn span_width(spans: &[Span]) -> usize {
+    spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
+/// A leading icon and its trailing space, or nothing in the tiers that have none.
+fn icon_span(glyph: &str) -> Vec<Span<'static>> {
+    if glyph.is_empty() {
+        Vec::new()
+    } else {
+        vec![Span::styled(
+            format!("{glyph} "),
+            Style::default().fg(DIM),
+        )]
+    }
+}
+
+/// The narrowest identity worth drawing: which store you are in, and nothing
+/// else. The right-hand block yields to this rather than the reverse.
+fn identity_store(store: &str, ic: &Icons) -> Vec<Span<'static>> {
+    [
+        vec![Span::raw(" ")],
+        icon_span(ic.project),
+        vec![Span::styled(store.to_string(), Style::default().fg(PLAIN))],
+    ]
+    .concat()
+}
+
+/// App identity plus the store, dropped to just the store when the row is tight.
+///
+/// "Wrong tasks" is this app's most common confusion -- dex resolves its store
+/// from the working directory and falls back to a global one outside a git repo
+/// -- and this label is the only thing on screen that answers it. The app's own
+/// name goes first: you know what you launched.
+fn header_identity(store: &str, ic: &Icons, room: usize) -> Vec<Span<'static>> {
+    let full = [
+        vec![Span::raw(" ")],
+        icon_span(ic.app),
+        vec![
+            Span::styled("dextui", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(" · ", Style::default().fg(DIM)),
+        ],
+        icon_span(ic.project),
+        vec![Span::styled(store.to_string(), Style::default().fg(PLAIN))],
+    ]
+    .concat();
+
+    for candidate in [full, identity_store(store, ic)] {
+        if span_width(&candidate) <= room {
+            return candidate;
+        }
+    }
+
+    // Last resort: the label alone, elided, so a clipped one cannot be mistaken
+    // for a whole one -- which is exactly how `dexA-Z` used to read.
+    let keep = room.saturating_sub(2); // the leading space, and the ellipsis
+    if keep == 0 {
+        return Vec::new();
+    }
+    let short: String = store.chars().take(keep).collect();
+    let text = if short.chars().count() < store.chars().count() {
+        format!("{short}…")
+    } else {
+        short
+    };
+    vec![
+        Span::raw(" "),
+        Span::styled(text, Style::default().fg(PLAIN)),
+    ]
+}
+
+/// The sort order and filter, hard right, widest first. They shed what carries
+/// least: the menu collapses to the active filter's name, then the sort order
+/// goes, because it only reorders what you can already see.
+///
+/// The leading space is a gutter this block owns, so the left side can fill its
+/// own Rect to the last cell without the two ending up flush against each other
+/// -- which read as `2 readyA-Z` and looked exactly like the overlap this
+/// replaced.
+fn right_candidates(sort: &str, filter: tree::Filter) -> [Vec<Span<'static>>; 4] {
+    let dim = || Style::default().fg(DIM);
+    let with_sort = |label: &'static str| -> Vec<Span<'static>> {
+        vec![
+            Span::raw(" "),
+            Span::styled(sort.to_string(), dim()),
+            Span::raw("  "),
+            Span::styled(label, dim()),
+            Span::raw(" "),
+        ]
+    };
+
+    [
+        with_sort(filter.label()),
+        with_sort(filter.name()),
+        vec![
+            Span::raw(" "),
+            Span::styled(filter.name(), dim()),
+            Span::raw(" "),
+        ],
+        Vec::new(),
+    ]
+}
+
+/// The two ends of the header, chosen as a pair.
+///
+/// Sizing them one after the other looks obvious and is wrong. The right-hand
+/// block's steps are large -- a 24-cell menu collapsing to a 3-cell name -- so
+/// narrowing the terminal can free more room than the narrowing cost, and an
+/// element already dropped would come *back*: at 44 columns the app name was
+/// gone and at 36 it was there again. Choosing from one ladder fixes that
+/// structurally rather than arithmetically. Every element occupies a *prefix* of
+/// the ladder and the ladder descends in width, so first-fit can only ever shed.
+///
+/// The order encodes what each fact is worth. The store label is in every rung
+/// (see `identity_store`). Which filter is active outlives the menu around it and
+/// outlives the sort order, because it is the only one of the three that changes
+/// *what you can see*. The app's own name outlives none of them: you know what
+/// you launched.
+/// The narrowest room in which the counts draw anything at all.
+fn counts_floor(c: Counts, ic: &Icons) -> usize {
+    (1..=16)
+        .find(|&room| !header_counts(c, room, ic).is_empty())
+        .unwrap_or(0)
+}
+fn header_sides(
+    store: &str,
+    ic: &Icons,
+    sort: &str,
+    filter: tree::Filter,
+    counts_floor: usize,
+    width: usize,
+) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
+    let full = header_identity(store, ic, usize::MAX);
+    let short = identity_store(store, ic);
+    let rights = right_candidates(sort, filter);
+
+    // Every rung leaves the counts room to say *something*. Without that the
+    // 24-cell menu outbid them: at 52 columns the header showed the whole filter
+    // menu and no numbers at all, while at 44 it showed "2 ready" -- so widening
+    // the terminal lost the headline. The menu is an affordance for a key you
+    // press; the numbers are what the header is for.
+    for (ident, right) in [
+        (&full, &rights[0]),
+        (&full, &rights[1]),
+        (&short, &rights[1]),
+        (&short, &rights[2]),
+        (&short, &rights[3]),
+    ] {
+        if span_width(ident) + span_width(right) + counts_floor <= width {
+            return (ident.clone(), right.clone());
+        }
+    }
+
+    // Too narrow for any of that. The label alone still beats an elided one.
+    if span_width(&short) <= width {
+        return (short, Vec::new());
+    }
+    (header_identity(store, ic, width), Vec::new())
+}
+
 fn header_counts(c: Counts, room: usize, ic: &Icons) -> Vec<Vec<Span<'static>>> {
     const BAR: usize = 10;
 
@@ -367,54 +527,35 @@ fn draw_header(frame: &mut Frame, app: &App, ic: &Icons, area: Rect) {
     let c = app.counts();
     let sep = || Span::styled(" · ", Style::default().fg(DIM));
 
-    let mut spans = vec![Span::raw(" ")];
-    if !ic.app.is_empty() {
-        spans.push(Span::styled(format!("{} ", ic.app), Style::default().fg(DIM)));
-    }
-    spans.push(Span::styled(
-        "dextui",
-        Style::default().add_modifier(Modifier::BOLD),
-    ));
-    spans.push(sep());
+    // These were once two Paragraphs over the *same* Rect -- identity left,
+    // sort/filter right-aligned -- with only the counts reserving any room for
+    // the other. Below ~48 columns they overwrote each other: the store label
+    // vanished leaving a dangling " · ", and narrower still the row read
+    // `dexA-Z`. Splitting the row first means an overlap cannot be expressed,
+    // and each side is then free to degrade honestly inside its own space.
+    let (mut spans, right) = header_sides(
+        &app.store_label,
+        ic,
+        app.sort.label(app.sort_reversed),
+        app.filter,
+        counts_floor(c, ic),
+        area.width as usize,
+    );
+    let [left_area, right_area] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(span_width(&right) as u16),
+    ])
+    .areas(area);
 
-    if !ic.project.is_empty() {
-        spans.push(Span::styled(format!("{} ", ic.project), Style::default().fg(DIM)));
-    }
-    spans.push(Span::styled(app.store_label.clone(), Style::default().fg(PLAIN)));
-
-    // The right-hand sort/filter block is drawn over the same row, so the counts
-    // have to stop short of it or they collide. Everything after this point is
-    // dropped widest-first when the room is not there.
-    let reserved = app.sort.label(app.sort_reversed).chars().count()
-        + app.filter.label().chars().count()
-        + 4;
-    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let room = (area.width as usize)
-        .saturating_sub(used)
-        .saturating_sub(reserved);
-
+    // Whatever the pair left over goes to the counts, which are built to shed.
+    let room = (left_area.width as usize).saturating_sub(span_width(&spans));
     for part in header_counts(c, room, ic) {
         spans.push(sep());
         spans.extend(part);
     }
 
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
-
-    frame.render_widget(
-        Paragraph::new(
-            Line::from(vec![
-                Span::styled(
-                    app.sort.label(app.sort_reversed),
-                    Style::default().fg(DIM),
-                ),
-                Span::styled("  ", Style::default()),
-                Span::styled(app.filter.label(), Style::default().fg(DIM)),
-                Span::raw(" "),
-            ])
-            .right_aligned(),
-        ),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Line::from(spans)), left_area);
+    frame.render_widget(Paragraph::new(Line::from(right)), right_area);
 }
 
 fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
@@ -640,6 +781,21 @@ fn draw_detail(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
     }
 }
 
+/// An age from `dex::age` phrased as time elapsed. Anything under a minute comes
+/// back as "now", and "now ago" is not a duration -- it reads as a bug. Both the
+/// in-progress summary and the absolute timestamps go through here, because when
+/// only one of them did they contradicted each other about the same instant.
+///
+/// The bare "now" is still what the *tree rows* show, where there is no suffix
+/// and a column of ages has to stay narrow.
+fn since(age: &str) -> String {
+    if age == "now" {
+        "just now".to_string()
+    } else {
+        format!("{age} ago")
+    }
+}
+
 /// Built entirely from the already-fetched list. `dex show` is never called,
 /// because selection changes on every arrow key and a ~180ms process spawn per
 /// keypress would make navigation unusable.
@@ -666,7 +822,7 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Vec<Line<'a>> {
         && let Some(a) = age(&t.started_at) {
             summary.push(Span::styled(" · ", Style::default().fg(DIM)));
             summary.push(Span::styled(
-                format!("started {a} ago"),
+                format!("started {}", since(&a)),
                 Style::default().fg(ACTIVE),
             ));
         }
@@ -746,10 +902,8 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Vec<Line<'a>> {
     }
 
     // Absolute date plus relative age: one for the record, one for the feel.
-    let stamp = |iso: &Option<String>| match age(iso).as_deref() {
-        // "now ago" reads as a bug; anything under a minute is just now.
-        Some("now") => format!("{}  (just now)", local_time(iso)),
-        Some(a) => format!("{}  ({a} ago)", local_time(iso)),
+    let stamp = |iso: &Option<String>| match age(iso) {
+        Some(a) => format!("{}  ({})", local_time(iso), since(&a)),
         None => local_time(iso),
     };
 
@@ -1294,6 +1448,204 @@ mod tests {
         assert!(text.contains("3 ready"), "{text:?}");
         assert!(!text.contains("active"), "nothing is active: {text:?}");
         assert!(!text.contains("blocked"), "nothing is blocked: {text:?}");
+    }
+
+    /// Renders just the header row, for a given store label and width.
+    fn render_header(store: &str, w: u16, ic: &Icons) -> String {
+        let mut app = App::new(
+            vec![task("root", None, "Parent task")],
+            store.into(),
+            crate::config::Config::default(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(w, 8)).unwrap();
+        terminal.draw(|f| draw(f, &mut app, ic)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol())
+            .collect::<String>()
+    }
+
+    /// The two halves of the header used to be two Paragraphs drawn over the
+    /// *same* Rect -- identity left-aligned, sort/filter right-aligned -- with
+    /// only the counts reserving any room. Below ~48 columns they overwrote each
+    /// other: at 44 the store label was eaten and left a dangling " · ", and at
+    /// 36 the row read `dexA-Z`. The row is now split into two Rects, so an
+    /// overlap can no longer be expressed.
+    #[test]
+    fn the_headers_two_blocks_never_overwrite_each_other() {
+        for ic in crate::icons::ALL {
+            // A long label is the same bug at a wide terminal, not just a narrow one.
+            for store in ["demo", "a-rather-long-project-name-here"] {
+                // The row this narrow shows the store label and nothing else,
+                // so it is also the width at which the guarantee below starts.
+                let floor = span_width(&identity_store(store, &ic));
+
+                for w in 4u16..=120 {
+                    let head = render_header(store, w, &ic);
+                    let seen = head.trim_end();
+                    let why = format!(
+                        "tier {} store {store:?} width {w}: {seen:?}",
+                        crate::icons::name(ic.tier)
+                    );
+
+                    assert!(
+                        !seen.ends_with('·'),
+                        "a separator with nothing after it -- {why}"
+                    );
+                    // The bracketed filter menu is all-or-nothing; half of it
+                    // is what being overwritten looked like.
+                    assert_eq!(
+                        seen.contains('['),
+                        seen.contains(']'),
+                        "half a filter menu -- {why}"
+                    );
+                    // Given room for it at all, the store label survives whole.
+                    // It is what the right-hand block yields to, and it used to
+                    // be the casualty: at 44 columns it was overwritten outright
+                    // and at 36 it was gone, in both cases silently.
+                    if w as usize >= floor {
+                        assert!(
+                            seen.contains(store),
+                            "the store label did not survive -- {why}"
+                        );
+                    } else {
+                        // Below that, a clipped label must say it is clipped, or
+                        // `dexA-Z` reads as the name of something.
+                        assert!(
+                            seen.is_empty() || seen.contains('…') || seen.contains(store),
+                            "clipped with nothing to say so -- {why}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// "Wrong tasks" is this app's most common confusion and the store label is
+    /// the only thing on the screen that answers it, so it outlives the app's
+    /// own name.
+    #[test]
+    fn the_identity_gives_up_its_own_name_before_the_store() {
+        let ic = &crate::icons::UNICODE;
+        let text = |room: usize| -> String {
+            header_identity("my-project", ic, room)
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect()
+        };
+
+        assert!(text(30).contains("dextui"), "{:?}", text(30));
+        assert!(text(30).contains("my-project"), "{:?}", text(30));
+
+        // Room for one of the two: it is the store.
+        let tight = text(11);
+        assert!(tight.contains("my-project"), "{tight:?}");
+        assert!(!tight.contains("dextui"), "{tight:?}");
+
+        let mut seen: Vec<usize> = Vec::new();
+        for room in (0..=40).rev() {
+            let w = span_width(&header_identity("my-project", ic, room));
+            assert!(w <= room, "room={room} produced {w} cells");
+            seen.push(w);
+        }
+        assert!(
+            seen.windows(2).all(|w| w[0] >= w[1]),
+            "width must never grow as room shrinks: {seen:?}"
+        );
+        assert_eq!(*seen.last().unwrap(), 0, "something drawn at zero room");
+    }
+
+    /// A filter silently in force with nothing on screen saying so is the most
+    /// confusing state this app has, so which filter is active is the last thing
+    /// the right-hand block drops -- after the menu around it, and after the
+    /// sort order, which only changes the order of what you can already see.
+    #[test]
+    fn the_right_hand_block_keeps_the_active_filter_longest() {
+        let filter = tree::Filter::Pending;
+        let cs = right_candidates("priority", filter);
+        let text = |i: usize| -> String {
+            cs[i].iter().map(|s| s.content.to_string()).collect()
+        };
+
+        assert!(text(0).contains(filter.label()), "{:?}", text(0));
+
+        assert!(!text(1).contains('['), "the menu should have gone: {:?}", text(1));
+        assert!(text(1).contains("priority"), "{:?}", text(1));
+        assert!(text(1).contains(filter.name()), "{:?}", text(1));
+
+        assert!(!text(2).contains("priority"), "sort should have gone: {:?}", text(2));
+        assert!(text(2).contains(filter.name()), "{:?}", text(2));
+
+        assert!(cs[3].is_empty(), "the last rung draws nothing: {:?}", text(3));
+
+        // Strictly descending, which is what makes the ladder in `header_sides`
+        // monotone: a wider terminal can never pick a narrower rung.
+        let widths: Vec<usize> = cs.iter().map(|c| span_width(c)).collect();
+        assert!(
+            widths.windows(2).all(|w| w[0] > w[1]),
+            "candidates must strictly narrow: {widths:?}"
+        );
+    }
+
+    /// The header must never bring back something it has already dropped. Sizing
+    /// the two ends one after the other did exactly that: the right-hand block's
+    /// steps are far larger than the identity's, so narrowing the terminal could
+    /// free more room than the narrowing cost. The app name was absent at 44
+    /// columns and present again at 36 -- which reads as a rendering bug, because
+    /// nothing about a smaller window should reveal more.
+    #[test]
+    fn the_header_never_brings_back_what_it_has_already_dropped() {
+        for ic in crate::icons::ALL {
+            for store in ["demo", "a-rather-long-project-name-here"] {
+                // Everything here is state the header is *reporting*; the counts
+                // are excluded on purpose, being the one part built to shed and
+                // regain content as room allows.
+                let markers = ["dextui", "[", "priority", tree::Filter::Pending.name()];
+                let mut last_seen = [0u16; 4];
+
+                for w in 4u16..=140 {
+                    let head = render_header(store, w, &ic);
+                    for (i, m) in markers.iter().enumerate() {
+                        if head.contains(m) {
+                            last_seen[i] = w;
+                        } else if last_seen[i] != 0 {
+                            panic!(
+                                "{m:?} was drawn at {} columns and is back to being \
+                                 absent at {w} -- tier {}, store {store:?}: {head:?}",
+                                last_seen[i],
+                                crate::icons::name(ic.tier)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `age` reports "now" for anything under a minute, which reads as a bug the
+    /// moment something suffixes it: "started now ago". The absolute timestamp
+    /// rows special-cased it from the start; the in-progress summary line did
+    /// not, so the two disagreed on the same screen about the same instant.
+    #[test]
+    fn a_task_started_moments_ago_reads_just_now_not_now_ago() {
+        let mut t = task("t", None, "Fresh task");
+        t.started_at = Some(chrono::Utc::now().to_rfc3339());
+
+        let rows = render_tasks(vec![t], 120, 16, &crate::icons::UNICODE);
+        let text = rows.join("\n");
+        assert!(
+            !text.contains("now ago"),
+            "\"now ago\" is not a duration:\n{text}"
+        );
+
+        let summary = rows
+            .iter()
+            .find(|r| r.contains("in progress"))
+            .unwrap_or_else(|| panic!("no status line:\n{text}"));
+        assert!(
+            summary.contains("started just now"),
+            "status line: {summary:?}"
+        );
     }
 
     #[test]

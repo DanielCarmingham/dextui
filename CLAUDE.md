@@ -166,8 +166,56 @@ selection, collapse an expanded node, or interrupt typing.
   rather than drawn as `0`. `ready + blocked` deliberately does **not** sum to
   `pending`; see `App::counts`.
 - **Age** appears only on in-progress tasks (`47m`, `21h`, `3d`). Putting one on
-  every row would bury the signal it exists to give. Under a minute is `now`, and
-  renders as "just now" rather than "now ago".
+  every row would bury the signal it exists to give. Under a minute is `now`,
+  which everything that *suffixes* it puts through `ui::since` — "now ago" is not
+  a duration and reads as a bug. The bare `now` is still what the tree rows show,
+  where there is no suffix and the column has to stay narrow. Both the detail
+  pane's `started …` line and its absolute timestamps go through the one helper,
+  because when only the timestamps special-cased it the two contradicted each
+  other about the same instant on the same screen.
+
+### The header row is split, not overlaid
+
+`draw_header` picks the two ends **as a pair** (`header_sides`) and then splits
+the row into two `Rect`s, one per end. Both of those are load-bearing:
+
+- Two `Paragraph`s over the *same* `Rect` — identity left-aligned, sort/filter
+  right-aligned — is what this used to be, with only the counts reserving any
+  room for the other. Below ~48 columns they overwrote each other: at 44 the
+  store label was eaten and left a dangling `·`, at 36 the row read `dexA-Z`. A
+  long project name did the same thing at 60. Splitting first means an overlap
+  cannot be expressed, rather than merely being arithmetically avoided.
+- Sizing the two ends *one after the other* looks like the obvious way to do it
+  and is wrong. The right-hand block's steps are large — a 24-cell menu
+  collapsing to a 3-cell name — so narrowing the terminal can free more room than
+  the narrowing cost, and an element already dropped comes **back**: the app name
+  was absent at 43 columns and present at 42. Nothing about a smaller window
+  should reveal more. `header_sides` walks one ladder of (identity, right) pairs
+  instead, and every element sits in a **prefix** of that ladder, so first-fit can
+  only ever shed. `the_header_never_brings_back_what_it_has_already_dropped`
+  pins it, and fails on the two-stage version.
+
+The ladder's order is a claim about what each fact is worth: the store label is
+in every rung (`identity_store`) because "wrong tasks" is this app's most common
+confusion and the label is the only thing on screen that answers it; which filter
+is active outlives both the menu around it and the sort order, being the one of
+the three that changes *what you can see*; and the app's own name outlives none
+of them, because you know what you launched. Every rung also leaves the counts
+room to say something — without that the menu outbid them, and at 52 columns the
+header showed the whole filter menu and no numbers while 44 showed `2 ready`.
+
+**The known residual**: the counts can still shed one step as the terminal
+*widens*, at the four rung boundaries, because a rung that costs more than the
+width gained squeezes them. Making all three components jointly monotone means
+requiring the counts' full width at every rung, which pushes the filter menu out
+to ~78 columns — and further on a busy store, where the counts are wider. That
+trade was not worth it; a percentage blinking out between 57 and 66 columns is a
+smaller cost than losing the menu at 88. The elements that must not flicker do
+not.
+
+The right-hand block owns a **leading** space, so the left side can fill its own
+`Rect` to the last cell without the two ending up flush — `2 readyA-Z` looked
+exactly like the overlap this replaced.
 - **Colour lives entirely in `src/theme.rs`.** `markdown` and `tree` describe what
   things *are*; `ui.rs` is the only module that decides how they look. Use only
   `Color::Reset` and the ANSI-16 names, which the user's terminal remaps —
