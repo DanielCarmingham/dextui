@@ -3,10 +3,10 @@
 A two-pane terminal UI for browsing and triaging [dex](https://dex.rip/) tasks —
 task tree on the left, full detail on the right.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/dextui-dark.png">
-  <img alt="dextui showing a task tree with progress meters and a detail pane" src="docs/img/dextui-light.png">
-</picture>
+![dextui showing a task tree with progress meters, a selected row and a detail pane](docs/img/dextui-dark.png)
+
+<sub>Nerd Font glyphs; the default set works in any terminal. Regenerate with
+`scripts/screenshot.sh`.</sub>
 
 dex is a CLI task tracker. It is excellent at *writing* tasks and at being driven
 by an agent, but reading a tree of them means running `dex list` again and again.

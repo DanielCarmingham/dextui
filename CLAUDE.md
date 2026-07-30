@@ -657,6 +657,18 @@ swallowed, a truncated filter label, centred help text — was invisible to the
 compiler and to the tests, and obvious the moment a pane was captured. **Use it
 after any change to `ui.rs` or the key handling.**
 
+`capture-pane -p` strips colour, so it cannot answer "is this the right colour"
+or "does the selection read as selection". Add `-e` to keep the escapes, and
+either read the SGR codes directly or render them — which is what the screenshot
+script does.
+
+**`scripts/screenshot.sh` regenerates the README image.** It seeds a throwaway
+store, captures the pane *with* escapes, and draws it with the real font and the
+real palette, so the picture is the app's own output rather than a photograph of
+it — reproducible, and incapable of showing a colour the app does not emit.
+`scripts/screenshot.py` does the ANSI-to-PNG half and is useful on its own for
+looking at colour work. Needs Pillow on whichever `python3` is first on `PATH`.
+
 ## Scope
 
 In: browse, search, filter, start, complete, edit, create, subtask, delete.
