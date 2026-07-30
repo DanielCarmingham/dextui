@@ -49,7 +49,7 @@ UI=$(new "Terminal UI" -d "Header, tree, detail pane" --parent "$ROOT" -p 2)
 KEYS=$(new "Keybindings" -d "s/c/e/n/a/d plus search and filter" --parent "$UI")
 new "Progress rollups" -d "Three-state meters on parent rows." --parent "$UI" >/dev/null
 
-new "Write the docs" -d "Onboarding notes for future sessions." --parent "$ROOT" -p 3 >/dev/null
+DOCS=$(new "Write the docs" -d "Onboarding notes for future sessions." --parent "$ROOT" -p 3)
 new "Long name to show how the tree handles a task title that runs well past the pane" \
     -d "Checks truncation and the right-hand gutter." >/dev/null
 
@@ -57,6 +57,11 @@ new "Long name to show how the tree handles a task title that runs well past the
 dex start "$ROOT" >/dev/null
 dex start "$CORE" >/dev/null
 dex complete "$KEYS" --result "All bindings wired up." --no-commit >/dev/null
+
+# Blocked is one of the four states, so the demo has to contain one or the red
+# marker never appears. `--add-blocker` is dex's own way to say this; nothing
+# here writes to tasks.jsonl.
+dex edit "$DOCS" --add-blocker "$UI" >/dev/null
 
 echo
 echo "seeded: $DIR"

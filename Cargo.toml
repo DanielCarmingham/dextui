@@ -2,6 +2,14 @@
 name = "dextui"
 version = "0.1.0"
 edition = "2024"
+description = "A two-pane terminal UI for browsing and triaging dex tasks"
+license = "MIT"
+repository = "https://github.com/DanielCarmingham/dextui"
+readme = "README.md"
+keywords = ["tui", "tasks", "dex", "terminal", "ratatui"]
+categories = ["command-line-utilities"]
+# Edition 2024. Stated so cargo says so plainly rather than failing to parse.
+rust-version = "1.85"
 
 [dependencies]
 anyhow = "1.0.104"
