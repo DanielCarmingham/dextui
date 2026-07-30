@@ -282,6 +282,30 @@ impl App {
         self.select(Some(rows[next].clone()));
     }
 
+    /// A wheel or trackpad drag over the tree. The *content* slides with the
+    /// gesture and the cursor holds its place on screen, which is exactly what
+    /// the detail pane does.
+    ///
+    /// Moving only the selection is the obvious implementation and reads as
+    /// backwards. Mid-list the view does not move at all, so the only thing the
+    /// eye can track is the cursor -- and the cursor travels *against* the
+    /// fingers, while the detail pane's text travels with them. One drag, two
+    /// directions, in panes an inch apart.
+    ///
+    /// The offset clamps against the row count, not the viewport height, which
+    /// this type does not know. Overshooting is harmless: the list widget pulls
+    /// the offset back far enough to keep the selection visible and the renderer
+    /// writes the corrected value into `tree_offset`.
+    pub fn scroll_tree(&mut self, delta: isize) {
+        let rows = self.row_ids();
+        if rows.is_empty() {
+            return;
+        }
+        let last = rows.len() as isize - 1;
+        self.tree_offset = (self.tree_offset as isize + delta).clamp(0, last) as usize;
+        self.move_selection(delta);
+    }
+
     pub fn select_first(&mut self) {
         let id = self.row_ids().first().cloned();
         self.select(id);
@@ -1219,6 +1243,70 @@ mod tests {
 
         app.select_at_row(app.body_top + 1);
         assert_eq!(app.selected.as_deref(), Some("c"));
+    }
+
+    /// The same gesture has to do the same thing in both panes. Moving only the
+    /// selection left the tree's *content* stationary while the cursor travelled
+    /// against the direction of the fingers -- so with the detail pane sliding
+    /// with them, one drag read forwards on the right and backwards on the left.
+    /// Now both slide their content, and the tree's cursor keeps its screen row.
+    #[test]
+    fn a_drag_slides_both_panes_the_same_way() {
+        let tasks: Vec<Task> = ('a'..='j')
+            .map(|c| task(&c.to_string(), None, &[]))
+            .collect();
+        let mut app = App::new(tasks, "t".into(), Config::default());
+        geo(&mut app);
+        app.detail_content_height = 100;
+        app.detail_viewport_height = 10;
+        app.tree_offset = 3;
+        app.select(Some("f".into()));
+        app.detail_scroll = (3, 0);
+
+        let screen_row = |a: &App| a.selected_row().unwrap() - a.tree_offset;
+        let before = screen_row(&app);
+
+        // The detail pane is measured on its own: moving the tree's selection
+        // deliberately resets it, so driving both from one state would prove
+        // nothing about direction.
+        app.scroll_detail(2, 0);
+        assert_eq!(app.detail_scroll.0, 5, "the detail's content did not move");
+        app.scroll_detail(-2, 0);
+        assert_eq!(app.detail_scroll.0, 3, "the detail did not come back");
+
+        // Same sign, same direction: the offset grows, so later rows come into
+        // view from the bottom, exactly as later lines do on the right.
+        app.scroll_tree(2);
+        assert_eq!(app.tree_offset, 5, "the tree's content did not move");
+        assert_eq!(
+            screen_row(&app),
+            before,
+            "the cursor should hold its place on screen while the list slides"
+        );
+
+        app.scroll_tree(-2);
+        assert_eq!(app.tree_offset, 3, "the tree did not come back");
+        assert_eq!(screen_row(&app), before);
+    }
+
+    /// Scrolling past the end must not run the offset off into blank space: the
+    /// selection clamps, and the offset has to clamp with it or the cursor would
+    /// be scrolled out of the list it is selecting from.
+    #[test]
+    fn scrolling_past_the_ends_of_the_tree_stops() {
+        let tasks: Vec<Task> = ('a'..='e')
+            .map(|c| task(&c.to_string(), None, &[]))
+            .collect();
+        let mut app = App::new(tasks, "t".into(), Config::default());
+        geo(&mut app);
+
+        app.scroll_tree(50);
+        assert_eq!(app.selected.as_deref(), Some("e"), "should rest on the last row");
+        assert!(app.tree_offset <= 4, "offset ran past the list: {}", app.tree_offset);
+
+        app.scroll_tree(-50);
+        assert_eq!(app.selected.as_deref(), Some("a"));
+        assert_eq!(app.tree_offset, 0);
     }
 
     #[test]

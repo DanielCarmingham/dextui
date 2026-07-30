@@ -568,7 +568,22 @@ its own; the events come from crossterm.
 - **Drag the divider** to resize the panes, clamped to 20–80% so neither can be
   dragged away.
 - **Wheel** acts on the pane under the pointer regardless of focus, which is
-  what people expect.
+  what people expect. Both panes slide their **content** with the gesture.
+
+  Having the tree move its *selection* instead is the obvious implementation and
+  reads as backwards. Mid-list the view does not move at all, so the only thing
+  the eye can track is the cursor — and the cursor travels *against* the fingers
+  while the detail pane's text travels with them. One drag, two directions, in
+  panes an inch apart. `App::scroll_tree` moves the offset and the selection by
+  the same delta, so the list slides and the cursor holds its screen row.
+
+  The offset is clamped against the row count rather than the viewport height,
+  which `App` does not know. Overshooting is harmless — the list widget pulls the
+  offset back far enough to keep the selection visible, and the renderer writes
+  the corrected value back into `tree_offset`. It also means **a list shorter
+  than its viewport does not appear to scroll at all**, which is correct and is
+  why this has to be checked on a list long enough to move: a first attempt at
+  verifying it used an 11-row store in a 14-row terminal and showed nothing.
 - **Click** focuses a pane, and in the tree selects the row under the cursor.
 
 The trade-off: while captured, the terminal stops doing its own text selection.

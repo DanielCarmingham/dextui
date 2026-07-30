@@ -71,8 +71,9 @@ Acting on the selected task:
 | `a` | new subtask of the selection |
 | `d` | delete, with confirmation |
 
-**Mouse**: drag the divider to resize the panes, wheel scrolls whichever pane is
-under the pointer, click selects. Mouse capture means the terminal no longer
+**Mouse**: drag the divider to resize the panes, wheel or trackpad scrolls
+whichever pane is under the pointer — the content moves with your fingers in
+both, and in the tree the cursor keeps its place on screen — click selects. Mouse capture means the terminal no longer
 does its own text selection — hold **Shift** to select and copy as usual.
 
 ## Reading the display

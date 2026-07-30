@@ -369,17 +369,19 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
         MouseEventKind::Up(_) => app.dragging_split = false,
 
         // The wheel acts on whichever pane is under the pointer, which is what
-        // people expect regardless of where focus happens to be.
+        // people expect regardless of where focus happens to be. Both panes slide
+        // their *content* with the gesture -- see `App::scroll_tree` for why the
+        // tree cannot just move its selection.
         MouseEventKind::ScrollDown => {
             if m.column < app.divider_x {
-                app.move_selection(1);
+                app.scroll_tree(1);
             } else {
                 app.scroll_detail(1, 0);
             }
         }
         MouseEventKind::ScrollUp => {
             if m.column < app.divider_x {
-                app.move_selection(-1);
+                app.scroll_tree(-1);
             } else {
                 app.scroll_detail(-1, 0);
             }
