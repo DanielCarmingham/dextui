@@ -640,7 +640,12 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
             app.filter = app.filter.next();
             app.rebuild();
         }
-        KeyCode::Char('r') => refresh(dex, tx),
+        // Ctrl-R, because `r` is worth more as rename. The store is watched and
+        // a 10s safety poll backstops it, so this is an escape hatch for the
+        // events macOS drops rather than something you should need.
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            refresh(dex, tx)
+        }
         KeyCode::Char('?') => app.mode = Mode::Help,
         // Reuses the $EDITOR machinery rather than building a settings form.
         KeyCode::Char(',') => app.pending_config_edit = true,
@@ -682,7 +687,12 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
                 });
             }
         }
-        KeyCode::Char('e') => {
+        // `r` for rename and `e` for edit, rather than `e`/`E` for both. The
+        // app's other case pairs are one action and its variant -- `o`/`O` sorts
+        // and reverses, `z`/`Z` collapses and expands -- whereas these were two
+        // different editors sharing a letter, and which case did which was
+        // something you had to remember rather than work out.
+        KeyCode::Char('r') => {
             if let Some(t) = selected {
                 app.mode = Mode::Prompt(Prompt {
                     title: format!("Rename: {}", t.name),
@@ -693,7 +703,7 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
             }
         }
         // A single-line field cannot honestly edit a multi-line description.
-        KeyCode::Char('E') => {
+        KeyCode::Char('e') => {
             if let Some(t) = selected {
                 app.pending_editor = Some(t.id.clone());
             }

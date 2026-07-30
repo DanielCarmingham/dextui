@@ -508,7 +508,7 @@ and a switch to re-enable a regression has no use.
 
 ## Editing, and why input is polled
 
-`e` renames (a single line, so a prompt is honest). `E` hands the **description**
+`r` renames (a single line, so a prompt is honest). `e` hands the **description**
 to `$EDITOR` — `VISUAL`, then `EDITOR`, then `vi`. The value may carry arguments
 (`code -w`), so it is split rather than run through a shell.
 

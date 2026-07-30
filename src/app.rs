@@ -145,7 +145,7 @@ pub struct App {
     pub status: String,
     pub store_label: String,
     pub should_quit: bool,
-    /// Set by `E`; the main loop picks it up and hands off to $EDITOR, which
+    /// Set by `e`; the main loop picks it up and hands off to $EDITOR, which
     /// cannot happen mid-draw because the terminal has to be released first.
     pub pending_editor: Option<String>,
     /// Set by `,`; the main loop opens the config file in $EDITOR and reloads.

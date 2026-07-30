@@ -28,7 +28,7 @@ use crate::dex::{self, age, local_time, Status, Task};
 use crate::tree::{self, Progress};
 
 const SHORTCUTS: &str =
-    " s start  c done  e rename  E edit  n new  a sub  d del  f filter  o sort  , config  ? help";
+    " s start  c done  r rename  e edit  n new  a sub  d del  f filter  o sort  , config  ? help";
 
 /// Width of the inline progress meter, in cells.
 const METER_WIDTH: usize = 7;
@@ -1170,17 +1170,20 @@ fn draw_message(frame: &mut Frame, title: &str, body: &str, hint: &str, accent: 
     );
 }
 
-fn draw_help(frame: &mut Frame) {
-    // Left-aligned on purpose: centring would destroy the column alignment.
-    const HELP: &str = "\
+/// What `?` shows. Module-level rather than buried in `draw_help`, so a test can
+/// hold it against [`SHORTCUTS`] -- the two advertise the same keys to the same
+/// person and must not drift.
+///
+/// Left-aligned on purpose: centring would destroy the column alignment.
+const HELP: &str = "\
 tab        switch pane       s   start task
 ↑ ↓ j k    move / scroll     c   complete (prompts for result)
-→ ← h l    expand / scroll   e   rename
-g / G      first / last      E   edit description in $EDITOR
+→ ← h l    expand / scroll   r   rename
+g / G      first / last      e   edit description in $EDITOR
 w          toggle wrap       n   new top-level task
 o / O      sort / reverse    a   new subtask of selection
 /          search            d   delete (with confirmation)
-f          cycle filter      r   refresh now
+f          cycle filter      ^R  refresh now
 ,          edit config       q   quit
 z Z        collapse/expand all
 
@@ -1189,12 +1192,15 @@ off (w) to scroll a wide table sideways -- wrapping removes the overflow
 there would otherwise be to scroll to.
 
 Mouse: drag the divider to resize, wheel scrolls the pane under the pointer,
-click selects. Hold Shift to select text, as capture is enabled.
+click selects. In the header, click a filter to switch to it, or the sort
+label to cycle it -- right-click the sort to reverse. Hold Shift to select
+text, as capture is enabled.
 
 The view refreshes itself whenever the dex store changes, including when
 another process or agent edits it. Your selection, expansion and any open
 dialog are never disturbed.";
 
+fn draw_help(frame: &mut Frame) {
     let area = centered(frame.area(), 74, 16);
     frame.render_widget(Clear, area);
 
@@ -1486,6 +1492,45 @@ mod tests {
         // "pending" was one opaque number; it is now split into what you can
         // actually pick up and what you cannot.
         assert!(rows[0].contains("ready"), "header row: {:?}", rows[0]);
+    }
+
+    /// The status strip and the help dialog advertise the same keys to the same
+    /// person, so they must not drift apart. Nothing else checks this: the CLI
+    /// has `every_command_in_the_usage_text_is_actually_accepted`, but the
+    /// in-app bindings had no equivalent, which is how `e`/`E` could have been
+    /// renamed in one surface and not the other.
+    #[test]
+    fn the_shortcut_strip_and_the_help_dialog_agree() {
+        for (key, action) in [
+            ("s", "start"),
+            ("c", "done"),
+            ("r", "rename"),
+            ("e", "edit"),
+            ("n", "new"),
+            ("a", "sub"),
+            ("d", "del"),
+            ("f", "filter"),
+            ("o", "sort"),
+        ] {
+            assert!(
+                SHORTCUTS.contains(&format!("{key} {action}")),
+                "the strip does not advertise {key} for {action}: {SHORTCUTS}"
+            );
+        }
+
+        // The pair this change exists to remove. `E` must not survive anywhere,
+        // and `r` must no longer mean refresh.
+        assert!(!SHORTCUTS.contains("E edit"), "`E` is gone: {SHORTCUTS}");
+        assert!(!HELP.contains("E   edit"), "`E` is gone from the help");
+        assert!(
+            !HELP.contains("f          cycle filter      r   refresh"),
+            "bare `r` no longer refreshes"
+        );
+
+        // Both surfaces name the same key for each of the two that moved.
+        assert!(HELP.contains("r   rename"), "help: r renames");
+        assert!(HELP.contains("e   edit description"), "help: e edits");
+        assert!(HELP.contains("^R  refresh now"), "help: Ctrl-R refreshes");
     }
 
     /// Renders a frame and returns the header zones the renderer published.

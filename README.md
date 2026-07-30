@@ -104,7 +104,7 @@ Press `?` in the app for this list at any time.
 | `f` | cycle filter — pending / active / all |
 | `o` `O` | cycle sort / reverse it |
 | `w` | toggle wrapping |
-| `r` | refresh now |
+| `Ctrl-R` | refresh now (it refreshes itself; this is the escape hatch) |
 | `,` | edit the config in `$EDITOR` (created if missing, reloaded on save) |
 | `?` | help |
 | `q` `esc` | quit |
@@ -115,8 +115,8 @@ Acting on the selected task:
 | --- | --- |
 | `s` | start |
 | `c` | complete (prompts for a result) |
-| `e` | rename |
-| `E` | edit the description in `$EDITOR` |
+| `r` | rename |
+| `e` | edit the description in `$EDITOR` |
 | `n` | new top-level task |
 | `a` | new subtask of the selection |
 | `d` | delete, with confirmation |
