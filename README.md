@@ -63,7 +63,7 @@ actually in use — outside a git repo, dex falls back to a shared global one.
 
 ## Reading the display
 
-| | |
+| marker | state |
 | --- | --- |
 | `◇` | todo |
 | `►` | in progress — and it breathes gently, so you can find it |
@@ -93,7 +93,7 @@ you are in survives all of it.
 
 Press `?` in the app for this list at any time.
 
-| | |
+| key | does |
 | --- | --- |
 | `↑ ↓` `j k` | move, or scroll the focused pane |
 | `→ ←` `h l` | expand/collapse, or scroll sideways |
@@ -111,7 +111,7 @@ Press `?` in the app for this list at any time.
 
 Acting on the selected task:
 
-| | |
+| key | does |
 | --- | --- |
 | `s` | start |
 | `c` | complete (prompts for a result) |
