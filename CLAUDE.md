@@ -669,6 +669,15 @@ swallowed, a truncated filter label, centred help text — was invisible to the
 compiler and to the tests, and obvious the moment a pane was captured. **Use it
 after any change to `ui.rs` or the key handling.**
 
+**Check the binary is actually fresh before believing a capture.** `cargo build`
+has twice reported `Finished` while leaving `target/debug/dextui` hours stale:
+`cargo test` rebuilds its own binary, so the suite goes green against new code
+while the pane you capture is running old code. Deleting the binary does not
+help — cargo restores the previous one from its fingerprint. `cargo clean -p
+dextui` does. A build that reports `Finished` in under a second after a real
+source change is the tell, and `ls -la target/debug/dextui` settles it. Both
+times this happened it produced a confident and wrong conclusion.
+
 `capture-pane -p` strips colour, so it cannot answer "is this the right colour"
 or "does the selection read as selection". Add `-e` to keep the escapes, and
 either read the SGR codes directly or render them — which is what the screenshot

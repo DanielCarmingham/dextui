@@ -256,11 +256,23 @@ impl App {
             self.sort_reversed,
         );
 
-        // A selection filtered out of view must not linger invisibly.
-        if let Some(sel) = self.selected.clone()
-            && !self.visible_ids().contains(&sel) {
-                self.selected = self.first_visible_id();
-            }
+        // A selection filtered out of view must not linger invisibly -- and
+        // having *no* selection while rows are on screen is the same fault seen
+        // from the other side. Gating this on the selection being `Some` meant
+        // that once a filter matched nothing, the selection went to `None` and
+        // could never come back: every later rebuild skipped the repair, so the
+        // detail pane read "No tasks match the current filter" against a tree
+        // full of them.
+        //
+        // Note this only ever *establishes* a selection, never moves a live one,
+        // so the rule that a refresh must not disturb the user still holds.
+        let still_visible = self
+            .selected
+            .as_ref()
+            .is_some_and(|sel| self.visible_ids().contains(sel));
+        if !still_visible {
+            self.selected = self.first_visible_id();
+        }
     }
 
     fn visible_ids(&self) -> HashSet<String> {
@@ -738,6 +750,47 @@ mod tests {
 
     fn counted(tasks: Vec<Task>) -> App {
         App::new(tasks, "demo".into(), Config::default())
+    }
+
+    /// Cycling through a filter that matches nothing used to strand the app:
+    /// the selection went to `None` with nothing to select, and `rebuild`'s
+    /// repair was gated on the selection being `Some`, so it never came back
+    /// when rows did. The detail pane then read "No tasks match the current
+    /// filter" against a tree full of tasks.
+    #[test]
+    fn passing_through_an_empty_filter_does_not_strand_the_selection() {
+        let mut app = counted(vec![task("a", None, &[]), task("b", None, &[])]);
+        app.filter = Filter::Pending;
+        app.rebuild();
+        assert!(app.selected.is_some(), "starts with something selected");
+
+        // Nothing is started, so this matches no task at all.
+        app.filter = Filter::InProgress;
+        app.rebuild();
+        assert_eq!(app.selected, None, "nothing to select is correct here");
+
+        app.filter = Filter::Pending;
+        app.rebuild();
+        assert!(
+            app.selected.is_some(),
+            "rows are visible again, so something must be selected"
+        );
+    }
+
+    /// The other half of the same rule, and the one that must not regress: a
+    /// selection that is still on screen is never moved. That is the invariant
+    /// the whole app is built around.
+    #[test]
+    fn rebuild_never_moves_a_selection_that_is_still_visible() {
+        let mut app = counted(vec![task("a", None, &[]), task("b", None, &[])]);
+        app.selected = Some("b".into());
+
+        app.rebuild();
+        assert_eq!(app.selected.as_deref(), Some("b"));
+
+        app.sort_reversed = !app.sort_reversed;
+        app.rebuild();
+        assert_eq!(app.selected.as_deref(), Some("b"), "reordering is not moving");
     }
 
     fn clickable(zones: Vec<(u16, u16, HeaderZone)>) -> App {
