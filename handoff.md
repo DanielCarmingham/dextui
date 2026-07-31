@@ -2,7 +2,7 @@
 
 **Branch:** `add-repo-support`, in the worktree at
 `~/Developer/DanielCarmingham/dextui.worktrees/add-repo-support`
-**State:** 349 tests passing, clippy clean, working tree clean. **Nothing has
+**State:** 353 tests passing, clippy clean, working tree clean. **Nothing has
 been pushed.** The branch has had a whole-branch review and one fix wave; the
 finding that was parked has since been fixed, and what remains is in
 *Still open* — none of it blocking.
@@ -133,6 +133,20 @@ under "Two panes, one set of movement keys".
 
 `scripts/render-check.sh` now honours `DEXTUI_RENDER_COLS`/`DEXTUI_RENDER_ROWS`,
 which is what made the narrow cases checkable at all.
+
+**A store that does not exist yet is watched properly.** Reported as "if the
+`.dex` dir doesn't exist it never loads anything". It did load, within ten
+seconds — but three things were wrong, and the first could genuinely lose the
+load entirely: the stat baseline was read on the watcher thread rather than
+before `spawn` returned, so a write in that window landed *in* the baseline and
+every later tick then correctly called it unchanged. With no watcher attached,
+nothing else would ever report it. It also never attached a watcher once the
+store appeared, and polled at ten seconds while it had none. See CLAUDE.md, "A
+store that does not exist yet"; `75be92d`.
+
+That one is worth reading before touching `watch.rs`: two of the three defects
+kept the app *correct* and only made it slow, which is precisely why none of
+them had been noticed.
 
 ## Still open
 
