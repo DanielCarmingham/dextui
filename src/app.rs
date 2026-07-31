@@ -159,6 +159,12 @@ pub struct App {
     pub mode: Mode,
     pub status: String,
     pub store_label: String,
+    /// The store directory the task list came from -- what `store_label` is a
+    /// display name *of*. Kept alongside it because a label is ambiguous (two
+    /// projects can share a directory name) and because an in-flight refresh
+    /// has to be matched against the store it read, not against how that store
+    /// is spelled on screen. See `Msg::Tasks` in `main.rs`.
+    pub store_dir: String,
     pub should_quit: bool,
     /// Set by `e`; the main loop picks it up and hands off to $EDITOR, which
     /// cannot happen mid-draw because the terminal has to be released first.
@@ -243,7 +249,10 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(tasks: Vec<Task>, store_label: String, cfg: Config) -> Self {
+    /// `store_dir` is the directory dex resolved, not a display name: the
+    /// label is derived from it here, the same way `load_store` does it, so
+    /// the two can never be set to different stores. See `App::store_dir`.
+    pub fn new(tasks: Vec<Task>, store_dir: String, cfg: Config) -> Self {
         let mut app = Self {
             by_id: index(&tasks),
             tasks,
@@ -257,7 +266,8 @@ impl App {
             query: TextInput::default(),
             mode: Mode::Normal,
             status: String::new(),
-            store_label,
+            store_label: crate::dex::store_label(&store_dir),
+            store_dir,
             should_quit: false,
             pending_editor: None,
             pending_config_edit: false,
@@ -900,10 +910,16 @@ impl App {
     /// Follows `App::new`'s first-load rule instead: everything here is new,
     /// so expand it -- CLAUDE.md records the collapsed-single-root version of
     /// this as a bug that has already shipped once.
-    pub fn load_store(&mut self, tasks: Vec<Task>, store_label: String) {
+    /// Takes the store *directory* and derives the label from it, rather than
+    /// taking the label: `store_dir` is what a refresh is tagged with (see
+    /// `Msg::Tasks`) and `store_label` is what the header shows, and the one
+    /// thing that must never happen is those two describing different stores.
+    /// One argument, set in one place, cannot.
+    pub fn load_store(&mut self, tasks: Vec<Task>, store_dir: String) {
         self.by_id = index(&tasks);
         self.tasks = tasks;
-        self.store_label = store_label;
+        self.store_label = crate::dex::store_label(&store_dir);
+        self.store_dir = store_dir;
         self.progress = tree::subtree_progress(&self.tasks);
         self.expand_all();
         self.rebuild();

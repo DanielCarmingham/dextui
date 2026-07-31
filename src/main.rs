@@ -29,12 +29,24 @@ use crossterm::event::{
 use crossterm::execute;
 
 use app::{App, Focus, Mode, Pending, Prompt, TextInput};
-use dex::{store_label, Dex, Task};
+use dex::{Dex, Task};
 
 /// Everything the main loop reacts to, from every thread, on one channel.
 enum Msg {
     StoreChanged,
-    Tasks(Result<Vec<Task>, String>),
+    /// A task list, tagged with the store directory it was actually read
+    /// from.
+    ///
+    /// The tag is load-bearing, not diagnostic. `refresh` spawns a thread
+    /// holding a clone of the `Arc<Dex>` current at the time; `switch_store`
+    /// replaces that `Arc` on the main loop. A refresh spawned just before a
+    /// switch therefore lands just after it, and without a tag would paint the
+    /// **old** store's tasks under the new store's label -- silently, which is
+    /// exactly why CLAUDE.md treats a wrong store as worse than a crash.
+    Tasks {
+        store: String,
+        result: Result<Vec<Task>, String>,
+    },
     Ok(String),
     Failed(String),
     /// `dex complete` was rejected; carries what is needed to retry with --force.
@@ -335,7 +347,7 @@ fn main() -> std::io::Result<()> {
         }
     }
 
-    let mut app = App::new(tasks, store_label(&store_dir), cfg);
+    let mut app = App::new(tasks, store_dir.clone(), cfg);
     app.registry = registry;
     app.repos = repos;
     app.status = [
@@ -613,17 +625,30 @@ fn handle_msg(app: &mut App, msg: Msg, dex: &Arc<Dex>, tx: &Sender<Msg>) {
                 // Deferred rather than dropped; applied when the dialog closes.
                 app.pending_refresh = true;
             } else {
-                refresh(dex, tx, &app.store_label);
+                refresh(dex, tx, app);
             }
         }
 
-        Msg::Tasks(Ok(tasks)) => app.apply_tasks(tasks),
+        // A refresh that was already in flight when the store changed under
+        // it. Dropped rather than applied: it describes a store nobody is
+        // looking at any more, and painting it would leave the tree and the
+        // header disagreeing about which project this is.
+        Msg::Tasks { store, .. } if store != app.store_dir => {
+            log::line(
+                "store",
+                &format!("dropped a task list from {store}; now on {}", app.store_dir),
+            );
+        }
+
+        Msg::Tasks { result: Ok(tasks), .. } => app.apply_tasks(tasks),
         // Keep the last good model rather than blanking the view.
-        Msg::Tasks(Err(e)) => app.status = format!("refresh failed: {}", flatten(&e)),
+        Msg::Tasks { result: Err(e), .. } => {
+            app.status = format!("refresh failed: {}", flatten(&e))
+        }
 
         Msg::Ok(message) => {
             app.status = message;
-            refresh(dex, tx, &app.store_label);
+            refresh(dex, tx, app);
         }
         Msg::Failed(e) => app.mode = Mode::Error(flatten(&e)),
 
@@ -770,7 +795,7 @@ fn switch_store(
             // old expanded id would fail to match the new tree and
             // `expand_all` would never run, so the new store would open
             // fully collapsed.
-            app.load_store(tasks, store_label(&dir));
+            app.load_store(tasks, dir.clone());
             app.status = format!("switched to {}", app.store_label);
         }
         Err(e) => app.status = format!("could not read {dir}: {}", flatten(&e)),
@@ -877,17 +902,24 @@ fn log_list_outcome(store: &str, result: &Result<Vec<Task>, String>, elapsed: st
     }
 }
 
-/// `store` is a display label (`store_label`), not a full path -- just enough
-/// to tell two stores apart in the log without an extra `dex dir` spawn.
-fn refresh(dex: &Arc<Dex>, tx: &Sender<Msg>, store: &str) {
+/// Takes the whole `App` rather than the two strings it reads, so the store a
+/// refresh is *tagged* with and the store the app *thinks* it is on cannot be
+/// passed separately and drift apart -- which would defeat the check in
+/// `handle_msg` entirely.
+///
+/// The log line keeps using the display label (`store_label`): there is only
+/// ever one selected store, so there is nothing to disambiguate, and it is
+/// what every existing line in the file already says.
+fn refresh(dex: &Arc<Dex>, tx: &Sender<Msg>, app: &App) {
     let dex = Arc::clone(dex);
     let tx = tx.clone();
-    let store = store.to_string();
+    let label = app.store_label.clone();
+    let store = app.store_dir.clone();
     thread::spawn(move || {
         let start = std::time::Instant::now();
         let result = dex.list();
-        log_list_outcome(&store, &result, start.elapsed());
-        let _ = tx.send(Msg::Tasks(result));
+        log_list_outcome(&label, &result, start.elapsed());
+        let _ = tx.send(Msg::Tasks { store, result });
     });
 }
 
@@ -911,7 +943,7 @@ fn close_modal(app: &mut App, dex: &Arc<Dex>, tx: &Sender<Msg>) {
     app.mode = Mode::Normal;
     if app.pending_refresh {
         app.pending_refresh = false;
-        refresh(dex, tx, &app.store_label);
+        refresh(dex, tx, app);
     }
 }
 
@@ -1090,7 +1122,7 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         // a 10s safety poll backstops it, so this is an escape hatch for the
         // events macOS drops rather than something you should need.
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            refresh(dex, tx, &app.store_label)
+            refresh(dex, tx, app)
         }
         KeyCode::Char('?') => app.mode = Mode::Help,
         // Reuses the $EDITOR machinery rather than building a settings form.
@@ -1433,6 +1465,79 @@ mod tests {
                 "usage advertises {words:?} but the parser rejects it"
             );
         }
+    }
+
+    fn a_task(id: &str) -> Task {
+        Task {
+            id: id.to_string(),
+            name: id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// `handle_msg` needs a `Dex` and a channel it never uses on this path --
+    /// `Msg::Tasks` neither spawns a refresh nor sends anything.
+    fn apply(app: &mut App, msg: Msg) {
+        let (tx, _rx) = channel::<Msg>();
+        handle_msg(app, msg, &Arc::new(Dex::real()), &tx);
+    }
+
+    /// The race this closes: `refresh()` spawns a thread holding the `Arc<Dex>`
+    /// current at the time, and `switch_store` replaces that `Arc` on the main
+    /// loop. A refresh spawned just before a switch lands just after it, and
+    /// before this the arriving task list was applied unconditionally -- the
+    /// old store's tasks painted under the new store's label, silently.
+    #[test]
+    fn a_task_list_from_the_store_we_just_left_is_dropped() {
+        let mut app = App::new(vec![a_task("new")], "/x/two/.dex".into(), config::Config::default());
+
+        apply(
+            &mut app,
+            Msg::Tasks {
+                store: "/x/one/.dex".into(),
+                result: Ok(vec![a_task("old")]),
+            },
+        );
+
+        let ids: Vec<&str> = app.tasks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["new"], "the old store's tasks were painted");
+        assert_eq!(app.store_label, "two", "and the header still says the new store");
+    }
+
+    /// The ordinary case still applies, or the tag would have turned every
+    /// refresh into a no-op.
+    #[test]
+    fn a_task_list_from_the_current_store_is_applied() {
+        let mut app = App::new(vec![], "/x/one/.dex".into(), config::Config::default());
+
+        apply(
+            &mut app,
+            Msg::Tasks {
+                store: "/x/one/.dex".into(),
+                result: Ok(vec![a_task("fresh")]),
+            },
+        );
+
+        assert_eq!(app.tasks.len(), 1);
+        assert_eq!(app.tasks[0].id, "fresh");
+    }
+
+    /// A failure from a store nobody is on must not report itself either --
+    /// "refresh failed" about a store you have already left is noise about
+    /// something you cannot act on.
+    #[test]
+    fn a_failure_from_a_store_we_just_left_is_not_reported() {
+        let mut app = App::new(vec![], "/x/two/.dex".into(), config::Config::default());
+
+        apply(
+            &mut app,
+            Msg::Tasks {
+                store: "/x/one/.dex".into(),
+                result: Err("boom".into()),
+            },
+        );
+
+        assert!(app.status.is_empty(), "status: {}", app.status);
     }
 
     fn worktrees_of(name: &str) -> Vec<crate::worktree::Worktree> {
