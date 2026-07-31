@@ -132,6 +132,54 @@ pub fn draw(frame: &mut Frame, app: &mut App, ic: &Icons) {
 
     draw_status(frame, app, bottom);
     draw_overlays(frame, app);
+    // Last of all, over the dialogs too: a click that lands on a dialog is
+    // exactly as worth seeing as one that lands on a pane.
+    if app.mouse_debug {
+        draw_mouse_debug(frame, app);
+    }
+}
+
+/// The `DEXTUI_MOUSE_DEBUG=1` strip: recent mouse events and what the app made
+/// of each.
+///
+/// Pinned to the bottom and drawn over everything, geometry included -- it is
+/// diagnosing the geometry, so it must not depend on it being right.
+fn draw_mouse_debug(frame: &mut Frame, app: &App) {
+    if app.mouse_log.is_empty() {
+        return;
+    }
+    let area = frame.area();
+    let rows = (app.mouse_log.len() as u16 + 2).min(area.height);
+    let area = Rect {
+        x: 0,
+        y: area.height.saturating_sub(rows),
+        width: area.width,
+        height: rows,
+    };
+    frame.render_widget(Clear, area);
+
+    let lines: Vec<Line> = app
+        .mouse_log
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            // Newest brightest, so the eye lands on the click you just made.
+            Line::styled(
+                l.as_str(),
+                Style::default().fg(if i == 0 { TODO } else { DIM }),
+            )
+        })
+        .collect();
+
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .title(" mouse ")
+                .title_style(Style::default().fg(DIM))
+                .border_style(Style::default().fg(ACCENT)),
+        ),
+        area,
+    );
 }
 
 /// Dialogs, drawn last so they sit over whichever layout was used.

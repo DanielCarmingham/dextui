@@ -252,6 +252,14 @@ pub struct App {
     /// `tree_offset` is -- without it, `G`/`PageDown` could select a row
     /// below the visible area with nothing on screen ever moving to show it.
     pub repos_offset: usize,
+    /// The last few mouse events, with what the app made of each, for
+    /// `DEXTUI_MOUSE_DEBUG=1`. Off by default and empty when off -- this is a
+    /// diagnostic for "the click did not land where I clicked", which is a
+    /// class of bug that cannot be reasoned about from the code alone because
+    /// half the inputs (`body_top`, `tree_offset`) are published by the
+    /// renderer a frame earlier.
+    pub mouse_log: Vec<String>,
+    pub mouse_debug: bool,
     pub registry: crate::registry::Registry,
     /// Every sidebar store's task list, keyed by store directory.
     ///
@@ -320,6 +328,8 @@ impl App {
             repos: Vec::new(),
             selected_repo_row: 0,
             repos_offset: 0,
+            mouse_log: Vec::new(),
+            mouse_debug: std::env::var_os("DEXTUI_MOUSE_DEBUG").is_some(),
             registry: crate::registry::Registry::default(),
             store_tasks: HashMap::new(),
         };
@@ -687,7 +697,7 @@ impl App {
     /// `└───┘` selected a task that was not on screen, and then scrolled the
     /// list to reveal what you had supposedly just clicked. The top border
     /// escaped only because `checked_sub` happens to reject it.
-    fn list_row_index(&self, row: u16, offset: usize) -> Option<usize> {
+    pub fn list_row_index(&self, row: u16, offset: usize) -> Option<usize> {
         if row + 1 >= self.body_bottom {
             return None;
         }

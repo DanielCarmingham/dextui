@@ -570,6 +570,9 @@ fn main() -> std::io::Result<()> {
 }
 
 fn handle_mouse(app: &mut App, m: MouseEvent) {
+    if app.mouse_debug {
+        log_mouse(app, m);
+    }
     // With the help open the dialog is what the pointer is over, so the wheel
     // scrolls it rather than a pane it is covering -- and every other gesture
     // is swallowed rather than reaching through, since a click that moved the
@@ -656,6 +659,71 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
 
         _ => {}
     }
+}
+
+/// Records a mouse event beside what the app resolves it to, for
+/// `DEXTUI_MOUSE_DEBUG=1`.
+///
+/// The point is the *pairing*. `examples/mouse.rs` answers "what did the
+/// terminal report", which is the question you can already answer without the
+/// app; the one that actually matters when a click lands on the wrong task is
+/// what happened to those coordinates afterwards -- and every input to that is
+/// state the renderer published a frame earlier (`body_top`, `tree_offset`,
+/// `divider_x`, `repos_right`), none of which is visible from the outside.
+///
+/// Recorded *before* the event is handled, so the geometry shown is the
+/// geometry the decision was actually made against rather than whatever it
+/// became afterwards.
+fn log_mouse(app: &mut App, m: MouseEvent) {
+    let kind = match m.kind {
+        MouseEventKind::Down(b) => format!("down {b:?}"),
+        MouseEventKind::Up(b) => format!("up {b:?}"),
+        MouseEventKind::Drag(b) => format!("drag {b:?}"),
+        MouseEventKind::Moved => "moved".into(),
+        MouseEventKind::ScrollUp => "wheel up".into(),
+        MouseEventKind::ScrollDown => "wheel down".into(),
+        MouseEventKind::ScrollLeft => "wheel left".into(),
+        MouseEventKind::ScrollRight => "wheel right".into(),
+    };
+
+    let pane = app.pane_at(m.column);
+    let in_body = app.in_body(m.row);
+    let offset = match pane {
+        Focus::Repos => app.repos_offset,
+        _ => app.tree_offset,
+    };
+    let idx = app.list_row_index(m.row, offset);
+
+    // What the row actually resolves to, by the same lookup the click itself
+    // uses -- so a disagreement between this and the screen is the bug, stated.
+    let lands = match (in_body, pane, idx) {
+        (false, ..) => "-- not in body".to_string(),
+        (true, Focus::Tree, Some(i)) => match app.row_ids().get(i) {
+            Some(id) => match app.by_id.get(id) {
+                Some(t) => format!("task[{i}] {}", t.name),
+                None => format!("task[{i}] <unknown id {id}>"),
+            },
+            None => format!("task[{i}] -- past the last row"),
+        },
+        (true, Focus::Repos, Some(i)) => match app.repo_rows().get(i) {
+            Some(_) => format!("repo[{i}]"),
+            None => format!("repo[{i}] -- past the last row"),
+        },
+        (true, Focus::Detail, _) => "detail pane".to_string(),
+        (true, _, None) => "-- a border row".to_string(),
+    };
+
+    app.mouse_log.insert(
+        0,
+        format!(
+            "{kind} @ {},{} (1-based {},{}) pane {pane:?} off {offset} -> {lands}",
+            m.column,
+            m.row,
+            m.column + 1,
+            m.row + 1,
+        ),
+    );
+    app.mouse_log.truncate(6);
 }
 
 fn handle_msg(app: &mut App, msg: Msg, dex: &Arc<Dex>, tx: &Sender<Msg>) {
