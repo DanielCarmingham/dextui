@@ -21,6 +21,17 @@ FONT_DIR = "/Users/daniel/Library/Fonts/NerdFonts"
 REGULAR = f"{FONT_DIR}/FiraCodeNerdFont-Regular.ttf"
 BOLD = f"{FONT_DIR}/FiraCodeNerdFont-Bold.ttf"
 
+# What macOS substitutes for codepoints the main font lacks.
+#
+# Pillow draws .notdef -- a tofu box -- for a missing glyph, whereas a terminal
+# falls back through the CoreText cascade and draws something. Without this the
+# picture would show tofu where the app shows a spinner, which is exactly the
+# kind of lie this script exists to avoid.
+#
+# The braille spinner is the live case: FiraCode Nerd Font contains no braille
+# at all, so every frame comes from here. See `icons::BRAILLE_SPIN`.
+FALLBACKS = ["/System/Library/Fonts/Apple Braille.ttf"]
+
 # Ghostty's "GitHub Dark Default", the theme this machine actually runs.
 BG = (0x0D, 0x11, 0x17)
 FG = (0xE6, 0xED, 0xF3)
@@ -91,6 +102,14 @@ def parse(text):
     return rows
 
 
+def coverage(path):
+    """Every codepoint a font actually contains."""
+    from fontTools.ttLib import TTFont
+
+    f = TTFont(path, fontNumber=0, lazy=True)
+    return set().union(*[t.cmap.keys() for t in f["cmap"].tables])
+
+
 def render(rows, path):
     probe = ImageFont.truetype(REGULAR, FONT_SIZE)
     cw = probe.getlength("M")
@@ -108,6 +127,27 @@ def render(rows, path):
     reg = ImageFont.truetype(REGULAR, FONT_SIZE)
     bld = ImageFont.truetype(BOLD, FONT_SIZE)
 
+    covered = coverage(REGULAR)
+
+    # A fallback is scaled so its advance matches the cell, which is what a
+    # terminal does -- it owns the grid, and a substituted glyph is fitted to it
+    # rather than allowed to set its own width. Apple Braille is 1.111 cells at
+    # the same point size, so drawn unscaled it would overhang its neighbours.
+    spare = []
+    for path_ in FALLBACKS:
+        probe = ImageFont.truetype(path_, FONT_SIZE)
+        natural = probe.getlength("⠋") or cw
+        size = max(1, round(FONT_SIZE * cw / natural))
+        spare.append((coverage(path_), ImageFont.truetype(path_, size)))
+
+    def font_for(ch, bold):
+        if ord(ch) in covered:
+            return bld if bold else reg
+        for cmap, font in spare:
+            if ord(ch) in cmap:
+                return font
+        return bld if bold else reg  # tofu, and visibly so
+
     for y, row in enumerate(rows):
         for x, cell in enumerate(row):
             if cell.ch == " ":
@@ -116,7 +156,15 @@ def render(rows, path):
             if cell.dim:
                 colour = tuple(int(v * 0.55 + BG[i] * 0.45) for i, v in enumerate(colour))
             px, py = PAD + x * cw, PAD + y * ch
-            d.text((px, py), cell.ch, font=bld if cell.bold else reg, fill=colour)
+            font = font_for(cell.ch, cell.bold)
+            # A substituted glyph is not the cell's width, and the terminal
+            # centres it in the cell rather than letting it push anything along.
+            # Doing the same keeps the columns true.
+            off = 0
+            if font not in (reg, bld):
+                w = d.textlength(cell.ch, font=font)
+                off = max(0, (cw - w) / 2)
+            d.text((px + off, py), cell.ch, font=font, fill=colour)
             if cell.strike:
                 mid = py + ch * 0.52
                 d.line([(px, mid), (px + cw, mid)], fill=colour, width=1)
