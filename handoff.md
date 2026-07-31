@@ -2,7 +2,7 @@
 
 **Branch:** `add-repo-support`, in the worktree at
 `~/Developer/DanielCarmingham/dextui.worktrees/add-repo-support`
-**State:** 353 tests passing, clippy clean, working tree clean. **Nothing has
+**State:** 367 tests passing, clippy clean, working tree clean. **Nothing has
 been pushed.** The branch has had a whole-branch review and one fix wave; the
 finding that was parked has since been fixed, and what remains is in
 *Still open* — none of it blocking.
@@ -25,14 +25,20 @@ move between them without relaunching.
 
 | key | does |
 | --- | --- |
-| `3` | focus the sidebar |
-| `j` `k` `g` `G` | move within it |
-| `enter` `l` | select the worktree, switch the store |
+| `1` | focus the sidebar (`2` tasks, `3` detail — left to right) |
+| `b` | show / hide the sidebar at any width |
+| `j` `k` `g` `G` | move within it — **and switch the store as you go** |
+| `enter` `l` | follow the cursor over to the tasks pane |
 | `a` | register the repo you are in |
 | `D` | unregister, with confirmation |
 
-Three panes at ≥110 columns (`repos_pane_above`), two below, one below
-`single_pane_below` (80). Widening never removes a pane —
+Moving the cursor switches stores immediately, the way moving the task cursor
+changes the detail pane; `enter` is only about focus. That is possible because
+every sidebar store's task list is cached (`App::store_tasks`) and kept current
+by its own watcher, so a switch is a lookup rather than a ~180ms `dex list`.
+
+Three panes at ≥110 columns (`repos_pane_above`, overridden by `b`), two below,
+one below `single_pane_below` (80). Widening never removes a pane —
 `the_pane_ladder_is_monotone` pins that, for the reason `header_sides` already
 had the same rule.
 
@@ -159,12 +165,11 @@ notice.
 Note the store is per-worktree and `.dex/` is gitignored, so these tasks travel
 with the branch and not with the push.
 
-- **`app.worktree_counts` is write-only.** Counts are loaded concurrently at
-  startup and kept current by per-store watchers, but nothing renders them, so
-  the sidebar shows no task counts yet. The machinery is real and tested; the
-  renderer is not wired to it.
-- **A repo registered mid-run gets no watcher until relaunch.** The watcher
-  channels are set up once in `main`. Inert while the point above holds.
+- **A repo registered mid-run gets no watcher and no cached task list until
+  relaunch.** The watcher fleet is set up once in `main`. Switching to such a
+  repo therefore falls back to a synchronous-looking async `dex list` (the
+  panes show its label over an empty tree until it lands), and its sidebar
+  count stays absent. Everything registered at startup is instant.
 - **A repo row cannot be collapsed** — `Repo::open` is read by the renderer but
   no key toggles it.
 - `selected_repo_row` is not clamped after `a` re-sorts the list, so the sidebar

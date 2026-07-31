@@ -1183,6 +1183,10 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         // Wrapping and horizontal scrolling are mutually exclusive, so this is
         // the switch between reading prose and reading a wide table.
         KeyCode::Char('w') => app.toggle_wrap(),
+        // Show or hide the sidebar, whatever the width would have chosen.
+        // `b` for bar, and unbound before this. `1` brings it back, so this
+        // cannot be a way to lose the pane with no way to ask for it again.
+        KeyCode::Char('b') => app.toggle_repos(),
         KeyCode::Char('o') => app.cycle_sort(),
         KeyCode::Char('O') => app.toggle_sort_direction(),
 
@@ -1232,7 +1236,7 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         // repo-focused pane at a width with no room reserved for it as a
         // single pane in its own right, so this needs no special casing
         // here and nothing to undo when focus or width changes back.
-        KeyCode::Char('1') => app.focus = Focus::Repos,
+        KeyCode::Char('1') => app.show_repos(),
         KeyCode::Char('2') => app.show_tree(),
         KeyCode::Char('3') => app.show_detail(),
 

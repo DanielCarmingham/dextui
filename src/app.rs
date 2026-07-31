@@ -228,6 +228,9 @@ pub struct App {
     /// Terminal width at or above which the repo pane is drawn as a third pane.
     /// From the config; 0 disables the behaviour entirely.
     pub repos_pane_above: u16,
+    /// A manual answer to "is the sidebar shown?", set by `b`, outranking the
+    /// `repos_pane_above` width rule. `None` means decide by width.
+    pub repos_visible: Option<bool>,
     /// A manual answer to "zoomed?", set by `z`, which outranks the width rule.
     /// `None` means decide by width. Pressing the key is an explicit decision,
     /// so it holds until it is pressed again rather than being undone by a
@@ -309,6 +312,7 @@ impl App {
             spin_frame: 0,
             single_pane_below: cfg.single_pane_below,
             repos_pane_above: cfg.repos_pane_above,
+            repos_visible: None,
             zoom: None,
             header_zones: Vec::new(),
             selected_worktree: None,
@@ -799,10 +803,17 @@ impl App {
         self.focus == Focus::Repos && !self.repos_pane_fits()
     }
 
-    /// Whether the current width reserves room for the sidebar as its own
-    /// pane. Shared between `single_pane` and `panes` so the two conditions
-    /// that decide "is there room for a third pane" cannot drift apart.
+    /// Whether the sidebar is drawn as its own pane. Shared between
+    /// `single_pane` and `panes` so the two conditions that decide "is there
+    /// room for a third pane" cannot drift apart.
+    ///
+    /// `b` outranks the width rule, the same way `z` outranks it for zoom and
+    /// for the same reason: pressing a key is an explicit decision, and a
+    /// layout that undid it on a resize would read as a fault.
     fn repos_pane_fits(&self) -> bool {
+        if let Some(shown) = self.repos_visible {
+            return shown;
+        }
         self.repos_pane_above > 0 && self.terminal_width >= self.repos_pane_above
     }
 
@@ -825,6 +836,33 @@ impl App {
     /// to do nothing.
     pub fn toggle_zoom(&mut self) {
         self.zoom = Some(!self.single_pane());
+    }
+
+    /// Shows or hides the repo sidebar, whatever the width would have decided.
+    ///
+    /// Flips the *effective* state, like `toggle_zoom` and for the same reason:
+    /// toggling a stored flag would appear to do nothing on the first press at
+    /// a width that had already made the choice.
+    ///
+    /// Hiding the pane you are standing in has to move you somewhere, or the
+    /// movement keys would drive a pane that is not on screen -- and `Tab`
+    /// deliberately never lands on the sidebar, so the tree is the only place
+    /// to go back to.
+    pub fn toggle_repos(&mut self) {
+        let showing = self.repos_pane_fits();
+        self.repos_visible = Some(!showing);
+        if showing && self.focus == Focus::Repos {
+            self.focus = Focus::Tree;
+        }
+    }
+
+    /// Moves to the repo sidebar, revealing it if it was hidden.
+    ///
+    /// A key that reaches a pane has to be able to bring it back, or `b` would
+    /// be a way to lose the sidebar with `1` silently refusing to return it.
+    pub fn show_repos(&mut self) {
+        self.repos_visible = Some(true);
+        self.focus = Focus::Repos;
     }
 
     /// Moves to the detail pane. What `Enter` does, and what `Right` falls back
@@ -1667,6 +1705,64 @@ mod tests {
             assert_eq!(app.repos.len(), 1);
             assert_eq!(app.repos[0].path, "/x/one");
         });
+    }
+
+    /// `b` outranks the width rule, the way `z` does for zoom -- and toggles
+    /// the *effective* state, so the first press always does the visible thing
+    /// rather than appearing inert at a width that had already decided.
+    #[test]
+    fn b_shows_and_hides_the_sidebar_at_any_width() {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.repos_pane_above = 110;
+        app.single_pane_below = 0;
+        app.terminal_width = 140;
+        assert_eq!(app.panes(), Panes::Three, "wide enough for the sidebar");
+
+        app.toggle_repos();
+        assert_eq!(app.panes(), Panes::Two, "b did not hide it");
+
+        app.toggle_repos();
+        assert_eq!(app.panes(), Panes::Three, "b did not bring it back");
+
+        // And the other direction, from a width that had already hidden it.
+        app.repos_visible = None;
+        app.terminal_width = 90;
+        assert_eq!(app.panes(), Panes::Two);
+        app.toggle_repos();
+        assert_eq!(app.panes(), Panes::Three, "the first press must do something");
+    }
+
+    /// Hiding the pane you are standing in has to move you somewhere, or the
+    /// movement keys would drive a pane that is not drawn. `Tab` never lands
+    /// on the sidebar, so the tree is the only place to go back to.
+    #[test]
+    fn hiding_the_sidebar_while_it_has_focus_returns_to_the_tree() {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.repos_pane_above = 110;
+        app.terminal_width = 140;
+        app.focus = Focus::Repos;
+
+        app.toggle_repos();
+
+        assert_eq!(app.focus, Focus::Tree);
+        assert_eq!(app.panes(), Panes::Two);
+    }
+
+    /// `b` must not be a way to lose the sidebar for good: the key that
+    /// reaches it has to bring it back.
+    #[test]
+    fn focusing_the_sidebar_reveals_it_when_b_had_hidden_it() {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.repos_pane_above = 110;
+        app.single_pane_below = 0;
+        app.terminal_width = 140;
+        app.toggle_repos();
+        assert_eq!(app.panes(), Panes::Two);
+
+        app.show_repos();
+
+        assert_eq!(app.focus, Focus::Repos);
+        assert_eq!(app.panes(), Panes::Three, "1 could not bring the sidebar back");
     }
 
     /// A click in the sidebar selects the row under it, exactly as the tree

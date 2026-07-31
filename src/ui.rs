@@ -37,7 +37,7 @@ const SHORTCUTS: &str =
 /// that is not a task. A single strip advertising `a sub` beside a focused
 /// sidebar was not a shorter truth, it was a wrong one.
 const REPO_SHORTCUTS: &str =
-    " enter switch store  a register repo  D unregister  tab tasks  ? help";
+    " enter tasks  a register repo  D unregister  b hide  tab tasks  ? help";
 
 /// Width of the inline progress meter, in cells.
 const METER_WIDTH: usize = 7;
@@ -1559,20 +1559,22 @@ f          cycle filter      ^R  refresh now
 - / +      collapse / expand all
 
 In the repo sidebar these keys act on repos, not on tasks:
-1          focus repos       a   register the repo dextui is running in
-enter / l  switch the tree and detail panes to the worktree under the cursor
+1          focus repos       b   show / hide the sidebar
+a          register the repo dextui is running in
 D          unregister the entry (the worktree and its store are untouched)
+
+Moving the cursor switches the tree and detail panes to that worktree at
+once, just as moving the tree cursor changes the detail; enter and l just
+follow it over to the tasks.
 
 Movement follows the focused pane, shown by its brighter border. Turn wrap
 off (w) to scroll a wide table sideways -- wrapping removes the overflow
 there would otherwise be to scroll to.
 
-Each pane carries its own key in its top right corner: [1] repos, [2] tasks,
-[3] detail, left to right as they are drawn. Press the number to jump there.
-
-Zoom (z) shows one pane at a time, and the same [1] [2] [3] appear in the
-header as tabs -- or enter and left to cross over. Narrow terminals zoom on
-their own below single_pane_below columns, usable even on a phone.
+Each pane shows its key in its top right corner -- [1] repos, [2] tasks,
+[3] detail, left to right -- and the number jumps straight there. Zoom (z)
+shows one at a time, with the same [1] [2] [3] as header tabs. Narrow
+terminals zoom on their own below single_pane_below columns.
 
 Mouse: drag the divider to resize, wheel scrolls the pane under the pointer,
 click selects. In the header, click a filter, or the sort label to cycle it
@@ -2119,7 +2121,7 @@ mod tests {
 
         // The strip swaps while the sidebar has focus, because `a` means
         // something else there.
-        for key in ["enter switch", "a register", "D unregister"] {
+        for key in ["a register", "D unregister", "b hide"] {
             assert!(
                 REPO_SHORTCUTS.contains(key),
                 "the sidebar strip does not advertise {key}: {REPO_SHORTCUTS}"
@@ -2132,9 +2134,20 @@ mod tests {
 
         // And the help names each of them too.
         assert!(HELP.contains("1          focus repos"), "help: 1 focuses the sidebar");
-        assert!(HELP.contains("a   register the repo"), "help: a registers");
+        assert!(HELP.contains("a          register the repo"), "help: a registers");
+        assert!(
+            HELP.contains("b   show / hide the sidebar"),
+            "help: b hides the sidebar"
+        );
+        assert!(
+            HELP.contains("switches the tree and detail panes to that worktree"),
+            "the help still implies the sidebar needs a commit key"
+        );
         assert!(HELP.contains("D          unregister"), "help: D unregisters");
-        assert!(HELP.contains("enter / l  switch"), "help: enter switches store");
+        assert!(
+            HELP.contains("follow it over to the tasks"),
+            "help: enter follows the cursor to the tasks"
+        );
         assert!(HELP.contains("[1] [2] [3]"), "help: the third pane has a tab");
     }
 
@@ -2145,30 +2158,43 @@ mod tests {
     #[test]
     fn the_help_dialog_shows_all_of_the_help() {
         let mut app = App::new(vec![], "demo".into(), crate::config::Config::default());
-        app.mode = crate::app::Mode::Help;
+        app.open_help();
 
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        terminal
-            .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
-            .unwrap();
-        let buf = terminal.backend().buffer().clone();
-        let screen = (0..buf.area.height)
-            .map(|y| {
-                (0..buf.area.width)
-                    .map(|x| buf[(x, y)].symbol())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        // Deliberately smaller than `HELP`, and the assertion is over every
+        // scroll position rather than one screen: since the dialog scrolls,
+        // "documented" means *reachable*, not "fits at some chosen size" --
+        // which was a bar `HELP` quietly failed the moment it grew a line.
+        let mut terminal = Terminal::new(TestBackend::new(90, 20)).unwrap();
+        let mut seen = String::new();
+        loop {
+            terminal
+                .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+                .unwrap();
+            let buf = terminal.backend().buffer().clone();
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width {
+                    seen.push_str(buf[(x, y)].symbol());
+                }
+                seen.push('\n');
+            }
+            if app.help_scroll >= app.help_max_scroll() {
+                break;
+            }
+            app.scroll_help(1);
+        }
 
-        // The first and last lines of the text, and one from the section that
-        // used to be cut off entirely.
+        // The first line, the last, and one from each block in between.
         for line in [
             "tab        switch pane",
             "D          unregister",
+            "b   show / hide the sidebar",
+            "follow it over to the tasks.",
             "dialog are never disturbed.",
         ] {
-            assert!(screen.contains(line), "help clipped -- missing {line:?}:\n{screen}");
+            assert!(
+                seen.contains(line),
+                "no scroll position reaches {line:?} -- a key nobody can read is not documented"
+            );
         }
     }
 
@@ -2280,7 +2306,12 @@ mod tests {
         assert!(hint.contains('\u{2191}'), "no more-above marker at the end: {hint:?}");
         assert!(!hint.contains('\u{2193}'), "still claims more below at the end: {hint:?}");
 
-        let whole = help_screen(120, 40, false);
+        // Sized from `HELP` itself rather than a constant that goes stale the
+        // next time a key is documented -- which is exactly what happened to
+        // the 120x40 this used to hard-code.
+        let fits_h = HELP.lines().count() as u16 + 6;
+        let fits_w = HELP.lines().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 8;
+        let whole = help_screen(fits_w, fits_h, false);
         let hint = help_hint(&whole);
         assert!(
             !hint.contains('\u{2193}') && !hint.contains('\u{2191}'),

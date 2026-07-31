@@ -288,14 +288,15 @@ That trade stopped being necessary once the safety net itself became
 stat-gated instead of firing blindly (see "Architecture: reads vs writes"
 above) — at that point watching ten stores costs the same as watching one, for
 as long as nothing changes in nine of them. `watch::spawn_many` gives every
-registered store its own notify watcher and its own copy of the same
-stat-gated net `watch::spawn` gives the selected one, so a change in a
-worktree nobody is looking at is picked up exactly as promptly as a change in
-the one on screen. `App::worktree_counts`, keyed by store directory, is where
-the result lands — nothing renders it yet; it exists for whichever task draws
-per-repo counts in the sidebar next. The map is therefore **write-only today**,
-and the README must not imply otherwise: switching to a worktree still pays the
-same synchronous `dex list` as any other store, cached counts or not.
+sidebar store — the selected one included — its own notify watcher and its own
+copy of the same stat-gated net, so a change in a worktree nobody is looking at
+is picked up exactly as promptly as a change in the one on screen.
+`App::store_tasks`, keyed by store directory, is where the result lands, and it
+is read twice over: the sidebar draws each store's outstanding count from it,
+and a store switch **is** a lookup in it rather than a synchronous `dex list`.
+It held only counts at first, and was drawn nowhere — a write-only map, and
+the reason a switch went on paying ~180ms for a list of tasks that had already
+been fetched and discarded.
 
 **A task list is tagged with the store it came from.** `refresh()` spawns a
 thread holding a clone of the `Arc<Dex>` current at the time, and
@@ -324,6 +325,39 @@ since a real dex id is a short slug with no colon in it the two can never
 collide. Cheaper than a second dialog, and the one thing to keep in mind if
 `Mode::Confirm` ever grows a third caller — the prefix trick stops being safe
 the moment something else's id could contain a colon too.
+
+**The sidebar cursor drives the panes, exactly as the tree cursor drives the
+detail.** It used to take `enter`, which made two panes that look identical --
+same list, same `┃` gutter -- behave differently. The justification was cost:
+a switch meant a ~180ms `dex list`. That had quietly stopped being true. Both
+paths feeding the sidebar already fetched the **whole task list** for every
+store and threw it away, the startup join reducing `Ok(store_tasks)` to counts
+and the watchers shipping `Result<Vec<Task>, String>` across the channel for
+the handler to do the same. `App::store_tasks` keeps them instead, so
+`switch_store` does no I/O on the common path -- a `Dex` swap and a lookup.
+
+Three things that follow:
+
+- **A cache miss shows an empty tree under the new label, never the old
+  store's tasks under the new name.** A repo registered mid-run has no
+  watcher and no cache entry, so it falls back to an async list. dex reports a
+  wrong store as an *empty project* rather than an error, so a wrong store
+  that looks plausible is the failure this whole area is designed against.
+- **Watchers are one fleet over every sidebar store**, the selected one
+  included, rather than `watch::spawn` for the selected store plus
+  `spawn_many` for the rest. Two mechanisms for one job was survivable while a
+  switch cost a list anyway; with the list gone, restarting a watcher per
+  cursor move would have been the only thing left making it expensive. Nothing
+  in `switch_store` touches a watcher now.
+- **A click and the wheel follow the cursor too.** The old rule that a click
+  must not switch stores was reasoned entirely from the ~180ms it would spend;
+  that reason is gone, and consistency with the tree is what is left.
+
+`b` shows and hides the sidebar at any width, the way `z` toggles zoom -- an
+`Option<bool>` that outranks `repos_pane_above`, flipping the *effective*
+state so the first press always does the visible thing. Hiding it while it has
+focus returns you to the tree, since `Tab` never lands there; and `1` reveals
+it, so `b` cannot be a way to lose the pane with no way to ask for it back.
 
 **The sidebar always carries the store being read**, registered or not. Without
 that, launching anywhere unregistered showed an empty pane beside a full task
