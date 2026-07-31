@@ -839,7 +839,34 @@ fn draw_repos(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
         })
         .collect();
 
-    frame.render_widget(List::new(items).block(block), area);
+    // Without a `ListState`, `render_widget` always draws from the top of the
+    // list -- so `G`/`PageDown` could select a row below the visible area
+    // with nothing on screen ever scrolling to show it, and `enter` would
+    // then switch to a store the user could not see was selected. Mirrors
+    // `draw_tree`'s use of `tree_offset` exactly, down to writing the
+    // corrected offset back so the next frame does not jump.
+    let selected = (!rows.is_empty()).then_some(app.selected_repo_row);
+    let mut state = ListState::default().with_offset(app.repos_offset);
+    state.select(selected);
+
+    frame.render_stateful_widget(List::new(items).block(block), area, &mut state);
+    app.repos_offset = state.offset();
+
+    // Only worth drawing when there is something off-screen -- same
+    // threshold `draw_tree`'s scrollbar uses.
+    let visible = area.height.saturating_sub(2) as usize;
+    if rows.len() > visible {
+        let mut sb = ScrollbarState::new(rows.len()).position(app.selected_repo_row);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_style(Style::default().fg(DIM))
+                .thumb_style(Style::default().fg(DIM)),
+            area,
+            &mut sb,
+        );
+    }
 }
 
 fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
@@ -3209,6 +3236,61 @@ mod tests {
 
         assert!(text.contains("dextui"), "no repo row: {text}");
         assert!(text.contains("main"), "no worktree row: {text}");
+    }
+
+    /// The bug this closes: `render_widget` (no `ListState`) always draws the
+    /// list from its very first row, so `G`/`PageDown` could move
+    /// `selected_repo_row` to a row below the visible area with nothing on
+    /// screen ever scrolling to show it -- and `enter` would then switch to a
+    /// store the user could not see was selected. A `ListState`, mirroring
+    /// `draw_tree`'s exactly, is what makes the pane follow the selection.
+    #[test]
+    fn selecting_a_row_below_the_fold_scrolls_the_sidebar_to_show_it() {
+        let mut app = App::new(
+            vec![task("a", None, "A task")],
+            "demo".into(),
+            crate::config::Config::default(),
+        );
+        app.terminal_width = 140;
+        app.repos_pane_above = 110;
+        app.repos = (0..20)
+            .map(|i| crate::repos::Repo {
+                name: format!("repo{i}"),
+                path: format!("/x/repo{i}"),
+                worktrees: vec![],
+                open: false,
+            })
+            .collect();
+        app.rebuild();
+
+        let render = |app: &mut App| -> String {
+            let mut terminal = Terminal::new(TestBackend::new(140, 14)).unwrap();
+            terminal.draw(|f| draw(f, app, &crate::icons::UNICODE)).unwrap();
+            let buf = terminal.backend().buffer().clone();
+            (0..buf.area.height)
+                .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let first_frame = render(&mut app);
+        assert!(first_frame.contains("repo0"), "the top row should be visible initially");
+        assert!(
+            !first_frame.contains("repo19"),
+            "the fixture should not already fit everything: {first_frame}"
+        );
+
+        app.select_last_repo_row();
+        let scrolled = render(&mut app);
+
+        assert!(
+            scrolled.contains("repo19"),
+            "the selected row must have scrolled into view: {scrolled}"
+        );
+        assert!(
+            !scrolled.contains("repo0"),
+            "the old top row should have scrolled out of view: {scrolled}"
+        );
     }
 
     /// `Focus::Repos` used to fall through to `draw_tree` as a placeholder --

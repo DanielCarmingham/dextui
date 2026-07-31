@@ -223,6 +223,10 @@ pub struct App {
     /// Registered repos with their worktrees, and whether each is expanded.
     pub repos: Vec<crate::repos::Repo>,
     pub selected_repo_row: usize,
+    /// The repo pane's own scroll offset, carried across frames the same way
+    /// `tree_offset` is -- without it, `G`/`PageDown` could select a row
+    /// below the visible area with nothing on screen ever moving to show it.
+    pub repos_offset: usize,
     pub registry: crate::registry::Registry,
 }
 
@@ -269,6 +273,7 @@ impl App {
             task_memory: HashMap::new(),
             repos: Vec::new(),
             selected_repo_row: 0,
+            repos_offset: 0,
             registry: crate::registry::Registry::default(),
         };
 
@@ -858,7 +863,42 @@ impl App {
             self.task_memory.insert(old, sel);
         }
         self.selected_worktree = Some(path.to_string());
-        self.selected = self.task_memory.get(path).cloned();
+        // Through `select`, not a bare field write: the task now selected
+        // belongs to a different store, so any scroll position left over from
+        // the previous one has to go the same way it does whenever the
+        // selection changes for any other reason.
+        let remembered = self.task_memory.get(path).cloned();
+        self.select(remembered);
+    }
+
+    /// Loads a different store into a running app.
+    ///
+    /// Deliberately **not** `apply_tasks`: that method's whole job is
+    /// preserving a selection and an expansion set the *same* store made, by
+    /// resolving `self.selected`/`self.expanded` against the new task list.
+    /// Across a store switch those ids belong to an entirely different store,
+    /// so comparing them is meaningless -- and since real dex ids are short
+    /// slugs, `next_ids.contains(&sel)` succeeding by coincidence is exactly
+    /// the kind of hard-to-notice bug that deserves its own code path rather
+    /// than a repurposed one.
+    ///
+    /// Follows `App::new`'s first-load rule instead: everything here is new,
+    /// so expand it -- CLAUDE.md records the collapsed-single-root version of
+    /// this as a bug that has already shipped once.
+    pub fn load_store(&mut self, tasks: Vec<Task>, store_label: String) {
+        self.by_id = index(&tasks);
+        self.tasks = tasks;
+        self.store_label = store_label;
+        self.progress = tree::subtree_progress(&self.tasks);
+        self.expand_all();
+        self.rebuild();
+        // `rebuild` already replaces a selection that is not among the new
+        // tree's visible ids, which every id here trivially is not -- but
+        // making the reset explicit here means this behaviour does not
+        // depend on staying in sync with `rebuild`'s internals.
+        self.selected = self.first_visible_id();
+        self.tree_offset = 0;
+        self.detail_scroll = (0, 0);
     }
 
     /// Rebuilt from `self.repos` on every call, exactly as the task tree is
@@ -914,24 +954,34 @@ impl App {
 
     /// Registers a repo. Returns whether the registry changed, so a duplicate
     /// can be reported rather than looking inert.
+    ///
+    /// Goes through `Registry::add_and_save` rather than mutating
+    /// `self.registry` directly: that re-reads the file fresh before writing,
+    /// so this process's own possibly-stale in-memory copy cannot clobber a
+    /// registration another dextui instance made in the meantime, and it
+    /// refuses outright rather than saving anything when the file cannot be
+    /// read back honestly.
     pub fn register_repo_path(&mut self, repo_path: &str) -> Result<bool, String> {
-        let changed = self.registry.add(repo_path);
-        if changed {
-            self.registry.save()?;
-        }
-        Ok(changed)
+        self.registry.add_and_save(repo_path)
     }
 
     /// Unregistering is a view operation: it never touches the worktree, the
     /// branch or the store, only the entry and the row it drew.
-    pub fn unregister_repo_path(&mut self, repo_path: &str) {
-        if self.registry.remove(repo_path) {
-            let _ = self.registry.save();
+    ///
+    /// Returns `Err` -- rather than swallowing the failure -- when the
+    /// removal could not actually be persisted, and leaves `self.repos`
+    /// untouched in that case. Applying the in-memory removal on a save that
+    /// failed would make the row disappear for this session only to reappear
+    /// at the next launch, with nothing on screen to explain why.
+    pub fn unregister_repo_path(&mut self, repo_path: &str) -> Result<bool, String> {
+        let changed = self.registry.remove_and_save(repo_path)?;
+        if changed {
             self.repos.retain(|r| r.path != repo_path);
             self.selected_repo_row = self
                 .selected_repo_row
                 .min(self.repo_rows().len().saturating_sub(1));
         }
+        Ok(changed)
     }
 }
 
@@ -1654,6 +1704,66 @@ mod tests {
         assert_eq!(app.selected.as_deref(), Some("a"));
     }
 
+    /// Switching to a worktree with no remembered task moves the selection to
+    /// `None` -- a genuinely different task (or nothing) than whatever was on
+    /// screen before, so a scroll position left over from the old one would
+    /// hide the new pane's content rather than show it.
+    #[test]
+    fn switching_worktrees_resets_the_detail_scroll() {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.selected_worktree = Some("/x/one".into());
+        app.selected = Some("a".into());
+        app.detail_scroll = (12, 3);
+
+        app.select_worktree("/x/two");
+
+        assert_eq!(app.detail_scroll, (0, 0), "a stale scroll would hide the new content");
+    }
+
+    #[test]
+    fn load_store_replaces_the_task_list_and_expands_everything() {
+        let mut app = counted(vec![task("old", None, &[])]);
+        app.selected = Some("old".into());
+        app.tree_offset = 4;
+        app.detail_scroll = (7, 2);
+
+        app.load_store(
+            vec![task("root", None, &["kid"]), task("kid", Some("root"), &[])],
+            "other".into(),
+        );
+
+        // The exact bug CLAUDE.md records as having shipped once: a store
+        // switch that leaves the new tree collapsed to a single root because
+        // it reused `apply_tasks`'s "only expand what is genuinely new"
+        // rule against a tree where every id looks new by definition.
+        assert!(app.expanded.contains("root"), "the new store opened collapsed");
+        assert_eq!(app.row_ids().len(), 2, "the child must be visible too");
+        assert_eq!(app.store_label, "other");
+        assert_eq!(app.selected.as_deref(), Some("root"), "old-store id must not linger");
+        assert_eq!(app.tree_offset, 0);
+        assert_eq!(app.detail_scroll, (0, 0));
+    }
+
+    /// `load_store` must not confuse an id from the store being left with one
+    /// that merely looks the same by coincidence -- there is no cross-store id
+    /// comparison here at all, unlike `apply_tasks`, which is the whole reason
+    /// this is a separate method.
+    #[test]
+    fn load_store_does_not_carry_over_expansion_from_the_old_store() {
+        let mut app = counted(vec![task("shared-name", None, &["kid"])]);
+        app.expanded.insert("shared-name".into());
+
+        // A different store that happens to reuse the same id -- ids are
+        // short slugs and a real collision across independent stores is
+        // exactly the coincidence `apply_tasks` cannot be trusted to notice.
+        app.load_store(vec![task("shared-name", None, &[])], "other".into());
+
+        assert!(
+            !app.expanded.contains("shared-name"),
+            "a leaf must not be recorded as expanded just because an old id matched"
+        );
+    }
+
     fn wt(path: &str, branch: &str, main: bool) -> crate::worktree::Worktree {
         crate::worktree::Worktree {
             path: path.to_string(),
@@ -1753,15 +1863,39 @@ mod tests {
     /// state, so this runs under one lock and restores what it set --
     /// mirrors `editor::tests::with_env`, duplicated because that helper is
     /// private to its own module.
+    ///
+    /// Restoring through a drop guard, not plain code after `f()`, matters
+    /// here specifically: a panicking test (a failed assertion) used to skip
+    /// the restore *and* poison the `Mutex`, so every later registry test in
+    /// this module failed with an unrelated-looking `PoisonError` instead of
+    /// its own assertion, burying the actual failure. `unwrap_or_else`
+    /// recovers a poisoned lock too, for the same reason: whatever broke a
+    /// previous test should not also break every test after it.
     fn with_env<T>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
         use std::sync::{Mutex, OnceLock};
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let guard = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let saved: Vec<(String, Option<String>)> = vars
             .iter()
             .map(|(k, _)| ((*k).to_string(), std::env::var(k).ok()))
             .collect();
+
+        struct Restore(Vec<(String, Option<String>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (k, v) in &self.0 {
+                    match v {
+                        Some(v) => unsafe { std::env::set_var(k, v) },
+                        None => unsafe { std::env::remove_var(k) },
+                    }
+                }
+            }
+        }
+        let _restore = Restore(saved);
 
         for (k, v) in vars {
             match v {
@@ -1771,29 +1905,29 @@ mod tests {
         }
 
         let out = f();
-
-        for (k, v) in saved {
-            match v {
-                Some(v) => unsafe { std::env::set_var(&k, v) },
-                None => unsafe { std::env::remove_var(&k) },
-            }
-        }
+        drop(guard);
         out
     }
 
-    /// Points `XDG_CONFIG_HOME` at a scratch directory for the duration of
-    /// `f`, so `register_repo_path`/`unregister_repo_path` -- which call
+    /// Points `XDG_CONFIG_HOME` at a fresh, empty scratch directory (keyed by
+    /// `tag` as well as pid, so tests do not share -- and cannot leak state
+    /// through -- the same directory) for the duration of `f`, so
+    /// `register_repo_path`/`unregister_repo_path` -- which call
     /// `Registry::save` for real -- never touch the user's actual
     /// `~/.config/dextui/repos.toml`. A suite that rewrote that file on every
     /// run would be worse than no suite at all.
-    fn with_isolated_registry<T>(f: impl FnOnce() -> T) -> T {
-        let dir = std::env::temp_dir().join(format!("dextui-test-registry-{}", std::process::id()));
+    fn with_isolated_registry<T>(tag: &str, f: impl FnOnce() -> T) -> T {
+        let dir = std::env::temp_dir().join(format!(
+            "dextui-test-registry-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
         with_env(&[("XDG_CONFIG_HOME", Some(dir.to_str().unwrap()))], f)
     }
 
     #[test]
     fn registering_adds_the_repo_and_reports_the_change() {
-        with_isolated_registry(|| {
+        with_isolated_registry("add", || {
             let mut app = counted(vec![task("a", None, &[])]);
             app.registry = crate::registry::Registry::default();
 
@@ -1804,7 +1938,7 @@ mod tests {
 
     #[test]
     fn registering_a_known_repo_is_reported_not_duplicated() {
-        with_isolated_registry(|| {
+        with_isolated_registry("duplicate", || {
             let mut app = counted(vec![task("a", None, &[])]);
             app.registry = crate::registry::Registry::default();
             app.register_repo_path("/x/dextui").unwrap();
@@ -1821,13 +1955,13 @@ mod tests {
     /// the branch or the store -- only the entry and the row.
     #[test]
     fn unregistering_removes_only_the_entry() {
-        with_isolated_registry(|| {
+        with_isolated_registry("removes-only-entry", || {
             let mut app = counted(vec![task("a", None, &[])]);
             app.registry = crate::registry::Registry::default();
             app.register_repo_path("/x/one").unwrap();
             app.register_repo_path("/x/two").unwrap();
 
-            app.unregister_repo_path("/x/one");
+            assert!(app.unregister_repo_path("/x/one").unwrap());
             assert_eq!(app.registry.repos, vec!["/x/two".to_string()]);
         });
     }
@@ -1837,13 +1971,17 @@ mod tests {
     /// the end of a now-shorter list.
     #[test]
     fn unregistering_a_loaded_repo_drops_its_row_and_clamps_the_cursor() {
-        with_isolated_registry(|| {
+        with_isolated_registry("loaded-repo", || {
             let mut app = app_with_repos(); // "one" then "two", 6 rows total
-            app.registry.add("/x/one");
-            app.registry.add("/x/two");
+            // Through `register_repo_path`, not a bare `registry.add`: the
+            // latter only mutates the in-memory copy, and `unregister_repo_path`
+            // now re-reads the file fresh (see `Registry::remove_and_save`),
+            // so anything this test wants it to find has to actually be saved.
+            app.register_repo_path("/x/one").unwrap();
+            app.register_repo_path("/x/two").unwrap();
             app.selected_repo_row = 5; // last row, inside "two"
 
-            app.unregister_repo_path("/x/two");
+            assert!(app.unregister_repo_path("/x/two").unwrap());
 
             assert_eq!(app.repos.len(), 1, "the repo's own row must be gone too");
             assert_eq!(app.repos[0].name, "one");
@@ -1853,6 +1991,30 @@ mod tests {
                 app.selected_repo_row,
                 app.repo_rows().len()
             );
+        });
+    }
+
+    /// The bug this closes: `unregister_repo_path` used to discard the save
+    /// error and report success unconditionally, so a removal that never
+    /// reached disk would silently reappear at the next launch. Simulated
+    /// here the same way `registry.rs`'s own tests provoke a non-`NotFound`
+    /// read error: a directory sitting where the registry file belongs.
+    #[test]
+    fn a_failed_unregister_save_is_reported_and_the_row_is_kept() {
+        with_isolated_registry("unregister-save-fails", || {
+            let mut app = app_with_repos();
+            app.register_repo_path("/x/one").unwrap();
+
+            // Break the file *after* the successful registration above, so
+            // the failure is specific to this save, not to setup.
+            let p = crate::registry::path().unwrap();
+            std::fs::remove_file(&p).unwrap();
+            std::fs::create_dir_all(&p).unwrap();
+
+            let before = app.repos.len();
+            let err = app.unregister_repo_path("/x/one").unwrap_err();
+            assert!(!err.is_empty());
+            assert_eq!(app.repos.len(), before, "the row must survive a failed save");
         });
     }
 

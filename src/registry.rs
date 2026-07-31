@@ -55,8 +55,18 @@ impl Registry {
         };
         match std::fs::read_to_string(&p) {
             Ok(text) => Registry::parse(&text),
-            // Missing is the normal first-run state, and silent.
-            Err(_) => (Registry::default(), None),
+            // Missing is the normal first-run state, and silent -- there is
+            // nothing to lose by treating it as an empty registry.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Registry::default(), None),
+            // Anything else -- permissions, a directory sitting where the file
+            // should be, any other I/O failure -- is NOT "no registry yet." It
+            // means the real content could not be read, so reporting
+            // `Registry::default()` here without a problem would let the very
+            // next `save()` overwrite whatever is actually on disk with an
+            // empty (or one-entry) file, silently discarding it. Callers that
+            // persist must treat a `Some` here as a hard stop, not a status
+            // line -- see `add_and_save`/`remove_and_save`.
+            Err(e) => (Registry::default(), Some(format!("repos.toml: {e}"))),
         }
     }
 
@@ -68,6 +78,50 @@ impl Registry {
         }
         let text = toml::to_string(self).map_err(|e| format!("could not serialise: {e}"))?;
         std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))
+    }
+
+    /// Adds `path` against whatever is actually on disk right now, not
+    /// whatever `self` happens to hold, and only updates `self` once the
+    /// write has actually landed.
+    ///
+    /// Two running dextui instances -- the ordinary case for a tool whose
+    /// whole point is several repos -- registering different paths around the
+    /// same moment would otherwise each trust its own in-memory snapshot and
+    /// blindly overwrite the other's write. Re-reading first narrows that
+    /// race to the gap between this read and this write, rather than the gap
+    /// since each process started. It also refuses to write anything at all
+    /// when the on-disk file cannot be read back honestly (see `load`),
+    /// rather than overwriting content this process never actually saw.
+    #[allow(dead_code)]
+    pub fn add_and_save(&mut self, path: &str) -> Result<bool, String> {
+        let (mut current, problem) = Registry::load();
+        if let Some(p) = problem {
+            return Err(p);
+        }
+        let changed = current.add(path);
+        if changed {
+            current.save()?;
+            *self = current;
+        }
+        Ok(changed)
+    }
+
+    /// Mirrors `add_and_save`. Returns `Err` -- rather than silently keeping
+    /// the in-memory removal -- when the change could not actually be
+    /// persisted, so the caller can say so instead of reporting success on an
+    /// entry that will simply reappear at the next launch.
+    #[allow(dead_code)]
+    pub fn remove_and_save(&mut self, path: &str) -> Result<bool, String> {
+        let (mut current, problem) = Registry::load();
+        if let Some(p) = problem {
+            return Err(p);
+        }
+        let changed = current.remove(path);
+        if changed {
+            current.save()?;
+            *self = current;
+        }
+        Ok(changed)
     }
 }
 
@@ -129,6 +183,181 @@ mod tests {
         let (reg, problem) = Registry::parse("repos = \"not a list\"");
         assert_eq!(reg, Registry::default());
         assert!(problem.is_some(), "a bad file must be reported");
+    }
+
+    /// `std::env::set_var` is unsafe in edition 2024 and mutates process-wide
+    /// state, so this runs under one lock and restores what it set. Mirrors
+    /// `editor::tests::with_env` / `app::tests::with_env`, duplicated because
+    /// neither is visible outside its own module.
+    ///
+    /// Wrapped in a drop guard rather than plain code-after-`f()`: a panicking
+    /// test (an assertion failure) would otherwise skip the restore *and*
+    /// poison the lock, so every later test in this module would fail with a
+    /// `PoisonError` instead of its own assertion -- turning one real failure
+    /// into a wall of unrelated-looking ones.
+    fn with_env<T>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let guard = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let saved: Vec<(String, Option<String>)> = vars
+            .iter()
+            .map(|(k, _)| ((*k).to_string(), std::env::var(k).ok()))
+            .collect();
+
+        struct Restore(Vec<(String, Option<String>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (k, v) in &self.0 {
+                    match v {
+                        Some(v) => unsafe { std::env::set_var(k, v) },
+                        None => unsafe { std::env::remove_var(k) },
+                    }
+                }
+            }
+        }
+        let _restore = Restore(saved);
+
+        for (k, v) in vars {
+            match v {
+                Some(v) => unsafe { std::env::set_var(k, v) },
+                None => unsafe { std::env::remove_var(k) },
+            }
+        }
+
+        let out = f();
+        drop(guard);
+        out
+    }
+
+    /// Points `XDG_CONFIG_HOME` at a fresh, empty scratch directory for the
+    /// duration of `f`, so tests that call `load`/`save`/`add_and_save`/
+    /// `remove_and_save` for real never touch the user's actual
+    /// `~/.config/dextui/repos.toml`.
+    fn with_isolated_registry<T>(tag: &str, f: impl FnOnce() -> T) -> T {
+        let dir = std::env::temp_dir().join(format!(
+            "dextui-registry-test-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        with_env(&[("XDG_CONFIG_HOME", Some(dir.to_str().unwrap()))], f)
+    }
+
+    /// The normal first-run state: nothing has ever been saved, so there is
+    /// nothing to lose by treating it as an empty registry, silently.
+    #[test]
+    fn a_missing_file_loads_as_empty_and_silent() {
+        with_isolated_registry("missing", || {
+            let (reg, problem) = Registry::load();
+            assert_eq!(reg, Registry::default());
+            assert!(problem.is_none(), "a first run must not be reported as a problem");
+        });
+    }
+
+    /// Anything other than "the file does not exist yet" -- permissions, a
+    /// directory sitting where the file should be -- must be reported, or the
+    /// very next save would silently overwrite content this process never
+    /// actually read. A directory at the registry's path is a reliable,
+    /// portable way to provoke a non-`NotFound` read error without needing
+    /// real permission bits.
+    #[test]
+    fn an_unreadable_file_is_reported_not_treated_as_empty() {
+        with_isolated_registry("unreadable", || {
+            let p = path().unwrap();
+            std::fs::create_dir_all(&p).unwrap(); // a dir where a file is expected
+
+            let (reg, problem) = Registry::load();
+            assert_eq!(reg, Registry::default());
+            assert!(problem.is_some(), "an unreadable file must be reported");
+        });
+    }
+
+    #[test]
+    fn add_and_save_persists_and_updates_self() {
+        with_isolated_registry("add", || {
+            let mut r = Registry::default();
+            assert!(r.add_and_save("/x/one").unwrap());
+            assert_eq!(r.repos, vec!["/x/one".to_string()]);
+
+            let (on_disk, _) = Registry::load();
+            assert_eq!(on_disk.repos, vec!["/x/one".to_string()]);
+        });
+    }
+
+    /// The whole point: a second in-memory copy (standing in for a second
+    /// dextui process) must not be able to blindly overwrite what the first
+    /// one already wrote. `add_and_save` re-reads before writing, so both
+    /// additions -- made against two independent `Registry` values that never
+    /// saw each other's change -- must both survive.
+    #[test]
+    fn add_and_save_does_not_clobber_a_concurrent_write() {
+        with_isolated_registry("concurrent", || {
+            let mut first = Registry::default();
+            let mut second = Registry::default(); // stands in for another process
+
+            assert!(first.add_and_save("/x/one").unwrap());
+            assert!(second.add_and_save("/x/two").unwrap());
+
+            let (on_disk, _) = Registry::load();
+            assert_eq!(
+                on_disk.repos,
+                vec!["/x/one".to_string(), "/x/two".to_string()],
+                "second's write must not have discarded first's"
+            );
+        });
+    }
+
+    #[test]
+    fn remove_and_save_persists_and_updates_self() {
+        with_isolated_registry("remove", || {
+            let mut r = Registry::default();
+            r.add_and_save("/x/one").unwrap();
+            r.add_and_save("/x/two").unwrap();
+
+            assert!(r.remove_and_save("/x/one").unwrap());
+            assert_eq!(r.repos, vec!["/x/two".to_string()]);
+
+            let (on_disk, _) = Registry::load();
+            assert_eq!(on_disk.repos, vec!["/x/two".to_string()]);
+        });
+    }
+
+    /// A registry that failed to load must never be saved over -- the whole
+    /// point of reporting the problem in the first place.
+    #[test]
+    fn add_and_save_refuses_when_the_file_cannot_be_read() {
+        with_isolated_registry("add-refuses", || {
+            let p = path().unwrap();
+            std::fs::create_dir_all(&p).unwrap(); // unreadable as a file
+
+            let mut r = Registry::default();
+            let err = r.add_and_save("/x/one").unwrap_err();
+            assert!(!err.is_empty());
+            // Nothing was written -- the directory is still a directory, not
+            // a registry file, and `self` was not mutated either.
+            assert!(r.repos.is_empty());
+        });
+    }
+
+    #[test]
+    fn remove_and_save_refuses_when_the_file_cannot_be_read() {
+        with_isolated_registry("remove-refuses", || {
+            let p = path().unwrap();
+            std::fs::create_dir_all(&p).unwrap();
+
+            let mut r = Registry {
+                repos: vec!["/x/one".into()],
+            };
+            let err = r.remove_and_save("/x/one").unwrap_err();
+            assert!(!err.is_empty());
+            // The in-memory copy is left exactly as it was -- rolled back
+            // rather than half-applied -- so the caller's own state does not
+            // silently disagree with what is (or isn't) actually on disk.
+            assert_eq!(r.repos, vec!["/x/one".to_string()]);
+        });
     }
 
     #[test]
