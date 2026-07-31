@@ -228,6 +228,13 @@ pub struct App {
     /// below the visible area with nothing on screen ever moving to show it.
     pub repos_offset: usize,
     pub registry: crate::registry::Registry,
+    /// Per-store task counts, keyed by store directory (`repos::store_dir`).
+    /// The selected worktree's store additionally holds its full task list in
+    /// `self.tasks`/`self.by_id`; every other registered store holds counts
+    /// only, re-read when its own watcher fires and never on a timer -- see
+    /// the startup wiring in `main.rs` and CLAUDE.md's refresh model for why
+    /// polling every store was rejected.
+    pub worktree_counts: HashMap<String, Counts>,
 }
 
 impl App {
@@ -275,6 +282,7 @@ impl App {
             selected_repo_row: 0,
             repos_offset: 0,
             registry: crate::registry::Registry::default(),
+            worktree_counts: HashMap::new(),
         };
 
         // Everything is "new" on first load, so the collapse-new-tasks rule would
@@ -560,42 +568,11 @@ impl App {
     /// pick up an epic, and nothing is blocking it. Do not close that gap by
     /// folding parents into either bucket; a test asserts the gap exists.
     pub fn counts(&self) -> Counts {
-        let mut c = Counts {
-            total: self.tasks.len(),
-            ..Default::default()
-        };
-
-        for t in &self.tasks {
-            if t.completed {
-                c.completed += 1;
-                continue;
-            }
-            c.pending += 1;
-
-            // Same precedence as status.js: started wins over everything else.
-            if t.is_in_progress() {
-                c.active += 1;
-            } else if crate::dex::is_blocked(t, &self.by_id) {
-                c.blocked += 1;
-            } else if !self.has_incomplete_children(t) {
-                c.ready += 1;
-            }
-        }
-
-        c.percent = match c.total {
-            0 => 0,
-            n => (c.completed * 100) / n,
-        };
-        c
-    }
-
-    /// Immediate children only, matching dex's `hasIncompleteChildren` -- not the
-    /// progress rollup, which counts all descendants.
-    fn has_incomplete_children(&self, t: &Task) -> bool {
-        t.children
-            .iter()
-            .filter_map(|id| self.by_id.get(id))
-            .any(|c| !c.completed)
+        // Reuses `self.by_id` rather than building a fresh index: this runs
+        // every frame for the header, and `counts_for` below is the version
+        // that pays the indexing cost, for a task list with no `App` of its
+        // own to cache one.
+        counts_from(&self.tasks, &self.by_id)
     }
 
     /// Whether anything on screen is currently turning.
@@ -1017,6 +994,55 @@ impl App {
 
 fn index(tasks: &[Task]) -> HashMap<String, Task> {
     tasks.iter().map(|t| (t.id.clone(), t.clone())).collect()
+}
+
+/// The shared arithmetic behind `App::counts()` and `counts_for()` -- see
+/// `App::counts()` for the precedence rules (mirrors `dex list --ready` /
+/// `--blocked`, not `dex status`) and why `ready + blocked` does not sum to
+/// `pending`.
+fn counts_from(tasks: &[Task], by_id: &HashMap<String, Task>) -> Counts {
+    let mut c = Counts {
+        total: tasks.len(),
+        ..Default::default()
+    };
+
+    for t in tasks {
+        if t.completed {
+            c.completed += 1;
+            continue;
+        }
+        c.pending += 1;
+
+        // Same precedence as status.js: started wins over everything else.
+        if t.is_in_progress() {
+            c.active += 1;
+        } else if crate::dex::is_blocked(t, by_id) {
+            c.blocked += 1;
+        } else if !has_incomplete_children(t, by_id) {
+            c.ready += 1;
+        }
+    }
+
+    c.percent = match c.total {
+        0 => 0,
+        n => (c.completed * 100) / n,
+    };
+    c
+}
+
+/// Immediate children only, matching dex's `hasIncompleteChildren` -- not the
+/// progress rollup, which counts all descendants.
+fn has_incomplete_children(t: &Task, by_id: &HashMap<String, Task>) -> bool {
+    t.children.iter().filter_map(|id| by_id.get(id)).any(|c| !c.completed)
+}
+
+/// Counts for a task list that belongs to no running `App` -- another
+/// registered worktree's store, read only to keep the sidebar's numbers
+/// current. Builds its own index rather than reusing `App::by_id`, since the
+/// tasks belong to an entirely different store; see `App::counts()` for the
+/// version that avoids paying that cost every frame for the selected store.
+pub fn counts_for(tasks: &[Task]) -> Counts {
+    counts_from(tasks, &index(tasks))
 }
 
 fn first_root(tasks: &[Task]) -> Option<String> {

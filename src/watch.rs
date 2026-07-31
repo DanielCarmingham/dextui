@@ -71,6 +71,30 @@ pub fn spawn(store_dir: &str, out: Sender<()>) -> StoreWatcher {
     StoreWatcher { _watcher: watcher }
 }
 
+/// One watcher per store, each tagging its events with the directory they came
+/// from so only that store is re-read.
+///
+/// The returned guards must be kept alive for the whole run; dropping one stops
+/// its notifications.
+pub fn spawn_many(dirs: &[String], out: Sender<String>) -> Vec<StoreWatcher> {
+    dirs.iter()
+        .map(|dir| {
+            let (tx, rx) = channel::<()>();
+            let guard = spawn(dir, tx);
+            let out = out.clone();
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                while rx.recv().is_ok() {
+                    if out.send(dir.clone()).is_err() {
+                        return;
+                    }
+                }
+            });
+            guard
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +166,31 @@ mod tests {
 
         let n = seen.load(Ordering::SeqCst);
         assert!((1..=3).contains(&n), "expected a coalesced burst, got {n}");
+    }
+
+    /// The multi-store watcher has to say *which* store changed, or the caller must
+    /// re-read all of them and watching separately buys nothing.
+    #[test]
+    fn a_change_reports_which_store_it_came_from() {
+        let dir = std::env::temp_dir().join("dextui-watch-many");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _guards = spawn_many(
+            &[
+                a.to_string_lossy().into_owned(),
+                b.to_string_lossy().into_owned(),
+            ],
+            tx,
+        );
+
+        std::fs::write(b.join("tasks.jsonl"), "{}").unwrap();
+
+        let got = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(got.ends_with("/b"), "reported the wrong store: {got}");
     }
 
     #[test]

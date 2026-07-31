@@ -42,6 +42,14 @@ enum Msg {
         result: String,
         error: String,
     },
+    /// A registered store other than the selected one changed. Carries its
+    /// freshly re-read task list (or the failure), keyed by store directory
+    /// to match `App::worktree_counts` -- the selected store keeps using
+    /// plain `Msg::Tasks` via the existing `dex`/`refresh` path, unchanged.
+    WorktreeCounts {
+        dir: String,
+        result: Result<Vec<Task>, String>,
+    },
 }
 
 const USAGE: &str = "\
@@ -293,14 +301,48 @@ fn main() -> std::io::Result<()> {
     // silently dropping every repo registered in an earlier session.
     let (registry, registry_problem) = registry::Registry::load();
 
+    // The repo/worktree sidebar. `App::new` cannot populate this itself --
+    // `App` owns view state, not I/O -- so it is loaded here, the same way
+    // the preflight `dex.list()` above fills `app.tasks`. A registered path
+    // that no longer exists, or a `git worktree list` failure, is reported
+    // and skipped rather than fatal: a repo someone has since deleted must
+    // not stop the app starting.
+    let mut repos: Vec<repos::Repo> = Vec::new();
+    let mut repo_problems: Vec<String> = Vec::new();
+    for repo_path in &registry.repos {
+        if !std::path::Path::new(repo_path).is_dir() {
+            repo_problems.push(format!("{repo_path} no longer exists"));
+            continue;
+        }
+        match worktree::list(repo_path) {
+            Ok(worktrees) => {
+                let name = std::path::Path::new(repo_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| repo_path.clone());
+                repos.push(repos::Repo {
+                    name,
+                    path: repo_path.clone(),
+                    worktrees,
+                    open: true,
+                });
+            }
+            Err(e) => repo_problems.push(format!("{repo_path}: {}", flatten(&e))),
+        }
+    }
+
     let mut app = App::new(tasks, store_label(&store_dir), cfg);
     app.registry = registry;
-    app.status = match (config_problem, registry_problem) {
-        (Some(c), Some(r)) => format!("config: {c}; repos: {r}"),
-        (Some(c), None) => format!("config: {c}"),
-        (None, Some(r)) => format!("repos: {r}"),
-        (None, None) => String::new(),
-    };
+    app.repos = repos;
+    app.status = [
+        config_problem.map(|c| format!("config: {c}")),
+        registry_problem.map(|r| format!("repos: {r}")),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(repo_problems)
+    .collect::<Vec<_>>()
+    .join("; ");
 
     if matches!(command, Command::SelfTest) {
         println!("store   {store_dir}");
@@ -321,6 +363,81 @@ fn main() -> std::io::Result<()> {
         thread::spawn(move || {
             while watch_rx.recv().is_ok() {
                 if tx.send(Msg::StoreChanged).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+
+    // Which registered worktree the app is actually reading -- the one whose
+    // store is `store_dir`, already resolved above by the preflight `dex
+    // dir` call. Everything else registered gets counts only; see below.
+    app.selected_worktree = app
+        .repos
+        .iter()
+        .flat_map(|r| r.worktrees.iter())
+        .find(|w| repos::store_dir(&w.path) == store_dir)
+        .map(|w| w.path.clone());
+
+    // Every OTHER registered worktree -- the selected one keeps the watcher
+    // and 10s safety poll set up above, exactly as today.
+    let other_worktrees: Vec<String> = app
+        .repos
+        .iter()
+        .flat_map(|r| r.worktrees.iter())
+        .map(|w| w.path.clone())
+        .filter(|p| Some(p.as_str()) != app.selected_worktree.as_deref())
+        .collect();
+
+    // Their counts, read **concurrently** -- one thread per store calling
+    // `Dex::for_store` then `.list()`, joined before the first draw. A `dex`
+    // call costs ~180ms of Node startup; done one after another, ten stores
+    // would be 1.8s of blank screen before the first frame.
+    //
+    // `repos::has_store` first, since it is a plain on-disk check: a
+    // worktree with no `.dex` yet is an ordinary row, not worth a process
+    // spawn that would only come back empty.
+    let handles: Vec<_> = other_worktrees
+        .iter()
+        .filter(|p| repos::has_store(p))
+        .map(|p| {
+            let dir = repos::store_dir(p);
+            thread::spawn(move || {
+                let result = Dex::for_store(&dir).and_then(|d| d.list());
+                (dir, result)
+            })
+        })
+        .collect();
+    for h in handles {
+        // A store that failed to read is simply not in the map yet -- it
+        // gets another chance the next time its own watcher fires, or when
+        // it is selected. Nothing here is fatal.
+        if let Ok((dir, Ok(store_tasks))) = h.join() {
+            app.worktree_counts.insert(dir, app::counts_for(&store_tasks));
+        }
+    }
+    // The selected store already has its full task list in `tasks` above --
+    // no second `dex list` needed to seed its own entry in the same cache.
+    app.worktree_counts
+        .insert(store_dir.clone(), app::counts_for(&app.tasks));
+
+    // Every other registered store's watcher: notify only, with no extra
+    // polling loop added here beyond what `watch::spawn` already does per
+    // directory. Its counts are re-read only when that message arrives --
+    // never on a fixed cadence for the whole set, which is the "ten node
+    // spawns every ten seconds forever" alternative CLAUDE.md rules out.
+    // `_other_store_watchers` must stay alive for the whole run; dropping it
+    // stops every one of these notifications.
+    let other_store_dirs: Vec<String> =
+        other_worktrees.iter().map(|p| repos::store_dir(p)).collect();
+    let (worktree_tx, worktree_rx) = channel::<String>();
+    let _other_store_watchers = watch::spawn_many(&other_store_dirs, worktree_tx);
+    {
+        let tx = tx.clone();
+        thread::spawn(move || {
+            while let Ok(dir) = worktree_rx.recv() {
+                let result = Dex::for_store(&dir).and_then(|d| d.list());
+                if tx.send(Msg::WorktreeCounts { dir, result }).is_err() {
                     return;
                 }
             }
@@ -377,8 +494,13 @@ fn main() -> std::io::Result<()> {
         }
 
         while let Ok(msg) = rx.try_recv() {
+            // `WorktreeCounts` updates a store nobody is looking at -- ui.rs
+            // does not draw `app.worktree_counts` anywhere yet, so redrawing
+            // for it would be exactly the idle-cost regression the pulse
+            // guarantee exists to prevent, for zero visible change.
+            let visible = !matches!(msg, Msg::WorktreeCounts { .. });
             handle_msg(&mut app, msg, &dex, &tx);
-            dirty = true;
+            dirty = dirty || visible;
         }
 
         // Requested by `E`. Runs here, outside the draw, so the terminal can be
@@ -500,6 +622,18 @@ fn handle_msg(app: &mut App, msg: Msg, dex: &Arc<Dex>, tx: &Sender<Msg>) {
                 result,
                 message: flatten(&error),
             };
+        }
+
+        // A store nobody is looking at right now. On success its cached
+        // count is simply replaced; on failure it is left exactly as it was
+        // -- the same "keep the last good model" rule `Msg::Tasks(Err)`
+        // follows for the selected store, just without a status message,
+        // since surfacing an error for a store the user is not even viewing
+        // would violate "a refresh must never disturb the user."
+        Msg::WorktreeCounts { dir, result } => {
+            if let Ok(store_tasks) = result {
+                app.worktree_counts.insert(dir, app::counts_for(&store_tasks));
+            }
         }
     }
 }
