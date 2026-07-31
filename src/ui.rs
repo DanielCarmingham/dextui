@@ -28,7 +28,7 @@ use crate::dex::{self, age, local_time, Status, Task};
 use crate::tree::{self, Progress};
 
 const SHORTCUTS: &str =
-    " s start  c done  r rename  e edit  n new  a sub  d del  f filter  o sort  3 repos  , config  ? help";
+    " s start  c done  r rename  e edit  n new  a sub  d del  f filter  o sort  1 repos  , config  ? help";
 
 /// What the strip says while the sidebar has focus.
 ///
@@ -448,18 +448,67 @@ fn right_zones(right: &[Span], x0: u16, sort_label: &str) -> Vec<(u16, u16, Head
 /// offers nothing to click. The vocabulary is four strings and cannot collide
 /// with a sort label or a filter name.
 fn tab_zone(content: &str) -> Option<HeaderZone> {
-    match content {
-        "[1]" | " 1 " => Some(HeaderZone::Pane(Focus::Tree)),
-        "[2]" | " 2 " => Some(HeaderZone::Pane(Focus::Detail)),
-        "[3]" | " 3 " => Some(HeaderZone::Pane(Focus::Repos)),
-        _ => None,
-    }
+    // Derived from `TABS` rather than restating it. A hand-written match here
+    // was a second copy of the numbering, and this file now has three places
+    // that must agree on it -- the tabs, the click zones, and the `[n]` marker
+    // on each pane's own border -- with the keys in `main.rs` a fourth.
+    TABS.iter()
+        .find(|(n, _)| content == format!("[{n}]") || content == format!(" {n} "))
+        .map(|(_, f)| HeaderZone::Pane(*f))
 }
 
 /// Which pane each numbered tab is, in the order they are drawn -- and the
 /// order the `1`/`2`/`3` keys use, since a tab that did not match its key
 /// would be worse than no tab at all.
-const TABS: [(u8, Focus); 3] = [(1, Focus::Tree), (2, Focus::Detail), (3, Focus::Repos)];
+///
+/// Numbered left to right as the panes appear on screen, which is the only
+/// order anyone can guess from looking at it. They were originally numbered in
+/// the order the panes were *built* -- tasks, detail, then the sidebar bolted
+/// on as `3` even though it is drawn first.
+pub const TABS: [(u8, Focus); 3] = [(1, Focus::Repos), (2, Focus::Tree), (3, Focus::Detail)];
+
+/// The `[n]` a pane draws in its own top-right corner, so the key is on the
+/// thing it acts on and not only in the header.
+fn pane_number(focus: Focus) -> String {
+    TABS.iter()
+        .find(|(_, f)| *f == focus)
+        .map(|(n, _)| format!("[{n}]"))
+        .unwrap_or_default()
+}
+
+/// Every pane's border: what it is on the left, the key that reaches it on the
+/// right, and a brightness that says whether it has focus.
+///
+/// One helper rather than three copies, so a pane cannot end up with a number
+/// that disagrees with [`TABS`] or a title styled unlike its neighbours. The
+/// number is bold when focused, matching the header tabs exactly -- two places
+/// showing the same `[n]` must not disagree about what it means.
+///
+/// The tree deliberately had no title before this, on the grounds that the
+/// header already names the store and the border would be the same fact twice.
+/// That was right about the *store* and is why these titles name the pane
+/// instead: ` tasks ` and ` detail ` say what you are looking at, which the
+/// header has never said.
+fn pane_block(title: &str, pane: Focus, focus: Focus) -> Block<'static> {
+    let focused = pane == focus;
+    Block::bordered()
+        .title_top(Line::styled(
+            format!(" {title} "),
+            Style::default().fg(DIM),
+        ))
+        .title_top(
+            Line::styled(
+                pane_number(pane),
+                if focused {
+                    Style::default().fg(PLAIN).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(DIM)
+                },
+            )
+            .right_aligned(),
+        )
+        .border_style(Style::default().fg(if focused { PLAIN } else { DIM }))
+}
 
 /// The pane tabs, `[1] 2 3`, drawn only when one pane is hidden.
 ///
@@ -836,11 +885,7 @@ fn draw_header(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
 /// store is `PLAIN`, one without is `DIM` -- so the sidebar introduces no new
 /// palette and `theme::ALL` stays the whole story.
 fn draw_repos(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
-    let focused = app.focus == Focus::Repos;
-    let block = Block::bordered()
-        .title(" repos ")
-        .title_style(Style::default().fg(DIM))
-        .border_style(Style::default().fg(if focused { PLAIN } else { DIM }));
+    let block = pane_block("repos", Focus::Repos, app.focus);
 
     let rows = app.repo_rows();
     let items: Vec<ListItem> = rows
@@ -905,15 +950,10 @@ fn draw_repos(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
 }
 
 fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
-    // No title: the header already says which store this is, and repeating it
-    // on the pane border was the same fact twice.
-    let block = Block::bordered().border_style(Style::default().fg(if app.focus
-        == Focus::Tree
-    {
-        PLAIN
-    } else {
-        DIM
-    }));
+    // ` tasks `, not the store name: the header already says which store this
+    // is, and repeating that here would be the same fact twice -- see
+    // `pane_block`.
+    let block = pane_block("tasks", Focus::Tree, app.focus);
 
     let inner_width = area.width.saturating_sub(2) as usize;
     let rows = tree::visible_rows(&app.tree, &app.expanded);
@@ -1126,11 +1166,15 @@ fn fold(text: &str, width: u16) -> Vec<String> {
 }
 
 fn draw_detail(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
-    let focused = app.focus == Focus::Detail;
-    let block = Block::bordered()
-        .title(if app.wrap { "" } else { " no wrap " })
-        .title_style(Style::default().fg(DIM))
-        .border_style(Style::default().fg(if focused { PLAIN } else { DIM }));
+    // The wrap state rides on the pane's own name rather than replacing it:
+    // `w` is a per-pane toggle whose only sign was this title, and a title
+    // that says `detail` half the time and `no wrap` the other half tells you
+    // one of the two things at a time.
+    let block = pane_block(
+        if app.wrap { "detail" } else { "detail · no wrap" },
+        Focus::Detail,
+        app.focus,
+    );
 
     let inner_w = area.width.saturating_sub(2);
     let inner_h = area.height.saturating_sub(2);
@@ -1484,7 +1528,7 @@ f          cycle filter      ^R  refresh now
 - / +      collapse / expand all
 
 In the repo sidebar these keys act on repos, not on tasks:
-3          focus repos       a   register the repo dextui is running in
+1          focus repos       a   register the repo dextui is running in
 enter / l  switch the tree and detail panes to the worktree under the cursor
 D          unregister the entry (the worktree and its store are untouched)
 
@@ -1492,9 +1536,12 @@ Movement follows the focused pane, shown by its brighter border. Turn wrap
 off (w) to scroll a wide table sideways -- wrapping removes the overflow
 there would otherwise be to scroll to.
 
-Zoom (z) shows one pane at a time, with [1] [2] [3] tabs in the header --
-press 1, 2 or 3 to jump, or enter and left to cross over. Narrow terminals
-zoom on their own below single_pane_below columns, usable even on a phone.
+Each pane carries its own key in its top right corner: [1] repos, [2] tasks,
+[3] detail, left to right as they are drawn. Press the number to jump there.
+
+Zoom (z) shows one pane at a time, and the same [1] [2] [3] appear in the
+header as tabs -- or enter and left to cross over. Narrow terminals zoom on
+their own below single_pane_below columns, usable even on a phone.
 
 Mouse: drag the divider to resize, wheel scrolls the pane under the pointer,
 click selects. In the header, click a filter, or the sort label to cycle it
@@ -2035,7 +2082,7 @@ mod tests {
     /// same defect as one that documents them wrongly.
     #[test]
     fn both_surfaces_advertise_the_repo_sidebar_keys() {
-        assert!(SHORTCUTS.contains("3 repos"), "the strip hides the sidebar: {SHORTCUTS}");
+        assert!(SHORTCUTS.contains("1 repos"), "the strip hides the sidebar: {SHORTCUTS}");
 
         // The strip swaps while the sidebar has focus, because `a` means
         // something else there.
@@ -2051,7 +2098,7 @@ mod tests {
         );
 
         // And the help names each of them too.
-        assert!(HELP.contains("3          focus repos"), "help: 3 focuses the sidebar");
+        assert!(HELP.contains("1          focus repos"), "help: 1 focuses the sidebar");
         assert!(HELP.contains("a   register the repo"), "help: a registers");
         assert!(HELP.contains("D          unregister"), "help: D unregisters");
         assert!(HELP.contains("enter / l  switch"), "help: enter switches store");
@@ -2228,28 +2275,74 @@ mod tests {
         }
     }
 
+    /// The header row alone. Every pane now draws its own `[n]` on its border,
+    /// so a whole-screen `contains("[1]")` no longer says anything about the
+    /// tabs -- it matches a pane corner at every width.
+    fn header_row(screen: &str) -> &str {
+        screen.lines().next().unwrap_or_default()
+    }
+
     /// The tabs are the only thing on screen saying the other pane exists, so
     /// they appear exactly when one is hidden -- and never when both are up,
     /// where they would be decoration on a row that already sheds to fit.
     #[test]
     fn the_pane_tabs_appear_only_when_a_pane_is_hidden() {
-        let zoomed = screen(60, 80, Focus::Tree);
-        assert!(zoomed.contains("[1]"), "no tabs in zoom mode: {zoomed}");
-        assert!(zoomed.contains(" 2 "), "no second tab: {zoomed}");
+        let zoom = screen(60, 80, Focus::Tree);
+        let zoomed = header_row(&zoom);
+        assert!(zoomed.contains("[2]"), "no tabs in zoom mode: {zoomed}");
+        assert!(zoomed.contains(" 3 "), "no third tab: {zoomed}");
 
-        let split = screen(100, 80, Focus::Tree);
-        assert!(!split.contains("[1]"), "tabs drawn beside both panes: {split}");
+        let wide = screen(100, 80, Focus::Tree);
+        let split = header_row(&wide);
+        // Not a bare `[` test: the filter menu is spelled `[ all  pending … ]`
+        // and lives on this same row.
+        for (n, _) in TABS {
+            assert!(
+                !split.contains(&format!("[{n}]")),
+                "tabs drawn beside both panes: {split}"
+            );
+        }
     }
 
+    /// Numbered left to right as they are drawn: repos, tasks, detail. The
+    /// panes were originally numbered in the order they were built, so the
+    /// sidebar -- drawn first -- answered to `3`.
     #[test]
     fn the_current_pane_is_the_marked_tab() {
-        let on_tree = screen(60, 80, Focus::Tree);
-        assert!(on_tree.contains("[1]"), "{on_tree}");
-        assert!(!on_tree.contains("[2]"), "two tabs marked at once: {on_tree}");
+        for (focus, marked) in [
+            (Focus::Repos, "[1]"),
+            (Focus::Tree, "[2]"),
+            (Focus::Detail, "[3]"),
+        ] {
+            let s = screen(60, 80, focus);
+            let row = header_row(&s);
+            assert!(row.contains(marked), "{focus:?} should mark {marked}: {row}");
+            assert_eq!(
+                row.matches('[').count(),
+                1,
+                "two tabs marked at once: {row}"
+            );
+        }
+    }
 
-        let on_detail = screen(60, 80, Focus::Detail);
-        assert!(on_detail.contains("[2]"), "{on_detail}");
-        assert!(!on_detail.contains("[1]"), "two tabs marked at once: {on_detail}");
+    /// The number on a pane's own border and the number in the header tabs are
+    /// the same key, so they are read from the one list rather than written
+    /// twice -- and this is what says so.
+    #[test]
+    fn a_panes_own_number_matches_its_header_tab() {
+        for (focus, marked) in [
+            (Focus::Repos, "[1]"),
+            (Focus::Tree, "[2]"),
+            (Focus::Detail, "[3]"),
+        ] {
+            assert_eq!(pane_number(focus), marked);
+            let s = screen(60, 80, focus);
+            let row = header_row(&s);
+            assert!(
+                row.contains(&pane_number(focus)),
+                "the header marks a different pane than {focus:?} draws: {row}"
+            );
+        }
     }
 
     /// Both states must be the same width, or switching tabs would shove the
@@ -2270,7 +2363,7 @@ mod tests {
         for w in [60u16, 50, 40, 30, 24] {
             let s = screen(w, 80, Focus::Detail);
             assert!(
-                s.contains("[2]"),
+                header_row(&s).contains("[3]"),
                 "{w} columns dropped the tabs, hiding the way back:\n{s}"
             );
         }

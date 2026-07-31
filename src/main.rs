@@ -1089,14 +1089,19 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         // reach, but the keys work at any width -- they were unbound, and
         // refusing them when both panes are visible would be a rule to remember
         // for no benefit.
-        KeyCode::Char('1') => app.show_tree(),
-        KeyCode::Char('2') => app.show_detail(),
-        // Whether this actually has anywhere to draw is a render-time
+        //
+        // Numbered left to right as the panes are drawn -- see `ui::TABS`,
+        // which is the one list the tabs, the click zones and each pane's own
+        // `[n]` marker all read.
+        //
+        // Whether the sidebar actually has anywhere to draw is a render-time
         // question, not a key-time one -- `App::single_pane` treats a
         // repo-focused pane at a width with no room reserved for it as a
         // single pane in its own right, so this needs no special casing
         // here and nothing to undo when focus or width changes back.
-        KeyCode::Char('3') => app.focus = Focus::Repos,
+        KeyCode::Char('1') => app.focus = Focus::Repos,
+        KeyCode::Char('2') => app.show_tree(),
+        KeyCode::Char('3') => app.show_detail(),
 
         KeyCode::Right | KeyCode::Char('l') => match app.focus {
             // Falls through to the detail only when there was nothing to open --
