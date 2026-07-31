@@ -143,9 +143,11 @@ gets a third pane alongside the tree and detail. Narrower than that, `3`
 still gets you there: focusing it zooms the app down to just the sidebar, the
 same way the whole app zooms below `single_pane_below`.
 
-Every registered repo is watched continuously, not only the one on screen —
-switching to a worktree you have not looked at in a while shows it already
-caught up, with nothing to wait for.
+Every registered repo is watched, not only the one on screen, so a change in
+any of them is noticed as promptly as a change in the one you are looking at.
+That is currently groundwork rather than something you can see: nothing on
+screen shows another repo's counts yet, and switching stores still pays one
+`dex list` — around 180ms — before the new worktree's tasks appear.
 
 | key | does |
 | --- | --- |
@@ -202,8 +204,10 @@ menu, clicking the one filter name it does show cycles instead.
 
 **Mouse**: drag the divider to resize the panes; the wheel or a trackpad drag
 scrolls whichever pane is under the pointer, content moving with your fingers in
-both; click selects. Mouse capture means the terminal no longer does its own text
-selection — hold **Shift** to select and copy as usual.
+all three; click selects, in the repo sidebar as well as the tree. Switching
+store stays on `enter`, so a click there cannot replace what you were reading.
+Mouse capture means the terminal no longer does its own text selection — hold
+**Shift** to select and copy as usual.
 
 **Wrapping vs wide tables.** Wrapping and sideways scrolling are mutually
 exclusive: wrapping removes the overflow there would be anything to scroll to.
