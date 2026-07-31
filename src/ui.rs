@@ -13,7 +13,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::app::{App, Counts, Focus, HeaderZone, Mode};
+use crate::app::{App, Counts, Focus, HeaderZone, Mode, Panes};
 
 /// Colour is used only where it carries meaning. Everything else is left to the
 /// terminal, so the app inherits whatever scheme the user runs -- including a
@@ -32,6 +32,13 @@ const SHORTCUTS: &str =
 
 /// Width of the inline progress meter, in cells.
 const METER_WIDTH: usize = 7;
+
+/// Fixed width of the repo/worktree sidebar in the three-pane layout. Repo and
+/// branch names, not prose, so it does not need a share of the percentage
+/// split the way the tree/detail boundary does. `repos_pane_above` (110 by
+/// default) already guarantees the tree/detail remainder stays usable once
+/// this much is taken off.
+const REPOS_PANE_WIDTH: u16 = 26;
 
 /// What separates the header's parts, and the detail pane's summary fields.
 /// Named because the header's width arithmetic has to account for it, and a
@@ -56,33 +63,55 @@ pub fn draw(frame: &mut Frame, app: &mut App, ic: &Icons) {
 
     draw_header(frame, app, ic, top);
 
-    if app.single_pane() {
-        // One pane, filling the width, chosen by focus. There is no divider, so
-        // `divider_x = 0` makes `App::on_divider` false and a drag inert --
-        // rather than leaving a stale x from the last wide frame, which would be
-        // an invisible drag target in the middle of the screen.
-        app.divider_x = 0;
-        match app.focus {
-            Focus::Tree => draw_tree(frame, app, ic, body),
-            Focus::Detail => draw_detail(frame, app, ic, body),
-            // Nothing draws the repo pane yet -- that lands in a later task --
-            // so falling here shows the tree rather than a blank pane.
-            Focus::Repos => draw_tree(frame, app, ic, body),
+    match app.panes() {
+        Panes::One => {
+            // One pane, filling the width, chosen by focus. There is no
+            // divider, so `divider_x = 0` makes `App::on_divider` false and a
+            // drag inert -- rather than leaving a stale x from the last wide
+            // frame, which would be an invisible drag target in the middle of
+            // the screen.
+            app.divider_x = 0;
+            match app.focus {
+                Focus::Tree => draw_tree(frame, app, ic, body),
+                Focus::Detail => draw_detail(frame, app, ic, body),
+                Focus::Repos => draw_repos(frame, app, ic, body),
+            }
         }
-        draw_status(frame, app, bottom);
-        draw_overlays(frame, app);
-        return;
-    }
-
-    let [left, right] =
-        Layout::horizontal([Constraint::Percentage(app.split_percent), Constraint::Fill(1)])
+        Panes::Two => {
+            let [left, right] = Layout::horizontal([
+                Constraint::Percentage(app.split_percent),
+                Constraint::Fill(1),
+            ])
             .areas(body);
 
-    // Published for mouse handling: the divider sits where the two borders meet.
-    app.divider_x = right.x;
+            // Published for mouse handling: the divider sits where the two
+            // borders meet.
+            app.divider_x = right.x;
 
-    draw_tree(frame, app, ic, left);
-    draw_detail(frame, app, ic, right);
+            draw_tree(frame, app, ic, left);
+            draw_detail(frame, app, ic, right);
+        }
+        Panes::Three => {
+            // The sidebar gets a fixed width rather than a share of the
+            // percentage split: it holds names, not prose, so it neither wants
+            // nor needs to grow with the terminal the way the tree/detail split
+            // does. The tree/detail boundary keeps the same arithmetic as the
+            // two-pane case, just over the narrower remainder.
+            let [repos, left, right] = Layout::horizontal([
+                Constraint::Length(REPOS_PANE_WIDTH),
+                Constraint::Percentage(app.split_percent),
+                Constraint::Fill(1),
+            ])
+            .areas(body);
+
+            app.divider_x = right.x;
+
+            draw_repos(frame, app, ic, repos);
+            draw_tree(frame, app, ic, left);
+            draw_detail(frame, app, ic, right);
+        }
+    }
+
     draw_status(frame, app, bottom);
     draw_overlays(frame, app);
 }
@@ -764,6 +793,53 @@ fn draw_header(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
 
     frame.render_widget(Paragraph::new(Line::from(spans)), left_area);
     frame.render_widget(Paragraph::new(Line::from(right)), right_area);
+}
+
+/// The repo pane: registered repositories with their worktrees beneath.
+///
+/// Colour carries only what the task tree's already does -- a worktree with a
+/// store is `PLAIN`, one without is `DIM` -- so the sidebar introduces no new
+/// palette and `theme::ALL` stays the whole story.
+fn draw_repos(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
+    let focused = app.focus == Focus::Repos;
+    let block = Block::bordered()
+        .title(" repos ")
+        .title_style(Style::default().fg(DIM))
+        .border_style(Style::default().fg(if focused { PLAIN } else { DIM }));
+
+    let rows = app.repo_rows();
+    let items: Vec<ListItem> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let selected = i == app.selected_repo_row;
+            let gutter = if selected {
+                Span::styled(format!("{} ", ic.gutter), Style::default().fg(ACCENT))
+            } else {
+                Span::raw("  ")
+            };
+            let body = match row {
+                crate::repos::Row::Repo { index } => {
+                    let r = &app.repos[*index];
+                    Span::styled(
+                        format!("{} {}", ic.marker(true, r.open), r.name),
+                        Style::default().fg(PLAIN).add_modifier(Modifier::BOLD),
+                    )
+                }
+                crate::repos::Row::Worktree { repo, index } => {
+                    let w = &app.repos[*repo].worktrees[*index];
+                    let has = crate::repos::has_store(&w.path);
+                    Span::styled(
+                        format!("   {}", w.branch),
+                        Style::default().fg(if has { PLAIN } else { DIM }),
+                    )
+                }
+            };
+            ListItem::new(Line::from(vec![gutter, body]))
+        })
+        .collect();
+
+    frame.render_widget(List::new(items).block(block), area);
 }
 
 fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
@@ -1489,6 +1565,10 @@ mod tests {
     }
 
     /// Renders a full frame and returns it as plain text, one String per row.
+    ///
+    /// Disables the repos rung: this helper is about the tree/detail split,
+    /// predates the sidebar, and every caller's column arithmetic (`tree_rows`
+    /// included) assumes the tree pane starts at column 0.
     fn render(w: u16, h: u16, ic: &Icons) -> Vec<String> {
         let mut app = App::new(
             vec![
@@ -1498,6 +1578,7 @@ mod tests {
             "demo".into(),
             crate::config::Config::default(),
         );
+        app.repos_pane_above = 0;
 
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal
@@ -2803,6 +2884,9 @@ mod tests {
     ) -> (ratatui::buffer::Buffer, App) {
         let mut app = App::new(tasks, "demo".into(), crate::config::Config::default());
         app.filter = tree::Filter::All;
+        // This helper is about the tree/detail split and predates the sidebar;
+        // callers' column arithmetic assumes the tree pane starts at column 0.
+        app.repos_pane_above = 0;
         app.rebuild();
         app.selected = Some(select.to_string());
         app.focus = focus;
@@ -3061,6 +3145,9 @@ mod tests {
         ];
         let mut app = App::new(app_tasks, "demo".into(), crate::config::Config::default());
         assert_eq!(app.filter, tree::Filter::Pending, "fixture assumes the default filter");
+        // About the tree pane's rollup, not the sidebar; `tree_rows` below
+        // assumes the tree pane starts at column 0.
+        app.repos_pane_above = 0;
 
         let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
         terminal
@@ -3079,6 +3166,103 @@ mod tests {
             parent.contains("1/2"),
             "the rollup must count the hidden child: {parent:?}"
         );
+    }
+
+    /// The sidebar draws, and shows both levels.
+    #[test]
+    fn the_sidebar_shows_repos_with_their_worktrees() {
+        let mut app = App::new(
+            vec![task("a", None, "A task")],
+            "demo".into(),
+            crate::config::Config::default(),
+        );
+        app.terminal_width = 140;
+        app.repos_pane_above = 110;
+        app.repos = vec![crate::repos::Repo {
+            name: "dextui".into(),
+            path: "/x/dextui".into(),
+            worktrees: vec![crate::worktree::Worktree {
+                path: "/x/dextui".into(),
+                branch: "main".into(),
+                is_main: true,
+                is_locked: false,
+                is_detached: false,
+            }],
+            open: true,
+        }];
+        app.rebuild();
+
+        let mut terminal = Terminal::new(TestBackend::new(140, 14)).unwrap();
+        terminal
+            .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let text: String = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("dextui"), "no repo row: {text}");
+        assert!(text.contains("main"), "no worktree row: {text}");
+    }
+
+    /// `Focus::Repos` used to fall through to `draw_tree` as a placeholder --
+    /// harmless while nothing could set that focus, wrong the moment something
+    /// can. In single-pane mode the repos pane must actually be the one drawn.
+    #[test]
+    fn single_pane_repos_focus_draws_the_repos_pane_not_the_tree() {
+        let mut app = App::new(
+            vec![task("a", None, "Only Task")],
+            "demo".into(),
+            crate::config::Config::default(),
+        );
+        app.single_pane_below = 9999; // force one pane regardless of width
+        app.focus = Focus::Repos;
+        app.rebuild();
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+        terminal
+            .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let text: String = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("repos"), "repos pane title missing:\n{text}");
+        assert!(
+            !text.contains("Only Task"),
+            "the tree, not the repos pane, was drawn:\n{text}"
+        );
+    }
+
+    /// Every rung of the ladder draws without panicking, including the boundaries.
+    #[test]
+    fn every_width_draws_without_panicking() {
+        for w in [40u16, 79, 80, 109, 110, 160] {
+            let mut app = App::new(
+                vec![task("a", None, "A task")],
+                "demo".into(),
+                crate::config::Config::default(),
+            );
+            app.terminal_width = w;
+            app.rebuild();
+            let mut terminal = Terminal::new(TestBackend::new(w, 14)).unwrap();
+            terminal
+                .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+                .unwrap();
+        }
     }
 }
 

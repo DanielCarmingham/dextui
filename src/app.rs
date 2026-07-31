@@ -102,7 +102,6 @@ pub enum Focus {
 
 /// How many panes are drawn. A single ordered ladder, so first-fit can only
 /// ever shed -- see `the_pane_ladder_is_monotone`.
-#[allow(dead_code)] // not yet consumed by the renderer -- a later task draws the pane
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panes {
     One,
@@ -220,7 +219,6 @@ pub struct App {
     pub task_memory: HashMap<String, String>,
     /// Registered repos with their worktrees, and whether each is expanded.
     pub repos: Vec<crate::repos::Repo>,
-    #[allow(dead_code)] // not yet consumed by the renderer -- a later task draws the pane
     pub selected_repo_row: usize,
     #[allow(dead_code)] // not yet consumed by the renderer -- a later task draws the pane
     pub registry: crate::registry::Registry,
@@ -752,7 +750,6 @@ impl App {
     }
 
     /// See [`Panes`].
-    #[allow(dead_code)] // not yet consumed by the renderer -- a later task draws the pane
     pub fn panes(&self) -> Panes {
         if self.single_pane() {
             return Panes::One;
@@ -865,7 +862,6 @@ impl App {
     /// Rebuilt from `self.repos` on every call, exactly as the task tree is
     /// rebuilt every frame -- a cached `Vec<Row>` would go stale the moment the
     /// repo list changed underneath it, since `Row` carries bare indices.
-    #[allow(dead_code)] // not yet consumed by the renderer -- a later task draws it
     pub fn repo_rows(&self) -> Vec<crate::repos::Row> {
         crate::repos::rows(&self.repos)
     }
