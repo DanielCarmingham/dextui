@@ -1146,6 +1146,13 @@ with `tmux send-keys` are 1-based. Mixing them is a one-cell error that looks
 exactly like a layout bug. It also enables `?1003h` by hand for motion with no
 button held, which `EnableMouseCapture` does not turn on.
 
+`cargo run --example mouse -- --no-motion` asks the terminal for exactly what
+dextui asks for and nothing more. The default probe additionally enables
+`?1003h`, and that is the **only** difference between the probe's mouse setup
+and the app's — so when the two disagree about where a click landed, running
+the probe both ways says which side of that line the fault is on. Both report
+identically here, which is the point: a difference is a finding.
+
 `cargo run --example mouse -- --raw` is the third rung, for when a coordinate
 is not merely off but *wildly* wrong: it prints the literal bytes with no
 parser in between, so a left press at column 60 row 6 should read exactly

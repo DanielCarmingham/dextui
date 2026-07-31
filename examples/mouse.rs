@@ -46,16 +46,25 @@ fn main() -> io::Result<()> {
     if std::env::args().any(|a| a == "--raw") {
         return raw();
     }
+    // `--no-motion` asks the terminal for exactly what dextui asks for, and
+    // nothing more. The default adds `?1003h`, and that is the *only*
+    // difference between this probe and the app's own mouse setup -- so if the
+    // two disagree about where a click happened, running both ways says which
+    // side of that line the fault is on.
+    let motion = !std::env::args().any(|a| a == "--no-motion");
+
     let mut out = io::stdout();
 
     enable_raw_mode()?;
     execute!(out, EnterAlternateScreen, EnableMouseCapture, Hide)?;
-    // Any-motion tracking, which `EnableMouseCapture` does not turn on. Sent
-    // raw because crossterm has no wrapper for it.
-    write!(out, "\x1b[?1003h")?;
+    if motion {
+        // Any-motion tracking, which `EnableMouseCapture` does not turn on.
+        // Sent raw because crossterm has no wrapper for it.
+        write!(out, "\x1b[?1003h")?;
+    }
     out.flush()?;
 
-    let result = run(&mut out);
+    let result = run(&mut out, motion);
 
     // Restored in the reverse order, and unconditionally: `?1003l` first,
     // since it is the one crossterm does not know about and therefore will not
@@ -125,12 +134,12 @@ fn raw() -> io::Result<()> {
     Ok(())
 }
 
-fn run(out: &mut io::Stdout) -> io::Result<()> {
+fn run(out: &mut io::Stdout, motion: bool) -> io::Result<()> {
     let mut log: Vec<String> = Vec::new();
     let mut pointer: Option<(u16, u16)> = None;
     let mut counts = (0u32, 0u32, 0u32); // clicks, scrolls, moves
 
-    draw(out, pointer, &log, counts)?;
+    draw(out, pointer, &log, counts, motion)?;
 
     loop {
         // Everything already queued is taken before redrawing.
@@ -181,7 +190,7 @@ fn run(out: &mut io::Stdout) -> io::Result<()> {
             }
         }
 
-        draw(out, pointer, &log, counts)?;
+        draw(out, pointer, &log, counts, motion)?;
     }
 }
 
@@ -226,6 +235,7 @@ fn draw(
     pointer: Option<(u16, u16)>,
     log: &[String],
     counts: (u32, u32, u32),
+    motion: bool,
 ) -> io::Result<()> {
     let (w, h) = crossterm::terminal::size()?;
     queue!(out, Clear(ClearType::All))?;
@@ -267,8 +277,11 @@ fn draw(
     }
 
     let header = format!(
-        " mouse probe — {w}x{h} — clicks {} · scrolls {} · moves {} — q to quit ",
-        counts.0, counts.1, counts.2
+        " mouse probe{} — {w}x{h} — clicks {} · scrolls {} · moves {} — q to quit ",
+        if motion { "" } else { " [--no-motion: same setup as dextui]" },
+        counts.0,
+        counts.1,
+        counts.2
     );
     queue!(
         out,
