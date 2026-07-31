@@ -7,6 +7,7 @@ mod editor;
 mod icons;
 mod markdown;
 mod pulse;
+mod registry;
 mod theme;
 mod tree;
 mod ui;
