@@ -5,6 +5,7 @@ mod config;
 mod dex;
 mod editor;
 mod icons;
+mod log;
 mod markdown;
 mod pulse;
 mod registry;
@@ -255,6 +256,11 @@ fn main() -> std::io::Result<()> {
         Command::Run | Command::SelfTest => {}
     }
 
+    // Always on -- see src/log.rs. Before anything else that might be worth
+    // recording, and well before `ratatui::init` takes the terminal: once the
+    // alternate screen is up there is nowhere else this app can report to.
+    log::init();
+
     // Ahead of the dex preflight, and ahead of `ratatui::init` which panics
     // rather than erroring when there is no terminal to put into raw mode.
     // Nothing below can succeed without one, so spending a ~180ms dex call to
@@ -300,6 +306,10 @@ fn main() -> std::io::Result<()> {
     // empty-plus-one-entry registry over whatever was already on disk,
     // silently dropping every repo registered in an earlier session.
     let (registry, registry_problem) = registry::Registry::load();
+    match &registry_problem {
+        Some(p) => log::line("registry", &format!("load failed: {p}")),
+        None => log::line("registry", &format!("loaded {} repo(s)", registry.repos.len())),
+    }
 
     // The repo/worktree sidebar. `App::new` cannot populate this itself --
     // `App` owns view state, not I/O -- so it is loaded here, the same way
@@ -602,7 +612,7 @@ fn handle_msg(app: &mut App, msg: Msg, dex: &Arc<Dex>, tx: &Sender<Msg>) {
                 // Deferred rather than dropped; applied when the dialog closes.
                 app.pending_refresh = true;
             } else {
-                refresh(dex, tx);
+                refresh(dex, tx, &app.store_label);
             }
         }
 
@@ -612,7 +622,7 @@ fn handle_msg(app: &mut App, msg: Msg, dex: &Arc<Dex>, tx: &Sender<Msg>) {
 
         Msg::Ok(message) => {
             app.status = message;
-            refresh(dex, tx);
+            refresh(dex, tx, &app.store_label);
         }
         Msg::Failed(e) => app.mode = Mode::Error(flatten(&e)),
 
@@ -780,9 +790,16 @@ fn register_current_repo(app: &mut App) -> String {
         return "no worktrees found".to_string();
     };
     match app.register_repo_path(&main.path) {
-        Ok(true) => format!("registered {}", main.path),
+        Ok(true) => {
+            log::line("registry", &format!("saved: added {}", main.path));
+            format!("registered {}", main.path)
+        }
         Ok(false) => format!("{} is already registered", main.path),
-        Err(e) => format!("could not register: {}", flatten(&e)),
+        Err(e) => {
+            let e = flatten(&e);
+            log::line("registry", &format!("save failed: {e}"));
+            format!("could not register: {e}")
+        }
     }
 }
 
@@ -792,17 +809,33 @@ fn register_current_repo(app: &mut App) -> String {
 /// not a way to replace what it points to.
 fn select_worktree_under_cursor(app: &mut App) {
     if let Some(path) = app.selected_worktree_path() {
+        // Captured before `select_worktree` overwrites it -- by the time
+        // `switch_store` runs on the main loop, `app.selected_worktree` is
+        // already the new path, so "from" has to be recorded here or it is
+        // gone.
+        let from = app.selected_worktree.clone().unwrap_or_else(|| "(none)".into());
+        log::line("store", &format!("switching from {from} to {path}"));
         app.select_worktree(&path);
         app.pending_store = Some(path);
         app.focus = Focus::Tree;
     }
 }
 
-fn refresh(dex: &Arc<Dex>, tx: &Sender<Msg>) {
+/// `store` is a display label (`store_label`), not a full path -- just enough
+/// to tell two stores apart in the log without an extra `dex dir` spawn.
+fn refresh(dex: &Arc<Dex>, tx: &Sender<Msg>, store: &str) {
     let dex = Arc::clone(dex);
     let tx = tx.clone();
+    let store = store.to_string();
     thread::spawn(move || {
-        let _ = tx.send(Msg::Tasks(dex.list()));
+        let start = std::time::Instant::now();
+        let result = dex.list();
+        let ms = start.elapsed().as_millis();
+        match &result {
+            Ok(tasks) => log::line("dex", &format!("list {store} - {} tasks {ms}ms", tasks.len())),
+            Err(e) => log::line("dex", &format!("list {store} failed after {ms}ms: {}", flatten(e))),
+        }
+        let _ = tx.send(Msg::Tasks(result));
     });
 }
 
@@ -826,7 +859,7 @@ fn close_modal(app: &mut App, dex: &Arc<Dex>, tx: &Sender<Msg>) {
     app.mode = Mode::Normal;
     if app.pending_refresh {
         app.pending_refresh = false;
-        refresh(dex, tx);
+        refresh(dex, tx, &app.store_label);
     }
 }
 
@@ -850,9 +883,16 @@ fn handle_key(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>) {
                     // entry silently reappearing at the next launch, with
                     // nothing on screen ever having said so.
                     app.status = match app.unregister_repo_path(path) {
-                        Ok(true) => format!("unregistered {path}"),
+                        Ok(true) => {
+                            log::line("registry", &format!("saved: removed {path}"));
+                            format!("unregistered {path}")
+                        }
                         Ok(false) => format!("{path} was not registered"),
-                        Err(e) => format!("could not unregister {path}: {}", flatten(&e)),
+                        Err(e) => {
+                            let e = flatten(&e);
+                            log::line("registry", &format!("save failed: {e}"));
+                            format!("could not unregister {path}: {e}")
+                        }
                     };
                 } else {
                     let name = app.by_id.get(&id).map(|t| t.name.clone()).unwrap_or_default();
@@ -998,7 +1038,7 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         // a 10s safety poll backstops it, so this is an escape hatch for the
         // events macOS drops rather than something you should need.
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            refresh(dex, tx)
+            refresh(dex, tx, &app.store_label)
         }
         KeyCode::Char('?') => app.mode = Mode::Help,
         // Reuses the $EDITOR machinery rather than building a settings form.

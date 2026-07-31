@@ -12,6 +12,8 @@ use std::time::{Duration, SystemTime};
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
+use crate::log;
+
 pub const DEBOUNCE: Duration = Duration::from_millis(250);
 pub const SAFETY: Duration = Duration::from_secs(10);
 
@@ -68,6 +70,14 @@ fn spawn_inner(store_dir: &str, out: Sender<()>, safety: Duration) -> StoreWatch
         None
     };
 
+    log::line(
+        "watch",
+        &match &watcher {
+            Some(_) => format!("registered {store_dir}"),
+            None => format!("no watcher for {store_dir}; relying on the safety poll"),
+        },
+    );
+
     let dir = store_dir.to_string();
     thread::spawn(move || {
         // Keeps `raw_rx` connected for the life of this thread even when no
@@ -88,6 +98,7 @@ fn spawn_inner(store_dir: &str, out: Sender<()>, safety: Duration) -> StoreWatch
         loop {
             match raw_rx.recv_timeout(safety) {
                 Ok(()) => {
+                    log::line("watch", &format!("event {dir}"));
                     // A single dex write touches the file several times; swallow
                     // the burst so it costs one `dex list`, not one per event.
                     while raw_rx.recv_timeout(DEBOUNCE).is_ok() {}
@@ -109,10 +120,13 @@ fn spawn_inner(store_dir: &str, out: Sender<()>, safety: Duration) -> StoreWatch
                 Err(RecvTimeoutError::Timeout) => {
                     let now = stat(&dir);
                     if now != last {
+                        log::line("watch", &format!("tick {dir} changed"));
                         last = now;
                         if out.send(()).is_err() {
                             return;
                         }
+                    } else {
+                        log::line("watch", &format!("tick {dir} unchanged"));
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => return,

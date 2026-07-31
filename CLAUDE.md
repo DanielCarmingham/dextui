@@ -47,6 +47,7 @@ and to check behaviour where no interactive terminal exists.
 | `src/ui.rs` | Immediate-mode rendering, and `selftest`. |
 | `src/watch.rs` | Debounced FS events plus the stat-gated safety net. |
 | `src/pulse.rs` | The spinner clock, and the guard on its idle cost. |
+| `src/log.rs` | The always-on sync log -- see below. |
 | `src/main.rs` | Event loop and key handling. |
 
 Tests live in `#[cfg(test)]` modules beside the code they cover.
@@ -130,6 +131,53 @@ ampersands and newlines.
 
 Filtering is client-side: we always fetch `--all` and filter in memory, so
 changing the filter is instant and costs no process spawn.
+
+## The sync log
+
+The stat-gated safety net above has a branch that is invisible **by design**: on
+a quiet tick it decides nothing changed and does nothing at all. That silence is
+correct, and indistinguishable from a broken watcher without something recording
+it. `app.status` cannot be that something — it is one line, overwritten, with no
+history — and once the alternate screen is up, stdout/stderr belong to the TUI,
+so nothing can be printed there either.
+
+`src/log.rs` is a small, **always-on** log at `$XDG_STATE_HOME/dextui/log`
+(falling back to `~/.local/state/dextui/log` — resolved the same way
+`config::path` resolves `XDG_CONFIG_HOME`, but state rather than config, because
+a log is disposable and machine-local and must never sit beside the user's
+hand-edited `config.toml`). It is on unconditionally, with no toggle: a sync
+fault is exactly the kind of bug that will not reproduce on demand, so an
+opt-in log would be off precisely when it was needed.
+
+Four rules, all deliberate:
+
+- **Failure is silent and total.** An unwritable path, a directory that cannot
+  be created — `log::line` just does nothing. No `unwrap`, no propagated
+  `Result`, no status-bar complaint. A logger that can break the program it
+  exists to diagnose is worse than no logger.
+- **File only, never stdout/stderr.** Once the TUI owns the terminal, those
+  belong to it.
+- **Truncated at startup, not rotated.** A log you `tail -f` while reproducing
+  a fault does not need history; rotation is machinery for a problem this does
+  not have. Past 1 MB it is reset to empty on the next launch.
+- **No buffering held across calls.** Every `line` call opens the file fresh
+  with `append` + `create` and writes immediately. An append per event is cheap
+  at the tempo these events happen, and a buffer would lose exactly the lines
+  you need if the app died before it flushed.
+
+`log::init()` runs once, early in `main`, before the terminal is touched, and
+resolves the path into a process-wide `OnceLock` that every later `log::line`
+call reads. Areas are `watch`, `dex`, `store`, `registry` — padded to a fixed
+column so the file reads straight. What lands in each: `watch` gets every
+watcher registration, FS event, and safety tick outcome (including
+`unchanged`, the branch this exists for); `dex` gets each `list` with the
+store, task count and duration — logged in `refresh()`, the function every
+watcher-triggered, Ctrl-R-triggered and post-write reload goes through (the
+one-off `dex list` calls in the startup preflight, a worktree switch, and the
+background worktree-counts fetch are not instrumented -- `refresh()` is where
+a sync fault would actually show up as a pattern); `store` gets worktree
+switches, from and to; `registry` gets every load and save, success or
+failure.
 
 ## The invariant: refresh must never disturb the user
 

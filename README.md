@@ -282,6 +282,15 @@ unknown key or value is reported in the status bar at startup.
 **A build error mentioning `edition2024`** — your Rust is older than 1.85.
 `rustup update`.
 
+**Watching does not seem to notice a change** — dextui keeps a running log at
+`$XDG_STATE_HOME/dextui/log` (falling back to `~/.local/state/dextui/log`). It is
+always on, so `tail -f` it while reproducing the problem: it records every
+watcher registration, filesystem event, and 10-second safety-poll tick —
+including the ticks that found nothing changed, which is otherwise invisible.
+It also records each `dex list` with how long it took and how many tasks came
+back, worktree switches, and registry loads/saves. The file is truncated (not
+rotated) if it grows past 1&nbsp;MB, so history is limited to the current run.
+
 ## Scope
 
 In: browse, search, filter, start, complete, edit, create, subtask, delete.
