@@ -19,6 +19,12 @@
 #
 # By default it renders the dex store for your current directory; set
 # DEXTUI_RENDER_CWD to point it somewhere else.
+#
+# The pane is 120x36 unless DEXTUI_RENDER_COLS / DEXTUI_RENDER_ROWS say
+# otherwise, which is how you look at the layouts that only appear when the
+# terminal is too small for the last one:
+#
+#   DEXTUI_RENDER_COLS=60 DEXTUI_RENDER_ROWS=20 scripts/render-check.sh "?"
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -26,6 +32,10 @@ APP="$REPO/target/debug/dextui"
 SOCK="dextui-render"
 SESSION="render"
 WORKDIR="${DEXTUI_RENDER_CWD:-$PWD}"
+# The size is worth reaching: most of what this app gets wrong, it gets wrong
+# only at a width or height it has to shed something at.
+COLS="${DEXTUI_RENDER_COLS:-120}"
+ROWS="${DEXTUI_RENDER_ROWS:-36}"
 KEYS="${1:-}"
 
 if [ ! -x "$APP" ]; then
@@ -39,7 +49,7 @@ trap cleanup EXIT
 tmux -L "$SOCK" kill-server 2>/dev/null
 sleep 0.3
 
-tmux -L "$SOCK" new-session -d -s "$SESSION" -x 120 -y 36 -c "$WORKDIR" "$APP"
+tmux -L "$SOCK" new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" -c "$WORKDIR" "$APP"
 sleep 3
 
 for k in $KEYS; do

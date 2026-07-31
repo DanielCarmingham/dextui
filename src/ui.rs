@@ -135,7 +135,15 @@ pub fn draw(frame: &mut Frame, app: &mut App, ic: &Icons) {
 }
 
 /// Dialogs, drawn last so they sit over whichever layout was used.
-fn draw_overlays(frame: &mut Frame, app: &App) {
+fn draw_overlays(frame: &mut Frame, app: &mut App) {
+    // Help is taken first and separately because it is the one dialog that
+    // writes back into `App` -- the wrapped height it measured -- and so cannot
+    // share the borrow on `app.mode` the others take.
+    if matches!(app.mode, Mode::Help) {
+        draw_help(frame, app);
+        return;
+    }
+
     match &app.mode {
         Mode::Prompt(prompt) => draw_prompt(frame, prompt),
         Mode::Confirm { message, .. } => draw_message(
@@ -153,7 +161,6 @@ fn draw_overlays(frame: &mut Frame, app: &App) {
             ACTIVE,
         ),
         Mode::Error(e) => draw_message(frame, "dex error", e, "any key to dismiss", BLOCKED),
-        Mode::Help => draw_help(frame),
         _ => {}
     }
 }
@@ -1063,6 +1070,61 @@ fn wrapped_height(line_widths: &[u16], width: u16, wrap: bool) -> u16 {
     rows.saturating_add(2)
 }
 
+/// Word-wraps text to `width`, returning the rows that will actually be drawn.
+///
+/// The sibling of [`wrapped_height`], and the opposite trade: that one guesses
+/// a height for text ratatui wraps itself, and is allowed to guess high. This
+/// one does the wrapping, so the caller gets a count instead of an estimate --
+/// which is what the help dialog's overflow markers need, since a height one
+/// row too many there is a `↓` promising a line that does not exist.
+///
+/// A word longer than the whole width is broken rather than allowed to overrun.
+fn fold(text: &str, width: u16) -> Vec<String> {
+    if width == 0 {
+        return text.lines().map(str::to_string).collect();
+    }
+    let width = width as usize;
+
+    let mut out = Vec::new();
+    for line in text.lines() {
+        if line.chars().count() <= width {
+            out.push(line.to_string());
+            continue;
+        }
+
+        let mut row = String::new();
+        let mut row_len = 0;
+        for word in line.split(' ') {
+            let mut word = word;
+            // Break a word too long to ever fit, one full row at a time, so it
+            // cannot push the row past `width` and be clipped anyway.
+            while word.chars().count() > width {
+                if row_len > 0 {
+                    out.push(std::mem::take(&mut row));
+                    row_len = 0;
+                }
+                let head: String = word.chars().take(width).collect();
+                word = &word[head.len()..];
+                out.push(head);
+            }
+
+            let len = word.chars().count();
+            let sep = usize::from(row_len > 0);
+            if row_len + sep + len > width {
+                out.push(std::mem::take(&mut row));
+                row_len = 0;
+            } else if sep == 1 {
+                row.push(' ');
+                row_len += 1;
+            }
+            row.push_str(word);
+            row_len += len;
+        }
+        out.push(row);
+    }
+    out
+}
+
 fn draw_detail(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
     let focused = app.focus == Focus::Detail;
     let block = Block::bordered()
@@ -1442,16 +1504,14 @@ The view refreshes itself whenever the dex store changes, including when
 another process or agent edits it. Your selection, expansion and any open
 dialog are never disturbed.";
 
-fn draw_help(frame: &mut Frame) {
+fn draw_help(frame: &mut Frame, app: &mut App) {
     // Sized to the text rather than to a constant that was quietly two thirds
     // of it: at 74x16 the dialog cut off mid-sentence, so most of what `?`
-    // documents -- the mouse, the refresh guarantee, and now the sidebar keys
-    // this fix exists to advertise -- could not be read at any terminal size.
-    // `centered` clamps to the frame, so a terminal too small still gets as
-    // much as fits, exactly as before.
-    let lines = HELP.lines().count() as u16;
+    // documents -- the mouse, the refresh guarantee, and the sidebar keys --
+    // could not be read at any terminal size. `centered` still clamps to the
+    // frame, but what does not fit now scrolls rather than vanishing.
     let widest = HELP.lines().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
-    let area = centered(frame.area(), widest + 2, lines + 3);
+    let area = centered(frame.area(), widest + 2, HELP.lines().count() as u16 + 3);
     frame.render_widget(Clear, area);
 
     let block = Block::bordered()
@@ -1462,13 +1522,62 @@ fn draw_help(frame: &mut Frame) {
 
     let [body, hint] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
 
+    // Folded here rather than handed to `Paragraph::wrap`, because the markers
+    // below have to be exactly right: they are the only thing on screen saying
+    // whether anything is hidden, and `wrapped_height` -- which deliberately
+    // over-estimates, since for the detail pane a wrong guess should err
+    // towards blank space -- would have this claim there was more to read at
+    // the very bottom of the text. Folding it ourselves makes the height a
+    // count rather than an estimate.
+    let folded = fold(HELP, body.width);
+    app.help_content_height = folded.len() as u16;
+    app.help_viewport_height = body.height;
+    // A resize can shrink the content under a scroll taken at a larger size,
+    // which would otherwise leave the dialog showing nothing at all.
+    app.help_scroll = app.help_scroll.min(app.help_max_scroll());
+    let scroll = app.help_scroll;
+
     frame.render_widget(
-        Paragraph::new(HELP).style(Style::default().fg(PLAIN)),
+        Paragraph::new(folded.iter().map(|s| Line::from(s.as_str())).collect::<Vec<_>>())
+            .style(Style::default().fg(PLAIN))
+            .scroll((scroll, 0)),
         body,
     );
+
+    // Two `Rect`s rather than two `Paragraph`s over one, so the hint and the
+    // markers cannot overwrite each other -- the same rule the header learned.
+    let marks = match (scroll > 0, scroll < app.help_max_scroll()) {
+        (true, true) => "\u{2191}\u{2193}",
+        (true, false) => "\u{2191}",
+        (false, true) => "\u{2193}",
+        (false, false) => "",
+    };
+    let mark_w = marks.chars().count() as u16;
+    let [text, arrows] =
+        Layout::horizontal([Constraint::Fill(1), Constraint::Length(mark_w)]).areas(hint);
+
+    // "any key" was the whole contract of this dialog for its entire life, so
+    // it stays true of every key that is not a movement key -- the hint says
+    // which ones now do something else instead, and sheds down to nothing
+    // rather than being truncated into a lie.
+    let ladder: &[&str] = if app.help_max_scroll() > 0 {
+        &["j / k scroll  \u{b7}  any other key dismisses", "j / k scroll"]
+    } else {
+        &["any key to dismiss", "any key"]
+    };
+    let label = ladder
+        .iter()
+        .copied()
+        .find(|s| s.chars().count() as u16 <= text.width)
+        .unwrap_or("");
+
     frame.render_widget(
-        Paragraph::new("any key to dismiss").style(Style::default().fg(DIM)),
-        hint,
+        Paragraph::new(label).style(Style::default().fg(DIM)),
+        text,
+    );
+    frame.render_widget(
+        Paragraph::new(marks).style(Style::default().fg(ACTIVE)),
+        arrows,
     );
 }
 
@@ -1854,6 +1963,142 @@ mod tests {
             "dialog are never disturbed.",
         ] {
             assert!(screen.contains(line), "help clipped -- missing {line:?}:\n{screen}");
+        }
+    }
+
+    /// Draws `?` at the given size and returns the screen, having first let a
+    /// frame publish the heights `scroll` is clamped against -- which is the
+    /// same order the real app does it in, since you cannot scroll a dialog
+    /// before it has been drawn to you.
+    fn help_screen(width: u16, height: u16, scroll_to_end: bool) -> String {
+        let mut app = App::new(vec![], "demo".into(), crate::config::Config::default());
+        app.open_help();
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut render = |app: &mut App| {
+            terminal
+                .draw(|f| draw(f, app, &crate::icons::UNICODE))
+                .unwrap();
+            let buf = terminal.backend().buffer().clone();
+            (0..buf.area.height)
+                .map(|y| {
+                    (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let first = render(&mut app);
+        if !scroll_to_end {
+            return first;
+        }
+        app.scroll_help(i32::MAX);
+        render(&mut app)
+    }
+
+    /// The whole point of the scroll: the closing paragraph is off the bottom
+    /// of a short terminal, and `G` has to be able to reach it. Before this it
+    /// was simply gone, with nothing on screen saying so.
+    #[test]
+    fn the_last_line_of_the_help_is_reachable_on_a_short_terminal() {
+        const LAST: &str = "dialog are never disturbed.";
+
+        let top = help_screen(80, 24, false);
+        assert!(
+            !top.contains(LAST),
+            "80x24 is not short enough to test scrolling:\n{top}"
+        );
+        assert!(top.contains("tab        switch pane"), "help starts at the top:\n{top}");
+
+        let end = help_screen(80, 24, true);
+        assert!(end.contains(LAST), "the last line stayed out of reach:\n{end}");
+    }
+
+    /// `fold` exists to give an exact row count, so the cases that matter are
+    /// the ones where an off-by-one would put a `↓` under the last line.
+    #[test]
+    fn folding_never_returns_a_row_wider_than_the_width() {
+        for width in [1u16, 3, 7, 12, 40, 79, 200] {
+            let rows = fold(HELP, width);
+            for r in &rows {
+                assert!(
+                    r.chars().count() <= width as usize,
+                    "{width}: row overruns: {r:?}"
+                );
+            }
+            assert!(rows.len() >= HELP.lines().count(), "{width}: rows went missing");
+        }
+    }
+
+    #[test]
+    fn folding_keeps_every_word_and_breaks_only_what_cannot_fit() {
+        assert_eq!(fold("one two three", 20), ["one two three"]);
+        assert_eq!(fold("one two three", 7), ["one two", "three"]);
+        // Exactly the width is not a fold.
+        assert_eq!(fold("abcde", 5), ["abcde"]);
+        // A word with nowhere to go is broken rather than left to overrun.
+        assert_eq!(fold("ab abcdefgh ij", 4), ["ab", "abcd", "efgh", "ij"]);
+        // Blank lines are rows too -- the help's paragraph breaks are made of
+        // them, and dropping them would misreport the height.
+        assert_eq!(fold("a\n\nb", 10), ["a", "", "b"]);
+        // Width 0 has no wrap to do, and must not loop forever trying.
+        assert_eq!(fold("anything at all", 0), ["anything at all"]);
+    }
+
+    /// The markers must be read off the hint row alone: `HELP` documents the
+    /// arrow keys, so the same glyphs appear in the body of every screen.
+    fn help_hint(screen: &str) -> &str {
+        screen
+            .lines()
+            .find(|l| l.contains("dismiss"))
+            .expect("the hint row is always drawn at these widths")
+    }
+
+    /// Clipping in silence is the defect. A marker is what turns "that is all
+    /// of it" into "there is more", and it must not appear when there is not --
+    /// which is why the height it keys off is folded rather than estimated.
+    #[test]
+    fn the_help_says_when_it_is_hiding_something() {
+        let short = help_screen(80, 24, false);
+        let hint = help_hint(&short);
+        assert!(hint.contains('\u{2193}'), "no more-below marker: {hint:?}");
+        assert!(
+            hint.contains("any other key dismisses"),
+            "the hint never says the movement keys stopped dismissing: {hint:?}"
+        );
+
+        let end = help_screen(80, 24, true);
+        let hint = help_hint(&end);
+        assert!(hint.contains('\u{2191}'), "no more-above marker at the end: {hint:?}");
+        assert!(!hint.contains('\u{2193}'), "still claims more below at the end: {hint:?}");
+
+        let whole = help_screen(120, 40, false);
+        let hint = help_hint(&whole);
+        assert!(
+            !hint.contains('\u{2193}') && !hint.contains('\u{2191}'),
+            "markers drawn over a dialog that fits: {hint:?}"
+        );
+        assert!(
+            hint.contains("any key to dismiss") && !hint.contains("scroll"),
+            "a dialog that fits should still promise any key: {hint:?}"
+        );
+    }
+
+    /// A terminal narrower than the widest line used to cut it off at the
+    /// border mid-sentence. Folding loses the column alignment, but only where
+    /// there was never room for it, and it loses no words.
+    #[test]
+    fn a_narrow_help_folds_its_lines_instead_of_cutting_them() {
+        let narrow = help_screen(60, 40, false);
+        // Tails of lines wider than a 60-column terminal, which cannot survive
+        // it any way but wrapping -- one from the key table, one from prose.
+        for tail in ["result)", "$EDITOR", "confirmation)"] {
+            assert!(
+                narrow.contains(tail),
+                "{tail:?} was truncated rather than folded:\n{narrow}"
+            );
         }
     }
 

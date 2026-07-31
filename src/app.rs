@@ -204,6 +204,17 @@ pub struct App {
     /// content it cannot otherwise measure (wrapped height depends on width).
     pub detail_content_height: u16,
     pub detail_viewport_height: u16,
+    /// Vertical offset into the `?` dialog. `HELP` is longer and wider than a
+    /// small terminal, and `centered` clamps the dialog to the frame, so
+    /// without this the text simply stopped at the border with nothing on
+    /// screen to say it had -- the same silent truncation the fixed 74x16 box
+    /// before it was replaced for.
+    pub help_scroll: u16,
+    /// Written by the renderer, for the same reason `detail_content_height` is:
+    /// the help wraps, so its height depends on the dialog's width and only the
+    /// renderer can measure it.
+    pub help_content_height: u16,
+    pub help_viewport_height: u16,
     /// Set when a refresh arrives while a dialog is open; applied on close.
     pub pending_refresh: bool,
     /// Whether in-progress rows spin at all. From the config, and the opt-out
@@ -285,6 +296,9 @@ impl App {
             wrap: cfg.wrap,
             detail_content_height: 0,
             detail_viewport_height: 0,
+            help_scroll: 0,
+            help_content_height: 0,
+            help_viewport_height: 0,
             pending_refresh: false,
             animate: cfg.animate,
             spin_frame: 0,
@@ -864,6 +878,29 @@ impl App {
             .detail_content_height
             .saturating_sub(self.detail_viewport_height);
         self.detail_scroll = (max_y, self.detail_scroll.1);
+    }
+
+    /// How far the help can scroll before its last line is on screen. Zero
+    /// means the whole dialog fits, which is what the hint row and the overflow
+    /// markers both key off.
+    pub fn help_max_scroll(&self) -> u16 {
+        self.help_content_height
+            .saturating_sub(self.help_viewport_height)
+    }
+
+    /// Clamped like the detail pane's, and against a height only the renderer
+    /// can know -- so before the first frame this is a no-op, which is correct:
+    /// you cannot scroll a dialog you have not been shown.
+    pub fn scroll_help(&mut self, dy: i32) {
+        let max = self.help_max_scroll() as i32;
+        self.help_scroll = (self.help_scroll as i32).saturating_add(dy).clamp(0, max) as u16;
+    }
+
+    /// Always from the top: `?` is asked by someone looking for a key, and
+    /// resuming where the last reading stopped hides the first ten of them.
+    pub fn open_help(&mut self) {
+        self.help_scroll = 0;
+        self.mode = Mode::Help;
     }
 
     /// Selecting a different task must not leave you halfway down the old one.

@@ -685,6 +685,37 @@ against ~30 lines of text, so two thirds of what `?` documented had never been
 readable at any terminal size, and adding a line to `HELP` is not documenting
 a key unless someone can see it.
 
+**The help scrolls, because sizing it to `HELP` only moved the problem.** At 31
+lines and 76 columns it still outgrows an 80×24 terminal, and `centered` clamps
+the dialog to the frame — so the closing paragraph simply stopped existing, with
+nothing on screen to say so, which is the same silent truncation the fixed
+74×16 box was replaced for. `App::help_scroll` and `j/k`, arrows, page keys and
+`g/G` fix the vertical half; folding the text to the dialog's width fixes the
+horizontal half, where a 60-column terminal used to cut a sentence off at the
+border. Three things are load-bearing:
+
+- **Every other key still dismisses.** "Any key" was this dialog's whole
+  contract for its entire life, and narrowing it to `esc`/`q` would be a rule
+  to remember in exchange for nothing. `handle_help` intercepts the movement
+  keys and falls through on the rest, and the hint row says which is which.
+- **The `↑`/`↓` markers are computed from a fold, not from `wrapped_height`.**
+  That helper deliberately over-estimates, because for the detail pane a wrong
+  guess should err towards blank space you can scroll into — but here the same
+  slack becomes a `↓` promising lines that do not exist, at the bottom of the
+  text, which is the exact lie the markers were added to stop telling. `fold`
+  does the wrapping itself, so the height is a count. It is also why the
+  paragraph no longer uses `Wrap`: something has to own the line breaks, and
+  it cannot be both.
+- **`draw_help` writes back to `App`**, so `draw_overlays` takes `&mut App` and
+  handles `Mode::Help` before the `match &app.mode` the other dialogs share —
+  those two borrows cannot coexist.
+
+`?` always reopens at the top (`App::open_help`): it is pressed by someone
+looking for a key, and resuming halfway down hides the first ten of them. The
+wheel scrolls the dialog while it is up, and every other mouse gesture is
+swallowed rather than reaching the pane underneath — a click that moved the
+selection behind a dialog is unasked-for movement you cannot even watch happen.
+
 **`w` toggles wrapping, and that is not cosmetic.** Wrapping and horizontal
 scrolling are mutually exclusive in ratatui: `Paragraph::scroll((y, x))` honours
 the x offset only when wrapping is off, because wrapping removes the overflow
@@ -980,6 +1011,10 @@ scripts/render-check.sh                    # just render
 scripts/render-check.sh "Down Down"        # navigate, then render
 scripts/render-check.sh "f"                # cycle the filter
 scripts/render-check.sh "?"                # open the help dialog
+
+# The pane is 120x36 by default. Most of what this app gets wrong, it gets
+# wrong only at a size it has to shed something at, so reach for these.
+DEXTUI_RENDER_COLS=60 DEXTUI_RENDER_ROWS=20 scripts/render-check.sh "?"
 ```
 
 Every UI bug found in this project — a tree loading collapsed, shortcuts being

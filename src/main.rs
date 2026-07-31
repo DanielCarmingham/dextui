@@ -551,6 +551,20 @@ fn main() -> std::io::Result<()> {
 }
 
 fn handle_mouse(app: &mut App, m: MouseEvent) {
+    // With the help open the dialog is what the pointer is over, so the wheel
+    // scrolls it rather than a pane it is covering -- and every other gesture
+    // is swallowed rather than reaching through, since a click that moved the
+    // selection under a dialog you cannot see it happen behind is exactly the
+    // kind of unasked-for movement this app is built not to do.
+    if matches!(app.mode, Mode::Help) {
+        match m.kind {
+            MouseEventKind::ScrollDown => app.scroll_help(1),
+            MouseEventKind::ScrollUp => app.scroll_help(-1),
+            _ => {}
+        }
+        return;
+    }
+
     match m.kind {
         // The header row, before anything else: it is above the body, so the
         // divider and pane tests below never see it.
@@ -995,7 +1009,28 @@ fn handle_key(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>) {
             close_modal(app, dex, tx);
         }
 
-        Mode::Error(_) | Mode::Help => close_modal(app, dex, tx),
+        Mode::Help => handle_help(app, key, dex, tx),
+
+        Mode::Error(_) => close_modal(app, dex, tx),
+    }
+}
+
+/// `HELP` is longer than a short terminal, so the movement keys scroll it
+/// rather than dismissing it. Everything else still dismisses: "any key" was
+/// this dialog's whole contract for its entire life, and narrowing it to
+/// `esc`/`q` would be a rule to remember in exchange for nothing.
+fn handle_help(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>) {
+    // A page is what is on screen. `max(1)` guards the frame before the first
+    // draw, where the renderer has not published a height yet.
+    let page = app.help_viewport_height.max(1) as i32;
+    match key.code {
+        KeyCode::Down | KeyCode::Char('j') => app.scroll_help(1),
+        KeyCode::Up | KeyCode::Char('k') => app.scroll_help(-1),
+        KeyCode::PageDown => app.scroll_help(page),
+        KeyCode::PageUp => app.scroll_help(-page),
+        KeyCode::Home | KeyCode::Char('g') => app.scroll_help(i32::MIN),
+        KeyCode::End | KeyCode::Char('G') => app.scroll_help(i32::MAX),
+        _ => close_modal(app, dex, tx),
     }
 }
 
@@ -1124,7 +1159,7 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             refresh(dex, tx, app)
         }
-        KeyCode::Char('?') => app.mode = Mode::Help,
+        KeyCode::Char('?') => app.open_help(),
         // Reuses the $EDITOR machinery rather than building a settings form.
         KeyCode::Char(',') => app.pending_config_edit = true,
 
@@ -1359,6 +1394,77 @@ mod tests {
 
     fn parsed(args: &[&str]) -> Result<Command, String> {
         parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    /// Sends `key` to a help dialog with room for 10 of its 30 rows, and
+    /// reports where it left things. No dex call can happen on this path --
+    /// `close_modal` only refreshes when a refresh arrived while the dialog was
+    /// open -- so the runner never runs and the channel is only ever a sink.
+    fn help_key(key: KeyCode) -> (Option<u16>, u16) {
+        let mut app = App::new(vec![], "demo".into(), crate::config::Config::default());
+        app.open_help();
+        app.help_content_height = 30;
+        app.help_viewport_height = 10;
+        app.help_scroll = 5;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let dex = Arc::new(Dex::real());
+        handle_key(&mut app, KeyEvent::from(key), &dex, &tx);
+
+        let still_open = matches!(app.mode, Mode::Help).then_some(app.help_scroll);
+        (still_open, app.help_scroll)
+    }
+
+    /// The keys that move now move, and every other key still dismisses --
+    /// "any key" was this dialog's whole contract before it could scroll, and
+    /// narrowing it to `esc`/`q` would be a rule to remember for no benefit.
+    #[test]
+    fn the_help_scrolls_on_movement_keys_and_dismisses_on_everything_else() {
+        for (key, want) in [
+            (KeyCode::Char('j'), 6),
+            (KeyCode::Down, 6),
+            (KeyCode::Char('k'), 4),
+            (KeyCode::Up, 4),
+            (KeyCode::PageDown, 15),
+            (KeyCode::PageUp, 0),
+            (KeyCode::Char('g'), 0),
+            (KeyCode::Home, 0),
+            // Clamped to the last row, not run off the end.
+            (KeyCode::Char('G'), 20),
+            (KeyCode::End, 20),
+        ] {
+            let (open, scroll) = help_key(key);
+            assert_eq!(open, Some(want), "{key:?} should have scrolled to {want}");
+            assert_eq!(scroll, want);
+        }
+
+        for key in [
+            KeyCode::Esc,
+            KeyCode::Enter,
+            KeyCode::Char('q'),
+            KeyCode::Char('?'),
+            KeyCode::Char(' '),
+            KeyCode::Char('x'),
+        ] {
+            assert_eq!(help_key(key).0, None, "{key:?} should have dismissed the help");
+        }
+    }
+
+    /// `?` is pressed by someone looking for a key, and resuming halfway down
+    /// the dialog would hide the first ten of them.
+    #[test]
+    fn reopening_the_help_starts_at_the_top() {
+        let mut app = App::new(vec![], "demo".into(), crate::config::Config::default());
+        app.help_content_height = 30;
+        app.help_viewport_height = 10;
+
+        app.open_help();
+        app.scroll_help(i32::MAX);
+        assert_eq!(app.help_scroll, 20, "the test never scrolled anywhere");
+
+        app.mode = Mode::Normal;
+        app.open_help();
+        assert_eq!(app.help_scroll, 0);
     }
 
     #[test]

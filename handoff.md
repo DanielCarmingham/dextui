@@ -2,9 +2,10 @@
 
 **Branch:** `add-repo-support`, in the worktree at
 `~/Developer/DanielCarmingham/dextui.worktrees/add-repo-support`
-**State:** 27 commits from `main` (`64046dd`), 342 tests passing, clippy clean,
-working tree clean. **Nothing has been pushed.** The branch has had a
-whole-branch review and one fix wave; one finding is parked, see *Still open*.
+**State:** 349 tests passing, clippy clean, working tree clean. **Nothing has
+been pushed.** The branch has had a whole-branch review and one fix wave; the
+finding that was parked has since been fixed, and what remains is in
+*Still open* — none of it blocking.
 
 ```bash
 cd ~/Developer/DanielCarmingham/dextui.worktrees/add-repo-support
@@ -116,20 +117,26 @@ It exists because the stat gate above added a branch that is invisible by design
 from a broken watcher. The log is how you tell them apart. `tail -f` it while
 reproducing.
 
+## Closed since this file was first written
+
+**The `?` dialog no longer clips in silence.** This was the one item parked as
+worth deciding before merge: at 80×24 the closing paragraph vanished, and at 60
+columns a line was cut off mid-sentence, with no scroll, no ellipsis and no
+indicator — against a README that specifically sells phone-width use.
+
+It now scrolls (`j`/`k`, arrows, page keys, `g`/`G`, and the wheel), folds to the
+dialog's width instead of truncating, and carries `↑`/`↓` markers computed from
+that fold rather than from `wrapped_height`, whose deliberate over-estimate would
+have had the marker promise lines that do not exist. Every non-movement key still
+dismisses, which was the dialog's contract before it could scroll. See CLAUDE.md,
+under "Two panes, one set of movement keys".
+
+`scripts/render-check.sh` now honours `DEXTUI_RENDER_COLS`/`DEXTUI_RENDER_ROWS`,
+which is what made the narrow cases checkable at all.
+
 ## Still open
 
-**The one worth deciding first.** The `?` help dialog clips silently below 80×36.
-`HELP` is 31 lines and 76 columns; `centered()` clamps to the area. At 80×24 the
-closing paragraph vanishes; at 60 columns a line truncates mid-sentence. There is
-no scroll, no ellipsis and no "more" indicator, and the regression test only
-renders 120×40.
-
-This is *better* than before — the dialog was a fixed 74×16 against 31 lines, so
-two thirds of it had never been visible at any size — but it bites the narrow and
-phone use the README specifically sells. Parked as not load-bearing; it blocks
-nothing and loses no data.
-
-Everything else, in rough order of how much anyone would notice:
+In rough order of how much anyone would notice:
 
 - **`app.worktree_counts` is write-only.** Counts are loaded concurrently at
   startup and kept current by per-store watchers, but nothing renders them, so
