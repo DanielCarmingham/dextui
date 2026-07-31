@@ -46,7 +46,7 @@ and to check behaviour where no interactive terminal exists.
 | `src/app.rs` | All view state, the refresh-survival rules, and the header counts. |
 | `src/ui.rs` | Immediate-mode rendering, and `selftest`. |
 | `src/watch.rs` | Debounced FS events plus the safety poll. |
-| `src/pulse.rs` | The animation clock, and the guard on its idle cost. |
+| `src/pulse.rs` | The spinner clock, and the guard on its idle cost. |
 | `src/main.rs` | Event loop and key handling. |
 
 Tests live in `#[cfg(test)]` modules beside the code they cover.
@@ -470,7 +470,7 @@ sort_reversed = false
 filter = "pending"      # pending | active | all
 wrap = true
 icons = "unicode"       # nerd | unicode | ascii
-animate = true          # breathe the in-progress marker
+animate = true          # spin the in-progress marker
 ```
 
 `animate` is the one setting that reaches the **event loop**, not just the
@@ -526,19 +526,25 @@ indentation preservation build a local string inside `markdown::render`; the
 edit path reads `by_id[…].description`, the raw task from dex. A round-trip test
 proves the stored bytes are identical after an edit that changes nothing.
 
-## The pulse, and the guarantee it must not break
+## The spinner, and the guarantee it must not break
 
-In-progress markers breathe between `ACTIVE` and a bold `ACTIVE_PULSE` on a
-700ms half-period. **The glyph never changes shape** — only its colour — so the
-marker column cannot jitter, and no new codepoint had to be measured.
+In-progress markers **turn**, one glyph per `pulse::FRAME` (80ms). The frames
+live in `icons`, per tier — braille `⠋⠙⠹…` for nerd and unicode, `*oO` for ascii
+— and `pulse` only answers *which* frame, so the tier and the schedule stay
+independent.
 
-The whole design constraint is the cost. This app redraws **only when something
-changed** and idles at zero. So `pulse::poll_timeout` clamps the loop's timeout
-to the next phase flip **only while at least one task is in progress and
-`animate` is on**; otherwise it returns the original constant, on the same code
-path. `App::is_animating` tests the `animate` flag *before* scanning the task
-list, so the opt-out is genuinely free rather than merely quiet. Measured over
-30s: 0.02s of CPU with it off, 0.27s with it on.
+This replaced a two-frame colour breath, and it costs about **nine times more**:
+12.5 repaints/sec against ~1.4. `a_running_store_repaints_once_per_frame` states
+that as an exact number rather than a comment. Two things make it acceptable,
+and both are the real invariants here:
+
+- **It is paid only while a task is running.** `pulse::poll_timeout` returns the
+  untouched `IDLE_POLL` otherwise, on the same code path, so an idle store costs
+  exactly what it did before animation existed — 0.02s of CPU over 30s.
+- **The opt-out reaches the event loop, not just the drawing.**
+  `App::is_animating` tests the `animate` flag *before* scanning the task list,
+  so switching it off restores the old wakeup schedule rather than leaving a
+  fast loop redrawing a still glyph.
 
 Three things to preserve if you touch this:
 
@@ -546,13 +552,39 @@ Three things to preserve if you touch this:
   blocked in `event::read()` would swallow the first keystroke meant for
   `$EDITOR`, which is the reason the loop polls at all.
 - **`Instant`, not `SystemTime`** — an NTP step or a laptop waking from sleep
-  must not jump the phase.
-- **The clamp is pinned by an exact equality**, not an inequality. The 100ms poll
-  already dominates a 700ms half-period, so the clamp looks like dead code and
-  only matters in the last 100ms before a flip. An inequality would still pass
-  with the clamp deleted; `poll_timeout(true, 680ms) == 20ms` would not.
+  must not jump the frame.
+- **The still glyph is not one of the frames.** With animation off, or nothing
+  running, the marker is `ic.active` — a play triangle, which reads as "in
+  progress" with no motion to help it. A lone braille dot does not.
+  `row_glyph` takes `Option<usize>` so "not animating" is a state rather than a
+  frame index, and `with_animation_off_the_marker_is_the_still_glyph` pins it.
 
-There is no spinner and there cannot be a braille one — see the glyph section.
+### Why braille, after it was rejected twice
+
+The rejection was based on a correct measurement and a wrong inference, which is
+worth keeping straight because the same trap is one grep away.
+
+FiraCode Nerd Font contains **no braille at all** — 0 of its 11,992 codepoints —
+so macOS substitutes Apple Braille, measured via CoreText at **1.111 cells**.
+That number is right. What was inferred from it, that the marker column would
+jitter, is not: a terminal lays out its own fixed grid and snaps each glyph into
+one cell regardless of what the font's advance asks for. The same snapping is
+why `done` (U+F070B, a *double*-width Material Design glyph at 2.000 cells) has
+always looked correct.
+
+So measure the font, then **verify against the terminal**. `scripts/glyph-check.py`
+prints every candidate with `|` bars after it; if any glyph is genuinely mis-sized
+the bars go ragged. That is the check that settled it.
+
+If a terminal that honours the advance ever turns up, the fallbacks are ready:
+`ASCII_SPIN` works in any font, and Nerd Fonts 3.3.0's 6-frame arc at
+U+EE06–EE0B is native at exactly 1.000 cells — but exists in the nerd tier alone.
+
+The ascii tier deliberately does **not** use the classic `-\|/`. That tier's
+structure already owns most of it: `-` is `expanded`, `|` is the `gutter`, `.` is
+`pending`, `>` is the still `active`. A spinner cycling through those puts
+tree-drawing characters in the state column. `*oO` collides with nothing, and
+swelling reads as motion as clearly as turning.
 
 ## Mouse
 

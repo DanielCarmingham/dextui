@@ -9,17 +9,25 @@
 //! Note that `✗` U+2717, `✘` U+2718 and `⊗` U+2297 are also missing, so there is
 //! no pure-Unicode cross available; the unicode tier uses `×` U+00D7.
 //!
-//! **There is no spinner here, and there cannot be a braille one.** FiraCode
-//! Nerd Font contains no braille at all, so `⠋⠙⠹` — what `ora`, and therefore
-//! yarn and npm, use — is font-fallbacked by macOS to Apple Braille at **1.11
-//! cells**. That is fine in yarn, where the spinner is one transient glyph at
-//! the end of a line with nothing aligned beneath it; here the status marker
-//! sits in a column, so an 11%-oversized glyph would make the whole tree jitter
-//! as tasks start and stop. Nerd Fonts 3.3.0 *does* ship a real 6-frame arc
-//! spinner at U+EE06–EE0B, native at exactly 1.00 cells (see [`NERD`]), and it
-//! is deliberately unused: it exists in this tier alone, and a second animation
-//! model for one tier is not worth two code paths. Motion is instead carried
-//! entirely by colour — see `pulse` — so the glyph never changes shape.
+//! **The spinner is braille, and the reasoning that once forbade it was wrong
+//! in an instructive way.** FiraCode Nerd Font contains no braille at all — 0 of
+//! its 11,992 codepoints — so `⠋⠙⠹`, what `ora` and therefore yarn and npm use,
+//! is font-fallbacked by macOS to Apple Braille, whose advance measures **1.111
+//! cells**. That measurement is correct and was taken twice.
+//!
+//! The inference drawn from it was not. An advance is what the *font* asks for;
+//! a terminal lays out its own fixed grid and snaps the glyph into one cell
+//! regardless, so the marker column does not move. Confirmed by eye in Ghostty
+//! against `scripts/glyph-check.py`, whose `|` bars would go ragged if any of
+//! this were mis-measured. The same snapping is why `done` (U+F070B, a
+//! *double*-width Material Design glyph at 2.000 cells) has always looked right.
+//!
+//! So: measure the font, but verify against the terminal. The number was never
+//! in doubt; what it implied was.
+//!
+//! If a terminal that honours the advance ever turns up, the fallbacks are
+//! ready — `ASCII_SPIN` for any font, and Nerd Fonts 3.3.0's 6-frame arc at
+//! U+EE06–EE0B, native at exactly 1.00 cells but present in the nerd tier alone.
 //!
 //! The tier comes from the config file or `DEXTUI_ICONS`; `config` owns that
 //! precedence. The default is `unicode`, because a Nerd Font cannot be reliably
@@ -43,7 +51,13 @@ pub struct Icons {
 
     // Task state
     pub pending: &'static str,
+    /// The still marker for in-progress work: used wherever the state has to be
+    /// named rather than watched -- the header counts, the help, the legend --
+    /// and as the resting frame when `animate` is off. Always `spin[0]`.
     pub active: &'static str,
+    /// The rotation, one glyph per frame. Every frame must measure exactly one
+    /// cell in the tier's font, or the marker column shifts as it turns.
+    pub spin: &'static [&'static str],
     pub done: &'static str,
     pub blocked: &'static str,
 
@@ -78,6 +92,39 @@ pub struct Meter {
     pub partial: &'static [&'static str],
 }
 
+/// The braille "dots" rotation, as `cli-spinners` defines it and therefore what
+/// ora, yarn and npm all show. Ten frames at [`crate::pulse::FRAME`].
+///
+/// **These are not in FiraCode Nerd Font.** The U+2800 block is entirely absent
+/// from it -- 0 of its 11,992 codepoints -- so macOS substitutes AppleBraille,
+/// whose advance measures **1.111 cells**. That was measured with CoreText, and
+/// it is why braille was rejected twice before.
+///
+/// It is used anyway because a terminal snaps a glyph into its own cell rather
+/// than honouring the font's advance, so the marker column does not actually
+/// move. That was verified by eye in Ghostty, not reasoned about -- run
+/// `scripts/glyph-check.py` and look at whether the `|` bars line up.
+///
+/// If a terminal ever *does* honour the advance, these will draw 11% wide.
+/// [`ASCII_SPIN`] is the safe fallback, and the nerd tier could use U+EE06..EE0B
+/// instead, which are native FiraCode at exactly 1.000 cells.
+const BRAILLE_SPIN: &[&str] = &[
+    "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
+    "\u{2827}", "\u{2807}", "\u{280f}",
+];
+
+/// A growing dot, not the classic `-\|/` rotation.
+///
+/// This tier's structural vocabulary already owns most of that set: `-` is
+/// `expanded`, `|` is the selection `gutter`, `.` is `pending` and `>` is the
+/// still `active`. A spinner cycling through those would put tree-drawing
+/// characters in the state column -- `- - Task` for an expanded row on the
+/// wrong frame -- which is worse than having no rotation at all.
+///
+/// `*` `o` `O` collide with nothing, and swelling reads as motion just as
+/// clearly as turning does. Plain ASCII, so the width is beyond doubt anywhere.
+const ASCII_SPIN: &[&str] = &["*", "o", "O"];
+
 /// Nerd Font: chevrons and Font Awesome state icons.
 pub const NERD: Icons = Icons {
     tier: Tier::Nerd,
@@ -86,6 +133,7 @@ pub const NERD: Icons = Icons {
     leaf: " ",
     pending: "\u{f070c}", // md-rhombus_outline
     active: "\u{f04b}",   // fa-play
+    spin: BRAILLE_SPIN,
     done: "\u{f070b}",    // md-rhombus
     blocked: "\u{f05e}",  // fa-ban
     app: "\u{f0ae}",     // fa tasks
@@ -118,6 +166,7 @@ pub const UNICODE: Icons = Icons {
     leaf: " ",
     pending: "\u{25c7}", // ◇
     active: "\u{25ba}",  // ►  (NOT ▶ U+25B6 -- that is `collapsed`)
+    spin: BRAILLE_SPIN,
     done: "\u{25c6}",    // ◆
     blocked: "\u{00d7}", // ×  (✗ and ⊗ are unavailable)
     app: "",
@@ -147,6 +196,7 @@ pub const ASCII: Icons = Icons {
     leaf: " ",
     pending: ".",
     active: ">",
+    spin: ASCII_SPIN,
     done: "x",
     blocked: "!",
     app: "",

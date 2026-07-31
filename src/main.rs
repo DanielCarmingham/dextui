@@ -231,16 +231,18 @@ fn main() -> std::io::Result<()> {
     let store_dir = match dex.store_dir() {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("dextui: {e}");
-            eprintln!("dextui: is `dex` installed and on your PATH?");
+            eprintln!("{}", dex::requires_dex(&e));
             std::process::exit(1);
         }
     };
 
+    // Same treatment: `dex dir` can succeed against a dex that then fails on a
+    // real command, and reaching here having already said "dex is fine" would
+    // make the second failure baffling.
     let tasks = match dex.list() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("dextui: {e}");
+            eprintln!("{}", dex::requires_dex(&e));
             std::process::exit(1);
         }
     };
@@ -294,7 +296,7 @@ fn main() -> std::io::Result<()> {
     while !app.should_quit {
         // The only redraw animation ever causes, and only while something is
         // actually in progress.
-        if app.pulse_tick(epoch.elapsed()) {
+        if app.pulse_tick(epoch.elapsed(), glyphs.spin.len()) {
             dirty = true;
         }
 

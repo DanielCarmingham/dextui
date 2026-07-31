@@ -20,7 +20,7 @@ use crate::app::{App, Counts, Focus, HeaderZone, Mode};
 /// light/dark switch at runtime -- instead of imposing its own. The values live
 /// in `theme`; this module decides where they go.
 use crate::theme::{
-    ACCENT, ACCENT_DIM, ACTIVE, ACTIVE_PULSE, BLOCKED, CODE, DIM, DONE, PLAIN, TODO,
+    ACCENT, ACCENT_DIM, ACTIVE, BLOCKED, CODE, DIM, DONE, PLAIN, TODO,
 };
 
 use crate::icons::Icons;
@@ -93,6 +93,24 @@ fn glyph(s: Status, ic: &Icons) -> &'static str {
     }
 }
 
+/// The marker for a tree row, turning if it is in progress and turning is on.
+///
+/// `frame` is `None` when nothing is animating -- animation switched off, or no
+/// task running -- and the marker falls back to the still `ic.active`. That
+/// still glyph is deliberately *not* one of the spinner's frames: it has to read
+/// as "in progress" without any motion to help it, which a play triangle does
+/// and a single braille dot does not.
+///
+/// Only tree rows turn. Everywhere the state is *named* rather than watched --
+/// the header counts, the help legend -- keeps `ic.active`, because a glyph
+/// changing under a static label reads as a fault.
+fn row_glyph(s: Status, ic: &Icons, frame: Option<usize>) -> &'static str {
+    match (s, frame) {
+        (Status::InProgress, Some(f)) if !ic.spin.is_empty() => ic.spin[f % ic.spin.len()],
+        _ => glyph(s, ic),
+    }
+}
+
 fn status_color(s: Status) -> Color {
     match s {
         Status::Completed => DONE,
@@ -102,23 +120,13 @@ fn status_color(s: Status) -> Color {
     }
 }
 
-/// The status marker's style for the current animation frame.
+/// The status marker's colour: its state's, and nothing else.
 ///
-/// **The glyph never changes shape; only its intensity breathes.** A marker that
-/// changed shape between frames would shift the column every task name lines up
-/// in -- the same failure that rules out a braille spinner, which macOS
-/// substitutes at 1.11 cells.
-///
-/// Only in progress pulses. It is the one state that is *happening*, and making
-/// the rest move too would turn a signal into screen flicker.
-fn status_style(s: Status, pulse: bool) -> Style {
-    if s == Status::InProgress && pulse {
-        Style::default()
-            .fg(ACTIVE_PULSE)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(status_color(s))
-    }
+/// Colour used to carry the animation, alternating with a bright variant. Motion
+/// now lives in the glyph (see [`row_glyph`]), so this holds still -- animating
+/// both would make one marker say the same thing twice, and loudly.
+fn status_style(s: Status) -> Style {
+    Style::default().fg(status_color(s))
 }
 
 /// How a stacked bar divides into cells. Tier-independent: the glyph table in
@@ -693,6 +701,9 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
         ACCENT_DIM
     };
 
+    // Once per frame, not per row: this scans every task.
+    let spin = app.is_animating().then_some(app.spin_frame);
+
     let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
@@ -717,8 +728,8 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
                     Style::default().fg(DIM),
                 ),
                 Span::styled(
-                    format!("{} ", glyph(st, ic)),
-                    status_style(st, app.pulse_on),
+                    format!("{} ", row_glyph(st, ic, spin)),
+                    status_style(st),
                 ),
             ];
 
@@ -1372,8 +1383,10 @@ mod tests {
         );
 
         let started_row = row_for("Started but blocked");
+        // The marker is a spinner frame, not `ic.active`: the fixture has work in
+        // progress, so the row is animating and frame 0 is what is drawn.
         assert!(
-            started_row.contains(ic.active),
+            started_row.contains(ic.spin[0]),
             "a started task reads as in progress: {started_row:?}"
         );
         assert_eq!(
@@ -1463,8 +1476,7 @@ mod tests {
             for (sn, s) in [
                 ("TODO", TODO),
                 ("ACTIVE", ACTIVE),
-                ("ACTIVE_PULSE", ACTIVE_PULSE),
-                ("DONE", DONE),
+                            ("DONE", DONE),
                 ("BLOCKED", BLOCKED),
             ] {
                 assert_ne!(c, s, "{n} is the same colour as {sn}");
@@ -2316,48 +2328,130 @@ mod tests {
     }
 
     /// A whole frame as a `Buffer`, which keeps the per-cell styling the plain
-    /// `render` helper throws away -- and styling is the entire subject here.
-    fn render_frame(tasks: Vec<Task>, pulse_on: bool, ic: &Icons) -> ratatui::buffer::Buffer {
+    /// `render` helper throws away -- and styling is half the subject here.
+    fn render_frame(tasks: Vec<Task>, frame: usize, ic: &Icons) -> ratatui::buffer::Buffer {
         let mut app = App::new(tasks, "demo".into(), crate::config::Config::default());
         app.filter = tree::Filter::All;
         app.rebuild();
-        app.pulse_on = pulse_on;
+        app.spin_frame = frame;
 
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
         terminal.draw(|f| draw(f, &mut app, ic)).unwrap();
         terminal.backend().buffer().clone()
     }
 
-    /// Where `symbol` is drawn, and how, in the tree pane.
-    fn find_cell(buf: &ratatui::buffer::Buffer, symbol: &str) -> ((u16, u16), Style) {
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                if buf[(x, y)].symbol() == symbol {
-                    return ((x, y), buf[(x, y)].style());
-                }
+    /// The glyph changes every frame now, so the assertion that matters is that
+    /// its **column** does not. That is the whole risk of a spinner whose frames
+    /// are font-fallbacked, and the reason this was rejected twice before.
+    #[test]
+    fn the_spinner_turns_without_moving_the_column() {
+        for ic in [
+            &crate::icons::NERD,
+            &crate::icons::UNICODE,
+            &crate::icons::ASCII,
+        ] {
+            let tasks = || vec![task("a", None, "Idle task"), started("b", "Running task")];
+
+            let mut columns = std::collections::HashSet::new();
+            let mut seen = std::collections::HashSet::new();
+
+            for f in 0..ic.spin.len() {
+                let buf = render_frame(tasks(), f, ic);
+
+                // Scoped to the running task's own row, then located by colour.
+                //
+                // Neither half is optional. Searching the whole buffer finds the
+                // header's own `1 active`, which is ACTIVE-coloured too; and
+                // searching by symbol matches tree scaffolding that shares a
+                // character, which is how the ascii tier's `|` frame was caught
+                // colliding with the selection gutter.
+                let row = (0..buf.area.height)
+                    .find(|&y| {
+                        (0..buf.area.width)
+                            .map(|x| buf[(x, y)].symbol())
+                            .collect::<String>()
+                            .contains("Running task")
+                    })
+                    .unwrap_or_else(|| panic!("{:?}: no row for the running task", ic.tier));
+
+                let (at, style) = (0..buf.area.width)
+                    .map(|x| ((x, row), buf[(x, row)].style()))
+                    .find(|(_, s)| s.fg == Some(ACTIVE))
+                    .unwrap_or_else(|| panic!("{:?}: no in-progress marker drawn", ic.tier));
+
+                assert_eq!(
+                    buf[at].symbol(),
+                    ic.spin[f],
+                    "{:?}: frame {f} drew the wrong glyph",
+                    ic.tier
+                );
+                columns.insert(at.0);
+                seen.insert(ic.spin[f]);
+
+                // Colour no longer carries the motion, so it must stay put.
+                assert!(
+                    !style.add_modifier.contains(Modifier::BOLD),
+                    "{:?}: frame {f} changed weight",
+                    ic.tier
+                );
             }
+
+            assert_eq!(
+                columns.len(),
+                1,
+                "{:?}: the marker moved between frames: {columns:?}",
+                ic.tier
+            );
+            assert_eq!(
+                seen.len(),
+                ic.spin.len(),
+                "{:?}: frames repeated within one cycle",
+                ic.tier
+            );
         }
-        panic!("{symbol:?} was never drawn");
     }
 
-    /// The shape assertion is the point. A glyph that changed between frames
-    /// would shift the column every task name lines up in, which is the exact
-    /// failure that rules out a braille spinner here.
+    /// With animation off the marker must be the still glyph -- the same one the
+    /// header counts and help legend show -- not whichever spinner frame happens
+    /// to sit at index 0. A lone braille dot does not read as "in progress"
+    /// without motion behind it; a play triangle does.
     #[test]
-    fn an_in_progress_row_renders_in_both_phases_without_changing_shape() {
-        let ic = &crate::icons::UNICODE;
-        let tasks = || vec![task("a", None, "Idle task"), started("b", "Running task")];
+    fn with_animation_off_the_marker_is_the_still_glyph() {
+        for ic in [
+            &crate::icons::NERD,
+            &crate::icons::UNICODE,
+            &crate::icons::ASCII,
+        ] {
+            assert_eq!(row_glyph(Status::InProgress, ic, None), ic.active);
+            // And it is genuinely a different glyph from the rotation, or this
+            // assertion would pass by coincidence.
+            assert!(
+                !ic.spin.contains(&ic.active),
+                "{:?}: the still glyph is also a spinner frame",
+                ic.tier
+            );
+        }
+    }
 
-        let (off_at, off_style) = find_cell(&render_frame(tasks(), false, ic), ic.active);
-        let (on_at, on_style) = find_cell(&render_frame(tasks(), true, ic), ic.active);
-
-        assert_eq!(off_at, on_at, "the marker moved between frames");
-
-        assert_eq!(off_style.fg, Some(ACTIVE));
-        assert!(!off_style.add_modifier.contains(Modifier::BOLD));
-
-        assert_eq!(on_style.fg, Some(crate::theme::ACTIVE_PULSE));
-        assert!(on_style.add_modifier.contains(Modifier::BOLD));
+    /// Every frame must be exactly one character wide. A multi-character frame
+    /// would shift the column outright, before any font question arises.
+    #[test]
+    fn every_spinner_frame_is_a_single_character() {
+        for ic in [
+            &crate::icons::NERD,
+            &crate::icons::UNICODE,
+            &crate::icons::ASCII,
+        ] {
+            for f in ic.spin {
+                assert_eq!(
+                    f.chars().count(),
+                    1,
+                    "{:?}: frame {f:?} is not one character",
+                    ic.tier
+                );
+            }
+            assert!(ic.spin.len() >= 2, "{:?}: nothing to animate", ic.tier);
+        }
     }
 
     /// Without this the pulse could quietly become a whole-screen flicker rather
@@ -2379,8 +2473,8 @@ mod tests {
 
         for ic in crate::icons::ALL {
             assert_eq!(
-                render_frame(tasks(), false, &ic),
-                render_frame(tasks(), true, &ic),
+                render_frame(tasks(), 0, &ic),
+                render_frame(tasks(), 3, &ic),
                 "tier {} repaints with nothing running",
                 crate::icons::name(ic.tier)
             );
@@ -2407,7 +2501,7 @@ mod tests {
                 input: crate::app::TextInput::new("half-typed"),
                 pending: crate::app::Pending::EditName { id: "b".into() },
             });
-            app.pulse_on = pulse_on;
+            app.spin_frame = if pulse_on { 1 } else { 0 };
 
             let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
             terminal.draw(|f| draw(f, &mut app, ic)).unwrap();

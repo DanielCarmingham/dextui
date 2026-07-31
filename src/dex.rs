@@ -228,10 +228,15 @@ impl Runner for ProcessRunner {
     fn run(&self, args: &[String]) -> Result<Output, String> {
         // `.args()` passes argv straight through with no shell involved, so task
         // names containing quotes, ampersands or newlines survive verbatim.
-        let out = Command::new("dex")
-            .args(args)
-            .output()
-            .map_err(|e| format!("could not run `dex`: {e}"))?;
+        let out = Command::new("dex").args(args).output().map_err(|e| {
+            // Distinguished because the remedies differ: one is "install it",
+            // the other is "it is installed and broken".
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "`dex` was not found on your PATH".to_string()
+            } else {
+                format!("could not run `dex`: {e}")
+            }
+        })?;
 
         Ok(Output {
             code: out.status.code().unwrap_or(-1),
@@ -239,6 +244,39 @@ impl Runner for ProcessRunner {
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
     }
+}
+
+/// Where to get dex, for the one message that has to explain the dependency.
+pub const HOME: &str = "https://dex.rip/";
+
+/// What to print when dex cannot be run at all.
+///
+/// dextui is a front end and nothing else -- every read and every write is a
+/// `dex` call -- so this is a hard stop rather than a degraded mode, and the
+/// message has to say what to install and where from.
+///
+/// It deliberately does **not** guess at PATH. `dex` being absent and `dex`
+/// being present but failing produce very different errors, and telling someone
+/// to check their PATH when the binary is sitting on it -- because, say, a node
+/// upgrade moved the runtime out from under it -- sends them the wrong way. The
+/// underlying error is shown instead, and it is left to say which happened.
+pub fn requires_dex(err: &str) -> String {
+    // Node stack traces run to dozens of lines, and the *first* is the least
+    // useful of them -- `node:internal/modules/cjs/loader:1520` says nothing a
+    // reader can act on, while the `Error:` line below it names the missing
+    // module. Prefer that line, and fall back to the first only if there is none.
+    let cause = err
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("Error:") || l.starts_with("error:"))
+        .or_else(|| err.lines().map(str::trim).find(|l| !l.is_empty()))
+        .unwrap_or(err);
+    format!(
+        "dextui: dex is required, but could not be run.\n\n    {cause}\n\n\
+         dextui is a viewer for dex -- it reads and writes tasks only through\n\
+         the dex CLI, so there is nothing it can show without it.\n\n\
+         Install it from {HOME} and check that `dex --version` works."
+    )
 }
 
 pub struct Dex {
@@ -775,6 +813,48 @@ mod tests {
         // uses a global store under ~/.config/dex.
         let fake = Fake::new("/Users/x/.config/dex/local\n", "", 0);
         assert_eq!(dex_with(&fake).store_dir().unwrap(), "/Users/x/.config/dex/local");
+    }
+
+    /// The whole point is that someone who has never heard of dex can act on
+    /// this, so the two facts that make it actionable are pinned.
+    #[test]
+    fn the_missing_dex_message_says_what_to_install_and_where_from() {
+        let m = requires_dex("`dex` was not found on your PATH");
+        assert!(m.contains(HOME), "no link to install from: {m}");
+        assert!(m.contains("dex is required"), "does not say it is required: {m}");
+        assert!(m.contains("not found on your PATH"), "loses the cause: {m}");
+    }
+
+    /// A dex that is installed but broken -- a node upgrade moving the runtime
+    /// out from under it, say -- prints a stack trace dozens of lines long, and
+    /// its **first** line is the least useful of them. This is the real stderr
+    /// from exactly that failure.
+    #[test]
+    fn a_stack_trace_is_reduced_to_the_line_that_names_the_cause() {
+        let trace = "node:internal/modules/cjs/loader:1520\n  throw err;\n  ^\n\n\
+                     Error: Cannot find module '/x/fnm/aliases/default/bin/dex'\n\
+                     \x20   at Module._resolveFilename (node:internal/modules/cjs/loader:1517:15)\n\
+                     \x20   at wrapResolveFilename (node:internal/modules/cjs/loader:1071:27)";
+        let m = requires_dex(trace);
+
+        assert!(m.contains("Cannot find module"), "lost the cause: {m}");
+        assert!(
+            !m.contains("cjs/loader:1520"),
+            "led with the least useful line: {m}"
+        );
+        assert!(!m.contains("at Module._resolveFilename"), "kept the noise: {m}");
+        assert!(m.contains(HOME));
+    }
+
+    /// It must not tell someone to check their PATH when the binary is on it.
+    /// That was the old message, and it sends a broken install the wrong way.
+    #[test]
+    fn the_message_does_not_guess_at_the_cause() {
+        let m = requires_dex("Error: Cannot find module '/x/y/bin/dex'");
+        assert!(
+            !m.to_lowercase().contains("path"),
+            "guessed at PATH when the cause says otherwise: {m}"
+        );
     }
 
     #[test]

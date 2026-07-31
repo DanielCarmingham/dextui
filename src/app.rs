@@ -175,11 +175,11 @@ pub struct App {
     pub detail_viewport_height: u16,
     /// Set when a refresh arrives while a dialog is open; applied on close.
     pub pending_refresh: bool,
-    /// Whether in-progress rows breathe at all. From the config, and the opt-out
+    /// Whether in-progress rows spin at all. From the config, and the opt-out
     /// reaches the event loop's timeout rather than only the colour.
     pub animate: bool,
-    /// Which of the pulse's two frames the renderer should draw.
-    pub pulse_on: bool,
+    /// Which frame of the in-progress rotation the renderer should draw.
+    pub spin_frame: usize,
     /// Clickable regions of the header row, as `(first_x, last_x, what)`.
     /// Rewritten every frame; empty while the search box owns the row, so a
     /// click can never act on a menu that is not on screen.
@@ -219,7 +219,7 @@ impl App {
             detail_viewport_height: 0,
             pending_refresh: false,
             animate: cfg.animate,
-            pulse_on: false,
+            spin_frame: 0,
             header_zones: Vec::new(),
         };
 
@@ -541,7 +541,7 @@ impl App {
             .any(|c| !c.completed)
     }
 
-    /// Whether anything on screen is currently breathing.
+    /// Whether anything on screen is currently turning.
     ///
     /// `animate` is tested first on purpose, so the opt-out costs nothing at all
     /// -- otherwise turning it off would still pay for the scan on every wakeup.
@@ -559,12 +559,19 @@ impl App {
     /// when the last in-progress task finishes, `is_animating` goes false and
     /// the marker returns to its base state in one final repaint rather than
     /// freezing bright.
-    pub fn pulse_tick(&mut self, elapsed: std::time::Duration) -> bool {
-        let want = self.is_animating() && crate::pulse::phase(elapsed);
-        if want == self.pulse_on {
+    pub fn pulse_tick(&mut self, elapsed: std::time::Duration, frames: usize) -> bool {
+        // Frame 0 is the resting glyph, so a stopped spinner settles on the same
+        // marker the header and the help show -- rather than freezing on
+        // whichever frame happened to be up.
+        let want = if self.is_animating() {
+            crate::pulse::frame(elapsed, frames)
+        } else {
+            0
+        };
+        if want == self.spin_frame {
             return false;
         }
-        self.pulse_on = want;
+        self.spin_frame = want;
         true
     }
 
@@ -1149,23 +1156,29 @@ mod tests {
 
         for ms in (0..5000).step_by(37) {
             assert!(
-                !app.pulse_tick(std::time::Duration::from_millis(ms)),
+                !app.pulse_tick(std::time::Duration::from_millis(ms), 10),
                 "an idle store asked to repaint at {ms}ms"
             );
         }
     }
 
-    /// The cost budget, written down. Two full breaths are four flips and
-    /// therefore four repaints -- an exact number, not "it ticks".
+    /// The cost budget, written down as an exact number rather than "it ticks".
+    ///
+    /// A spinner is far more expensive than the colour breath it replaced: 80ms
+    /// frames against a 700ms half-period is 12.5 repaints/sec rather than ~1.4,
+    /// roughly nine times the work **while a task is running**. That is the
+    /// price of motion in the glyph, and it is deliberate -- but it is only ever
+    /// paid then, which is what `an_idle_store_never_repaints_itself` guards.
     #[test]
-    fn a_running_store_repaints_exactly_once_per_phase() {
+    fn a_running_store_repaints_once_per_frame() {
         let mut app = app_with(vec![started("a")], "a");
 
-        let repaints = (0..=2800)
-            .filter(|ms| app.pulse_tick(std::time::Duration::from_millis(*ms)))
+        let repaints = (0..2800)
+            .filter(|ms| app.pulse_tick(std::time::Duration::from_millis(*ms), 10))
             .count();
 
-        assert_eq!(repaints, 4, "~1.4 repaints/sec is the whole budget");
+        // 2800ms / 80ms, less the tick at 0 which is already the resting frame.
+        assert_eq!(repaints, 34, "12.5 repaints/sec is the whole budget");
     }
 
     /// `started_at` survives completion, so a naive `started_at.is_some()` would
@@ -1189,7 +1202,7 @@ mod tests {
 
         assert!(!app.is_animating());
         for ms in (0..3000).step_by(50) {
-            assert!(!app.pulse_tick(std::time::Duration::from_millis(ms)), "{ms}ms");
+            assert!(!app.pulse_tick(std::time::Duration::from_millis(ms), 10), "{ms}ms");
         }
     }
 
@@ -1209,23 +1222,23 @@ mod tests {
         assert!(!app.is_animating());
     }
 
-    /// When the last in-progress task finishes, the marker must settle back to
-    /// its base state rather than freezing bright.
+    /// When the last in-progress task finishes, the spinner must settle rather
+    /// than freeze on whichever frame happened to be up.
     #[test]
-    fn the_pulse_settles_when_the_last_task_stops() {
+    fn the_spinner_settles_when_the_last_task_stops() {
         let mut app = app_with(vec![started("a")], "a");
-        app.pulse_tick(std::time::Duration::from_millis(700));
-        assert!(app.pulse_on, "fixture should be mid-breath");
+        app.pulse_tick(std::time::Duration::from_millis(720), 10);
+        assert_eq!(app.spin_frame, 9, "fixture should be mid-rotation");
 
         let mut done = started("a");
         done.completed = true;
         app.apply_tasks(vec![done]);
 
         assert!(
-            app.pulse_tick(std::time::Duration::from_millis(700)),
+            app.pulse_tick(std::time::Duration::from_millis(720), 10),
             "the settling frame is a repaint"
         );
-        assert!(!app.pulse_on);
+        assert_eq!(app.spin_frame, 0, "must return to rest, not freeze");
     }
 
     #[test]

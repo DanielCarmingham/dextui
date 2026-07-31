@@ -66,7 +66,7 @@ actually in use — outside a git repo, dex falls back to a shared global one.
 | marker | state |
 | --- | --- |
 | `◇` | todo |
-| `►` | in progress — and it breathes gently, so you can find it |
+| `⠋` | in progress — and it spins, so you can find it |
 | `◆` | done |
 | `×` | blocked |
 
@@ -143,7 +143,7 @@ you like. A single newline stays a line break and leading indentation is
 preserved, so a plain-text description that is not markdown at all still looks
 the way you typed it.
 
-`E` opens the description in `$EDITOR` (then `VISUAL`, then `vi`). Quitting
+`e` opens the description in `$EDITOR` (then `VISUAL`, then `vi`). Quitting
 without changing anything writes nothing, so it will not touch `updated_at`.
 
 ## Configuration
@@ -180,7 +180,7 @@ sort_reversed = false   # flips it: newest→oldest, updated→stalest
 filter = "pending"      # pending | active | all
 wrap = true
 icons = "unicode"       # nerd | unicode | ascii
-animate = true          # breathe the in-progress marker
+animate = true          # spin the in-progress marker
 ```
 
 A project file need only mention what it changes:

@@ -37,7 +37,7 @@ pub struct Config {
     pub filter: Filter,
     pub wrap: bool,
     pub icons: Icons,
-    /// Whether in-progress rows breathe. Off restores the pre-animation event
+    /// Whether in-progress rows spin. Off restores the pre-animation event
     /// loop exactly -- see `pulse::poll_timeout`.
     pub animate: bool,
 }
