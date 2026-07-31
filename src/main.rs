@@ -91,6 +91,24 @@ fn parse_args() -> Result<Command, String> {
     parse(&args)
 }
 
+/// What to print when there is no terminal to draw into.
+///
+/// `ratatui::init` **panics** rather than returning an error when the terminal
+/// cannot be put into raw mode, so without this check piping dextui anywhere --
+/// or running it from a script, a CI job, or an editor's task runner -- ends in
+/// a Rust backtrace. The docs promised a blank screen; a panic looks like a bug
+/// in the app rather than a misuse of it.
+///
+/// `selftest` exists precisely so the data path can be inspected without a
+/// terminal, so it is worth pointing at here.
+fn requires_a_terminal() -> String {
+    "dextui: this needs a real terminal, and stdout is not one.\n\n\
+     It draws a full-screen interface, so it cannot render into a pipe, a file,\n\
+     or a job with no terminal attached.\n\n\
+     To inspect the data without a terminal, run `dextui selftest`."
+        .to_string()
+}
+
 fn parse(args: &[String]) -> Result<Command, String> {
     let mut words: Vec<&str> = Vec::new();
     let mut force = false;
@@ -222,6 +240,20 @@ fn main() -> std::io::Result<()> {
             return Ok(());
         }
         Command::Run | Command::SelfTest => {}
+    }
+
+    // Ahead of the dex preflight, and ahead of `ratatui::init` which panics
+    // rather than erroring when there is no terminal to put into raw mode.
+    // Nothing below can succeed without one, so spending a ~180ms dex call to
+    // report a different problem first would only send someone the wrong way.
+    //
+    // `selftest` is exempt: printing the data path without a terminal is the
+    // entire reason it exists.
+    if matches!(command, Command::Run)
+        && !std::io::IsTerminal::is_terminal(&std::io::stdout())
+    {
+        eprintln!("{}", requires_a_terminal());
+        std::process::exit(1);
     }
 
     let dex = Arc::new(Dex::real());
@@ -841,6 +873,22 @@ fn submit(app: &mut App, p: Prompt, dex: &Arc<Dex>, tx: &Sender<Msg>) {
 
 #[cfg(test)]
 mod tests {
+    /// The message has to leave someone with something to do. `selftest` is the
+    /// answer for the case that produces this -- a script or CI job wanting the
+    /// data without a terminal -- so it must be named, and must stay a real
+    /// command: `every_command_in_the_usage_text_is_actually_accepted` covers
+    /// the usage text, not this string.
+    #[test]
+    fn the_no_terminal_message_offers_a_way_forward() {
+        let m = super::requires_a_terminal();
+        assert!(m.contains("real terminal"), "does not say what is wrong: {m}");
+        assert!(m.contains("dextui selftest"), "offers no alternative: {m}");
+        assert!(
+            matches!(super::parse(&["selftest".to_string()]), Ok(super::Command::SelfTest)),
+            "the message names a command that is not accepted"
+        );
+    }
+
     use super::*;
 
     fn parsed(args: &[&str]) -> Result<Command, String> {

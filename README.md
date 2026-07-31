@@ -24,7 +24,8 @@ the code is built around.
   run. `dex --version` should print something.
 - **Rust 1.85 or newer** to build (this crate is edition 2024). `rustup` from
   [rustup.rs](https://rustup.rs) is the usual way in.
-- **A real terminal.** Piping it somewhere gets you a blank screen.
+- **A real terminal.** Piping it somewhere gets you an explanation and exit 1.
+  Use `dextui selftest` to see the data without one.
 - Optional: a [Nerd Font](https://www.nerdfonts.com/) if you want the fancier
   glyph set. The default works in any terminal.
 
@@ -220,7 +221,14 @@ dextui selftest            Print the data pipeline as text (no TUI)
 
 ## Troubleshooting
 
-**Blank screen** — it needs a real terminal; it cannot render into a pipe.
+**"this needs a real terminal"** — it draws a full-screen interface, so it cannot
+render into a pipe, a file, or a job with no terminal attached. `dextui selftest`
+prints the same data as text.
+
+**"dex is required"** — every read and write goes through the dex CLI. If the
+message says dex *is* at a path but could not be started, dex itself is fine and
+its interpreter is not: dex is a Node script, and a node upgrade can move the
+runtime out from under it. Reinstalling dex under the current node fixes it.
 
 **Wrong tasks** — dex resolves its store from the working directory, and falls
 back to a *global* store outside a git repo. `dex dir` shows which one is in use.

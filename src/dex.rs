@@ -230,9 +230,9 @@ impl Runner for ProcessRunner {
         // names containing quotes, ampersands or newlines survive verbatim.
         let out = Command::new("dex").args(args).output().map_err(|e| {
             // Distinguished because the remedies differ: one is "install it",
-            // the other is "it is installed and broken".
+            // the other is "it is installed and cannot start".
             if e.kind() == std::io::ErrorKind::NotFound {
-                "`dex` was not found on your PATH".to_string()
+                why_not_found(&std::env::var("PATH").unwrap_or_default())
             } else {
                 format!("could not run `dex`: {e}")
             }
@@ -248,6 +248,34 @@ impl Runner for ProcessRunner {
 
 /// Where to get dex, for the one message that has to explain the dependency.
 pub const HOME: &str = "https://dex.rip/";
+
+/// Where `name` resolves on `path`, if anywhere. `path` is a `PATH`-style
+/// colon-separated list.
+///
+/// Needed because `ErrorKind::NotFound` from an exec is **ambiguous**: it means
+/// "nothing to run" whether the binary is absent *or* present with a `#!` line
+/// pointing at an interpreter that is absent. dex is a Node script, so the
+/// second is a real case -- a node upgrade moving the runtime out from under it
+/// produces a `dex` sitting on the PATH that cannot start. Telling someone to
+/// install a thing they can see with `which` sends them the wrong way.
+fn lookup(name: &str, path: &str) -> Option<std::path::PathBuf> {
+    path.split(':')
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| std::path::Path::new(dir).join(name))
+        .find(|p| p.is_file())
+}
+
+/// Why `dex` could not be started, said as precisely as the evidence allows.
+fn why_not_found(path: &str) -> String {
+    match lookup("dex", path) {
+        Some(p) => format!(
+            "`dex` is at {} but could not be started -- its interpreter is \
+             probably missing (check the `#!` line)",
+            p.display()
+        ),
+        None => "`dex` was not found on your PATH".to_string(),
+    }
+}
 
 /// What to print when dex cannot be run at all.
 ///
@@ -855,6 +883,45 @@ mod tests {
             !m.to_lowercase().contains("path"),
             "guessed at PATH when the cause says otherwise: {m}"
         );
+    }
+
+    /// `ErrorKind::NotFound` from an exec cannot tell "no such binary" from
+    /// "binary present, interpreter missing" -- and dex is a Node script, so the
+    /// second is real. Resolving the name ourselves is what separates them.
+    #[test]
+    fn a_present_but_unstartable_dex_is_not_reported_as_missing() {
+        let dir = std::env::temp_dir().join("dextui-lookup-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dex = dir.join("dex");
+        std::fs::write(&dex, "#!/nonexistent/node\n").unwrap();
+
+        let msg = why_not_found(dir.to_str().unwrap());
+        assert!(
+            msg.contains("could not be started"),
+            "did not recognise a present dex: {msg}"
+        );
+        assert!(msg.contains("interpreter"), "no actionable cause: {msg}");
+        assert!(
+            !msg.contains("not found on your PATH"),
+            "still claims it is missing: {msg}"
+        );
+        assert!(msg.contains(dex.to_str().unwrap()), "does not say where: {msg}");
+
+        std::fs::remove_file(&dex).ok();
+    }
+
+    /// The genuinely-absent case must still say so plainly.
+    #[test]
+    fn an_absent_dex_is_reported_as_missing() {
+        let msg = why_not_found("/nonexistent/a:/nonexistent/b");
+        assert_eq!(msg, "`dex` was not found on your PATH");
+    }
+
+    /// An empty or unset PATH must not panic or claim to have found something.
+    #[test]
+    fn an_empty_path_is_not_a_match() {
+        assert_eq!(lookup("dex", ""), None);
+        assert_eq!(lookup("dex", ":::"), None);
     }
 
     #[test]
