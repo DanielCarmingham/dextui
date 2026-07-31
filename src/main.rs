@@ -380,7 +380,7 @@ fn main() -> std::io::Result<()> {
         .map(|w| w.path.clone());
 
     // Every OTHER registered worktree -- the selected one keeps the watcher
-    // and 10s safety poll set up above, exactly as today.
+    // and stat-gated 10s safety net set up above, exactly as today.
     let other_worktrees: Vec<String> = app
         .repos
         .iter()
@@ -421,10 +421,10 @@ fn main() -> std::io::Result<()> {
     app.worktree_counts
         .insert(store_dir.clone(), app::counts_for(&app.tasks));
 
-    // Every other registered store's watcher: notify only, with no extra
-    // polling loop added here beyond what `watch::spawn` already does per
-    // directory. Its counts are re-read only when that message arrives --
-    // never on a fixed cadence for the whole set, which is the "ten node
+    // Every other registered store's watcher, via the same stat-gated safety
+    // net `watch::spawn` gives the selected store -- no extra polling loop
+    // added here, and no `dex list` at all until a store's own fingerprint
+    // actually changes. That is what keeps this from becoming the "ten node
     // spawns every ten seconds forever" alternative CLAUDE.md rules out.
     // `_other_store_watchers` must stay alive for the whole run; dropping it
     // stops every one of these notifications.

@@ -45,7 +45,7 @@ and to check behaviour where no interactive terminal exists.
 | `src/tree.rs` | Flat list → hierarchy, search and status filtering, row prefixes. |
 | `src/app.rs` | All view state, the refresh-survival rules, and the header counts. |
 | `src/ui.rs` | Immediate-mode rendering, and `selftest`. |
-| `src/watch.rs` | Debounced FS events plus the safety poll. |
+| `src/watch.rs` | Debounced FS events plus the stat-gated safety net. |
 | `src/pulse.rs` | The spinner clock, and the guard on its idle cost. |
 | `src/main.rs` | Event loop and key handling. |
 
@@ -98,9 +98,28 @@ These were all discovered the hard way; do not re-derive them.
 
 **Reads** are triggered by a `notify` watcher on the store directory, but the
 watcher only reports *that* something changed. The actual data always comes from
-`dex list --json --all`. This keeps us off dex's private on-disk format while
-costing nothing at all when the store is idle. A 10s safety poll backstops it,
-because macOS can drop events for atomic-rename writes.
+`dex list --json --all`. This keeps us off dex's private on-disk format.
+
+A 10s safety net backstops the watcher, because macOS can drop notify events
+for atomic-rename writes (write a temp file, rename it over the original —
+exactly how dex writes `tasks.jsonl`). **This net used to fire blindly**: every
+10s, whether or not anything had actually changed, it told the caller to
+re-read, which meant a `dex list` call (~180ms of Node startup) on a fixed
+timer for as long as the app ran. That is not "idle cost zero" — it is one
+subprocess spawn every 10 seconds, forever, per watched store. It went
+unnoticed because nothing had ever measured it; the app's other zero-idle-cost
+claims (`pulse.rs`, the event loop's poll timeout) are all about redraw cost,
+which this never touched.
+
+It is now **stat-gated**: on each tick, `watch::stat` reads `tasks.jsonl`'s
+modification time, length and inode (a few microseconds, no subprocess) and
+only tells the caller to re-read when that fingerprint actually disagrees with
+the one from the last tick. An atomic rename changes all three, so this still
+catches the dropped-event case the net exists for — it just no longer pays for
+a `dex list` to discover, almost always, that nothing happened. An idle store
+now costs nothing until something really changes. This applies to every store
+the app watches, not just the one currently selected — `watch::spawn_many`
+gives each one its own copy of the same stat-gated net.
 
 **Writes** always shell out to the dex CLI — never to `tasks.jsonl` directly — so
 dex's validation and its GitHub/Shortcut sync hooks always run.
