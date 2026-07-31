@@ -518,17 +518,54 @@ fn main() -> std::io::Result<()> {
         // flip, which can only ever shorten it -- when nothing is running this
         // is the same 100ms it has always been, and the idle cost stays zero.
         if event::poll(pulse::poll_timeout(app.is_animating(), epoch.elapsed()))? {
-            match event::read()? {
-                CtEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                    handle_key(&mut app, key, &dex, &tx);
-                    dirty = true;
+            // **Drained, not one per frame.** Handling a single event and
+            // then repainting looks equivalent and is not: mouse input arrives
+            // in bursts -- `EnableMouseCapture` turns on button-event
+            // tracking, which reports motion for every cell the pointer
+            // crosses while held -- and a redraw of a full tree plus a
+            // rendered-markdown detail pane is not free. Unread bytes sit in
+            // the tty input buffer, which is finite (4 KB here); once it fills
+            // the kernel drops bytes, and a byte lost inside `\e[<0;60;6M`
+            // leaves a truncated escape sequence that crossterm reads as a
+            // coordinate nobody sent, or as a bare `\e` keypress.
+            //
+            // What is measured and what is not, since the difference matters:
+            // the overflow was reproduced only by writing thousands of bytes
+            // in one go, which is an injection artifact -- 600 events
+            // delivered at a realistic 1000-2000/s all arrived intact, and the
+            // same 600 in a single 7 KB write killed the process. So this is a
+            // headroom fix, not a diagnosed crash. It is still the right
+            // shape: one repaint per burst rather than per event is fewer
+            // frames, lower latency, and a buffer that stays empty while the
+            // app is briefly busy.
+            //
+            // Terminates promptly -- `poll(ZERO)` is false the moment input
+            // pauses.
+            loop {
+                match event::read()? {
+                    CtEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                        handle_key(&mut app, key, &dex, &tx);
+                        dirty = true;
+                    }
+                    CtEvent::Mouse(m) => {
+                        handle_mouse(&mut app, m);
+                        dirty = true;
+                    }
+                    CtEvent::Resize(..) => dirty = true,
+                    _ => {}
                 }
-                CtEvent::Mouse(m) => {
-                    handle_mouse(&mut app, m);
-                    dirty = true;
+
+                // Anything that is about to hand the terminal to someone else
+                // stops the drain: the rest of the queued input belongs to
+                // `$EDITOR`, not to us. Same reason this loop polls rather
+                // than running a reader thread.
+                if app.should_quit
+                    || app.pending_editor.is_some()
+                    || app.pending_config_edit
+                    || !event::poll(std::time::Duration::ZERO)?
+                {
+                    break;
                 }
-                CtEvent::Resize(..) => dirty = true,
-                _ => {}
             }
         }
 

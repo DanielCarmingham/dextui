@@ -26,10 +26,11 @@
 //! in raw mode with the mouse captured is worse than no probe.
 
 use std::io::{self, Write};
+use std::time::Duration;
 
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{
-    read, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
+    poll, read, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
     MouseEvent, MouseEventKind,
 };
 use crossterm::style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor};
@@ -71,37 +72,55 @@ fn run(out: &mut io::Stdout) -> io::Result<()> {
     draw(out, pointer, &log, counts)?;
 
     loop {
-        match read()? {
-            Event::Key(k)
-                if k.kind == KeyEventKind::Press
-                    && matches!(k.code, KeyCode::Char('q') | KeyCode::Esc) =>
-            {
-                return Ok(());
+        // Everything already queued is taken before redrawing.
+        //
+        // This matters far more here than in the app: `?1003h` reports motion
+        // for every cell the pointer crosses, and `draw` repaints the entire
+        // screen. One repaint per event caps throughput low enough that a fast
+        // trackpad can outrun it, and the unread bytes then fill the 4 KB tty
+        // input buffer until the kernel drops some -- a byte lost inside
+        // `\e[<35;60;10M` leaves a truncated sequence, which crossterm reads
+        // as a position nobody pointed at, or as the bare `\e` that quits.
+        //
+        // A probe that can misreport under load is worse than none, since it
+        // is trusted precisely when something already looks impossible.
+        loop {
+            match read()? {
+                Event::Key(k)
+                    if k.kind == KeyEventKind::Press
+                        && matches!(k.code, KeyCode::Char('q') | KeyCode::Esc) =>
+                {
+                    return Ok(());
+                }
+
+                Event::Mouse(m) => {
+                    pointer = Some((m.column, m.row));
+                    match m.kind {
+                        MouseEventKind::Moved => counts.2 += 1,
+                        MouseEventKind::ScrollUp
+                        | MouseEventKind::ScrollDown
+                        | MouseEventKind::ScrollLeft
+                        | MouseEventKind::ScrollRight => counts.1 += 1,
+                        _ => counts.0 += 1,
+                    }
+                    // Motion is noisy and says nothing on its own -- the
+                    // crosshair already shows where the pointer is. Only
+                    // events you *did* are worth a line.
+                    if !matches!(m.kind, MouseEventKind::Moved) {
+                        log.insert(0, describe(&m));
+                        log.truncate(HISTORY);
+                    }
+                }
+
+                _ => {}
             }
 
-            Event::Mouse(m) => {
-                pointer = Some((m.column, m.row));
-                match m.kind {
-                    MouseEventKind::Moved => counts.2 += 1,
-                    MouseEventKind::ScrollUp
-                    | MouseEventKind::ScrollDown
-                    | MouseEventKind::ScrollLeft
-                    | MouseEventKind::ScrollRight => counts.1 += 1,
-                    _ => counts.0 += 1,
-                }
-                // Motion is noisy and says nothing on its own -- the crosshair
-                // already shows where the pointer is. Only events you *did*
-                // are worth a line.
-                if !matches!(m.kind, MouseEventKind::Moved) {
-                    log.insert(0, describe(&m));
-                    log.truncate(HISTORY);
-                }
-                draw(out, pointer, &log, counts)?;
+            if !poll(Duration::ZERO)? {
+                break;
             }
-
-            Event::Resize(..) => draw(out, pointer, &log, counts)?,
-            _ => {}
         }
+
+        draw(out, pointer, &log, counts)?;
     }
 }
 
