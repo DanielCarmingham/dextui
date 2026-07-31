@@ -207,6 +207,28 @@ is a hard stop rather than a silent empty registry" rule on load — but
 write-side, because unlike every runtime toggle, a registration is meant to
 survive the run that made it.
 
+**`repos.toml` is written through a rename, never in place.** `Registry::save`
+writes `repos.toml.tmp` beside the target and renames it over, which is atomic
+within a filesystem — hence *beside*, since a temp on another volume degrades
+to copy-then-delete and the guarantee is gone. `std::fs::write` truncates and
+then writes, so a crash, a full disk or a second instance mid-write can leave
+an **empty** file, and `parse` reads empty as a legitimately empty registry,
+silently; the next `a` then persists one entry over everything that was there.
+That is the third distinct route into the same silent data loss on this
+feature — `load` refusing to treat an unreadable file as empty and
+`add_and_save` re-reading before it writes were the first two — and it is the
+one that also closes the concurrent-instance race properly rather than merely
+narrowing it.
+
+**Registering writes two things: the file and the row.** `a` used to do only
+the first, so the repo it had just registered did not appear until the next
+launch, against a README that promises switching between repos without
+restarting. `register_repo` builds the `repos::Repo` from the `git worktree
+list` the same keypress already ran, and re-sorts by path because
+`Registry::add` keeps the file sorted — otherwise the row would move the first
+time you restarted. Its per-store watcher, though, is still only set up at
+startup: a repo registered mid-run has no watcher until the next launch.
+
 **Every verb that can target a chosen store goes through `Dex::for_store` /
 `for_store_with`** — see the `--storage-path` bullet above for why a wrong
 store is silent, and why that is what makes this the *only* place the flag
@@ -229,7 +251,21 @@ stat-gated net `watch::spawn` gives the selected one, so a change in a
 worktree nobody is looking at is picked up exactly as promptly as a change in
 the one on screen. `App::worktree_counts`, keyed by store directory, is where
 the result lands — nothing renders it yet; it exists for whichever task draws
-per-repo counts in the sidebar next.
+per-repo counts in the sidebar next. The map is therefore **write-only today**,
+and the README must not imply otherwise: switching to a worktree still pays the
+same synchronous `dex list` as any other store, cached counts or not.
+
+**A task list is tagged with the store it came from.** `refresh()` spawns a
+thread holding a clone of the `Arc<Dex>` current at the time, and
+`switch_store` replaces that `Arc` on the main loop — so a refresh spawned
+just before a switch lands just after it. Untagged, that painted the *old*
+store's tasks under the *new* store's label, which is the silent-wrong-store
+failure this file treats as worse than a crash. `Msg::Tasks` carries the store
+directory and `handle_msg` drops anything that is not `app.store_dir`. Both
+`App::new` and `App::load_store` take that directory and derive `store_label`
+from it rather than accepting a label, so the tag and the header cannot be set
+to two different stores; and `refresh` takes the whole `&App` for the same
+reason.
 
 **`repos_pane_above = 0` does not mean "no repo pane" — it means "never as a
 *third* pane."** `src/config.rs`'s own doc comment says only that it "matches
@@ -576,9 +612,13 @@ layout that reverted on its own would read as a fault.
 Small screens are the point. The pair of README screenshots at 60 columns is
 there because this is what makes the app usable over SSH from a phone.
 
-The **`[1] [2]` tabs** are the LazyGit/gitui idea, and they earn their place
-only here: with both panes on screen there is nothing to navigate *to*, and the
-numbers would be decoration on a row that already sheds elements to fit. They
+The **`[1] [2] [3]` tabs** are the LazyGit/gitui idea, and they earn their place
+only here: with every pane on screen there is nothing to navigate *to*, and the
+numbers would be decoration on a row that already sheds elements to fit. There
+are three because the repo sidebar is a pane you can be looking at *alone*;
+with only two, the row you were on had no tab of its own while `3` worked
+anyway, unadvertised. `TABS` is the single list `tab_spans` draws from and
+`tab_zone` matches clicks against, so a tab cannot disagree with its key. They
 are **reserved before the ladder runs** rather than competing inside it, so they
 outlive the sort label and the filter menu — a rung that dropped them would hide
 the only sign that there is a way back. Below `IDENTITY_FLOOR` columns of
@@ -632,6 +672,18 @@ never lands on it or leaves it. `App::toggle_focus` only ever alternates tree
 and detail, so pressing `Tab` from the sidebar always returns to the tree
 rather than bouncing between two panes it was never documented to cross. See
 "Repos, worktrees and the registry" below for its own key model.
+
+**Both surfaces that advertise keys have to be kept honest, and a test does
+it.** `SHORTCUTS` (the status strip) and `HELP` (the `?` dialog) name the same
+keys to the same person, so `the_shortcut_strip_and_the_help_dialog_agree`
+holds them against each other. The strip is focus-aware for exactly one
+reason: `a` creates a subtask in the tree and *registers a repo* in the
+sidebar, so `REPO_SHORTCUTS` replaces it there — one strip claiming `a sub`
+beside a focused sidebar was not a shorter truth but a wrong one. The dialog
+is sized from `HELP` itself rather than a constant; the constant was 16 rows
+against ~30 lines of text, so two thirds of what `?` documented had never been
+readable at any terminal size, and adding a line to `HELP` is not documenting
+a key unless someone can see it.
 
 **`w` toggles wrapping, and that is not cosmetic.** Wrapping and horizontal
 scrolling are mutually exclusive in ratatui: `Paragraph::scroll((y, x))` honours
@@ -819,6 +871,15 @@ its own; the events come from crossterm.
 
 - **Drag the divider** to resize the panes, clamped to 20–80% so neither can be
   dragged away.
+- **`App::pane_at` must know about all three panes.** It answered `Focus::Tree`
+  for the sidebar's own columns — they sit left of `divider_x` — so a click on
+  a repo row moved the *task* selection and the wheel over the sidebar scrolled
+  the tree, both of them the selection-disturbing behaviour this app exists to
+  avoid. The renderer publishes `repos_right` exactly the way it publishes
+  `divider_x`, and only at `Panes::Three`: a stale width from an earlier wide
+  frame would be an invisible dead zone down the left of the tree. A click
+  there **selects only** — switching store stays on `enter`/`l`, because a
+  stray click must not spend a ~180ms dex call and replace both other panes.
 - **Wheel** acts on the pane under the pointer regardless of focus, which is
   what people expect. Both panes slide their **content** with the gesture.
 
