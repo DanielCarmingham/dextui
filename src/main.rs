@@ -9,6 +9,8 @@ mod markdown;
 mod pulse;
 mod registry;
 mod repos;
+#[cfg(test)]
+mod test_support;
 mod theme;
 mod tree;
 mod ui;
@@ -25,7 +27,7 @@ use crossterm::event::{
 };
 use crossterm::execute;
 
-use app::{App, Focus, Mode, Panes, Pending, Prompt, TextInput};
+use app::{App, Focus, Mode, Pending, Prompt, TextInput};
 use dex::{store_label, Dex, Task};
 
 /// Everything the main loop reacts to, from every thread, on one channel.
@@ -662,27 +664,6 @@ fn select_worktree_under_cursor(app: &mut App) {
     }
 }
 
-/// Focuses the repo pane, forcing it into view when the current width would
-/// otherwise draw nothing there.
-///
-/// `Panes::Two` has no room for the sidebar at all -- it is a genuine third
-/// pane, not one of the two the width-based ladder already reserves space
-/// for -- so without this, `3` would set focus to a pane nothing draws,
-/// leaving j/k/enter driving a cursor the user cannot see. Forces the same
-/// single-pane view `z` reaches explicitly, which `Panes::One`'s render
-/// branch already knows how to show for whichever pane has focus. Only
-/// `Two` needs the help: `Panes::One` already draws whichever pane has
-/// focus regardless of `zoom`, and `Panes::Three` already has room, so
-/// forcing zoom there would needlessly turn an environmental "the terminal
-/// happens to be narrow" state into a sticky manual one that outlives this
-/// keypress.
-fn focus_repos(app: &mut App) {
-    app.focus = Focus::Repos;
-    if app.panes() == Panes::Two {
-        app.zoom = Some(true);
-    }
-}
-
 fn refresh(dex: &Arc<Dex>, tx: &Sender<Msg>) {
     let dex = Arc::clone(dex);
     let tx = tx.clone();
@@ -817,7 +798,12 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         // for no benefit.
         KeyCode::Char('1') => app.show_tree(),
         KeyCode::Char('2') => app.show_detail(),
-        KeyCode::Char('3') => focus_repos(app),
+        // Whether this actually has anywhere to draw is a render-time
+        // question, not a key-time one -- `App::single_pane` treats a
+        // repo-focused pane at a width with no room reserved for it as a
+        // single pane in its own right, so this needs no special casing
+        // here and nothing to undo when focus or width changes back.
+        KeyCode::Char('3') => app.focus = Focus::Repos,
 
         KeyCode::Right | KeyCode::Char('l') => match app.focus {
             // Falls through to the detail only when there was nothing to open --
@@ -1285,55 +1271,20 @@ mod tests {
         assert!(task_id.strip_prefix("repo:").is_none());
     }
 
-    fn ladder(width: u16) -> App {
+    /// `3` itself is now the plain, unconditional field write the original
+    /// brief specified -- whether the repo pane actually has anywhere to draw
+    /// is a render-time question `App::single_pane`/`App::panes` answer on
+    /// their own (see their tests in `app.rs`), not something this key needs
+    /// to work out. This just pins that the key does what it says and
+    /// nothing more, e.g. it must not also touch `zoom`.
+    #[test]
+    fn the_3_key_only_sets_focus() {
         let mut app = App::new(vec![], "t".into(), config::Config::default());
-        app.single_pane_below = 80;
-        app.repos_pane_above = 110;
-        app.terminal_width = width;
-        app
-    }
+        assert_eq!(app.zoom, None);
 
-    /// The bug this closes: at `Panes::Two` (the default 80-110 column
-    /// range) nothing draws the repos pane at all, so `3` used to set focus
-    /// to a pane with no content on screen and j/k/G/enter would drive an
-    /// invisible cursor. Forcing the same single-pane view `z` reaches
-    /// explicitly is what actually makes the pane appear.
-    #[test]
-    fn pressing_3_at_two_pane_width_forces_the_sidebar_into_view() {
-        let mut app = ladder(90);
-        assert_eq!(app.panes(), Panes::Two, "fixture should land squarely in the gap");
-
-        focus_repos(&mut app);
+        app.focus = Focus::Repos;
 
         assert_eq!(app.focus, Focus::Repos);
-        assert_eq!(app.panes(), Panes::One, "must actually become visible");
-    }
-
-    /// Already has room: forcing zoom here would be pointless, and would
-    /// needlessly make `1`/`2` behave as if the user had pressed `z`.
-    #[test]
-    fn pressing_3_at_three_pane_width_does_not_force_zoom() {
-        let mut app = ladder(200);
-        assert_eq!(app.panes(), Panes::Three);
-
-        focus_repos(&mut app);
-
-        assert_eq!(app.focus, Focus::Repos);
-        assert_eq!(app.zoom, None, "already had room; zoom must not be touched");
-    }
-
-    /// The width alone already gives a single pane here -- pinning `zoom`
-    /// anyway would turn an environmental state into a sticky manual one
-    /// that outlives this keypress, so a later resize back past
-    /// `single_pane_below` would no longer restore the split on its own.
-    #[test]
-    fn pressing_3_at_an_already_narrow_width_does_not_pin_zoom() {
-        let mut app = ladder(40);
-        assert_eq!(app.panes(), Panes::One, "fixture should already be single-pane");
-
-        focus_repos(&mut app);
-
-        assert_eq!(app.focus, Focus::Repos);
-        assert_eq!(app.zoom, None, "width alone already gave single-pane; no need to pin it");
+        assert_eq!(app.zoom, None, "must not reach for zoom -- that used to be sticky");
     }
 }

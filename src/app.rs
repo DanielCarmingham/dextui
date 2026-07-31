@@ -750,11 +750,34 @@ impl App {
     ///
     /// Measured against the width the renderer last published, so it follows a
     /// terminal resized under the running app.
+    ///
+    /// Also true whenever the repo pane is focused at a width in the
+    /// `Panes::Two` gap -- wide enough to split, not wide enough for a third
+    /// pane. That width reserves no room for the sidebar at all, so without
+    /// this the repo pane would simply not be drawn: reachable by resizing
+    /// alone with no keypress in between (hold `Focus::Repos` at `Three`,
+    /// then narrow past `repos_pane_above`), which a key-handler-only fix
+    /// cannot close because no key is pressed. Framing it as "one pane,
+    /// chosen by focus" rather than a separate flag also means nothing needs
+    /// to be undone when focus or width changes back -- unlike pinning
+    /// `zoom`, which stays forced long after the terminal that required it is
+    /// gone, `zoom` itself still outranks this (checked first, same as the
+    /// width rule), so `z` remains the escape hatch out of it.
     pub fn single_pane(&self) -> bool {
-        match self.zoom {
-            Some(z) => z,
-            None => self.single_pane_below > 0 && self.terminal_width < self.single_pane_below,
+        if let Some(z) = self.zoom {
+            return z;
         }
+        if self.single_pane_below > 0 && self.terminal_width < self.single_pane_below {
+            return true;
+        }
+        self.focus == Focus::Repos && !self.repos_pane_fits()
+    }
+
+    /// Whether the current width reserves room for the sidebar as its own
+    /// pane. Shared between `single_pane` and `panes` so the two conditions
+    /// that decide "is there room for a third pane" cannot drift apart.
+    fn repos_pane_fits(&self) -> bool {
+        self.repos_pane_above > 0 && self.terminal_width >= self.repos_pane_above
     }
 
     /// See [`Panes`].
@@ -762,7 +785,7 @@ impl App {
         if self.single_pane() {
             return Panes::One;
         }
-        if self.repos_pane_above > 0 && self.terminal_width >= self.repos_pane_above {
+        if self.repos_pane_fits() {
             return Panes::Three;
         }
         Panes::Two
@@ -892,11 +915,18 @@ impl App {
         self.progress = tree::subtree_progress(&self.tasks);
         self.expand_all();
         self.rebuild();
-        // `rebuild` already replaces a selection that is not among the new
-        // tree's visible ids, which every id here trivially is not -- but
-        // making the reset explicit here means this behaviour does not
-        // depend on staying in sync with `rebuild`'s internals.
-        self.selected = self.first_visible_id();
+        // Deliberately NOT `self.selected = self.first_visible_id()` here.
+        // The real call sequence a store switch drives is `select_worktree`
+        // (which restores a remembered task id from `task_memory` for the
+        // worktree being entered) followed immediately by this method, so an
+        // unconditional reset here would silently make Task 6's per-worktree
+        // cursor memory dead code every time -- it would never survive past
+        // the `load_store` that always follows it in practice. `rebuild`
+        // already keeps `self.selected` exactly when it both exists in the
+        // new store and is visible under the current filter, and replaces it
+        // with the first visible id otherwise -- the same rule every other
+        // selection change in this app follows, so there is nothing left to
+        // repeat here.
         self.tree_offset = 0;
         self.detail_scroll = (0, 0);
     }
@@ -1188,6 +1218,99 @@ mod tests {
         app.terminal_width = 200;
         app.zoom = Some(true);
         assert_eq!(app.panes(), Panes::One);
+    }
+
+    fn ladder(width: u16) -> App {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.single_pane_below = 80;
+        app.repos_pane_above = 110;
+        app.terminal_width = width;
+        app
+    }
+
+    /// The bug this closes: `Panes::Two` (the 80-110 gap by default)
+    /// reserves no room for the sidebar at all, so before this, focusing it
+    /// there left `j`/`k`/`G`/`enter` driving a cursor nothing on screen
+    /// showed. Framed as "one pane, chosen by focus" rather than a forced
+    /// `zoom`, so there is nothing to undo when focus or width changes back.
+    #[test]
+    fn repos_focus_becomes_a_single_pane_when_the_ladder_has_no_room_for_it() {
+        let mut app = ladder(90);
+        app.focus = Focus::Tree;
+        assert_eq!(app.panes(), Panes::Two, "fixture should land squarely in the gap");
+
+        app.focus = Focus::Repos;
+
+        assert_eq!(app.panes(), Panes::One, "must actually become visible");
+        assert_eq!(app.zoom, None, "must not reach for zoom to get there");
+    }
+
+    /// This is the specific gap a key-handler-only fix cannot close: no key
+    /// is pressed here at all, only a resize -- holding `Focus::Repos` at
+    /// `Three` and then narrowing past `repos_pane_above` used to leave the
+    /// sidebar undrawn with nothing on screen to explain why.
+    #[test]
+    fn narrowing_into_the_gap_while_already_repo_focused_keeps_it_visible() {
+        let mut app = ladder(200);
+        app.focus = Focus::Repos;
+        assert_eq!(app.panes(), Panes::Three, "fixture should start with room to spare");
+
+        app.terminal_width = 90; // resize alone, no key event
+
+        assert_eq!(app.panes(), Panes::One, "must not vanish on a resize with no keypress");
+    }
+
+    /// Already has room: forcing a single pane here would take away the tree
+    /// and detail panes for no reason.
+    #[test]
+    fn repos_focus_does_not_override_the_ladder_once_there_is_room() {
+        let mut app = ladder(200);
+        app.focus = Focus::Repos;
+        assert_eq!(app.panes(), Panes::Three);
+    }
+
+    /// `zoom` still outranks everything, including the new focus-based rule
+    /// -- pressing `z` remains the documented way to force the split away
+    /// from a repo-focused gap, exactly as it already does for the width
+    /// rule.
+    #[test]
+    fn z_still_forces_the_split_away_from_a_repos_focused_gap() {
+        let mut app = ladder(90);
+        app.focus = Focus::Repos;
+        assert_eq!(app.panes(), Panes::One, "fixture should start single-pane");
+
+        app.toggle_zoom();
+
+        assert_eq!(app.zoom, Some(false));
+        assert_eq!(app.panes(), Panes::Two, "z must be able to force the split back");
+    }
+
+    /// The same monotonicity rule `the_pane_ladder_is_monotone` pins for the
+    /// default focus must also hold with the repo pane focused throughout --
+    /// nothing about a wider terminal should ever draw fewer panes, even
+    /// though the count here jumps straight from one to three, skipping two
+    /// entirely (there is no width at which a repo-focused view shows
+    /// exactly two panes).
+    #[test]
+    fn the_ladder_is_monotone_with_the_repo_pane_focused_too() {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.single_pane_below = 80;
+        app.repos_pane_above = 110;
+        app.focus = Focus::Repos;
+
+        let count = |p: Panes| match p {
+            Panes::One => 1,
+            Panes::Two => 2,
+            Panes::Three => 3,
+        };
+
+        let mut last = 0;
+        for w in 40..=200u16 {
+            app.terminal_width = w;
+            let n = count(app.panes());
+            assert!(n >= last, "widening to {w} dropped a pane: {last} -> {n}");
+            last = n;
+        }
     }
 
     /// With one pane on screen, every column belongs to it. Otherwise the mouse
@@ -1764,6 +1887,36 @@ mod tests {
         );
     }
 
+    /// The bug this closes: the previous `load_store` unconditionally reset
+    /// `self.selected`, which made this pass only when `load_store` was
+    /// called in isolation -- never through the real sequence `switch_store`
+    /// actually drives, `select_worktree` immediately followed by
+    /// `load_store`. Going through both here, in that order, is exactly the
+    /// gap that let the regression through a unit test aimed at `load_store`
+    /// alone.
+    #[test]
+    fn switching_back_to_a_worktree_restores_the_remembered_task_through_the_real_flow() {
+        let mut app = counted(vec![task("a", None, &[]), task("b", None, &[])]);
+        app.selected_worktree = Some("/x/one".into());
+        app.selected = Some("b".into());
+
+        // Leave "/x/one" for "/x/two" -- select_worktree remembers "b" for
+        // "/x/one" in task_memory before this pair of calls runs again below.
+        app.select_worktree("/x/two");
+        app.load_store(vec![task("c", None, &[])], "two".into());
+
+        // Return to "/x/one": select_worktree restores "b" from task_memory
+        // first, and load_store must not stomp over it afterward.
+        app.select_worktree("/x/one");
+        app.load_store(vec![task("a", None, &[]), task("b", None, &[])], "one".into());
+
+        assert_eq!(
+            app.selected.as_deref(),
+            Some("b"),
+            "task_memory's restore must survive load_store, not just select_worktree alone"
+        );
+    }
+
     fn wt(path: &str, branch: &str, main: bool) -> crate::worktree::Worktree {
         crate::worktree::Worktree {
             path: path.to_string(),
@@ -1859,75 +2012,16 @@ mod tests {
         assert_eq!(app.selected_repo_row, 0);
     }
 
-    /// `std::env::set_var` is unsafe in edition 2024 and mutates process-wide
-    /// state, so this runs under one lock and restores what it set --
-    /// mirrors `editor::tests::with_env`, duplicated because that helper is
-    /// private to its own module.
-    ///
-    /// Restoring through a drop guard, not plain code after `f()`, matters
-    /// here specifically: a panicking test (a failed assertion) used to skip
-    /// the restore *and* poison the `Mutex`, so every later registry test in
-    /// this module failed with an unrelated-looking `PoisonError` instead of
-    /// its own assertion, burying the actual failure. `unwrap_or_else`
-    /// recovers a poisoned lock too, for the same reason: whatever broke a
-    /// previous test should not also break every test after it.
-    fn with_env<T>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let guard = LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-
-        let saved: Vec<(String, Option<String>)> = vars
-            .iter()
-            .map(|(k, _)| ((*k).to_string(), std::env::var(k).ok()))
-            .collect();
-
-        struct Restore(Vec<(String, Option<String>)>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                for (k, v) in &self.0 {
-                    match v {
-                        Some(v) => unsafe { std::env::set_var(k, v) },
-                        None => unsafe { std::env::remove_var(k) },
-                    }
-                }
-            }
-        }
-        let _restore = Restore(saved);
-
-        for (k, v) in vars {
-            match v {
-                Some(v) => unsafe { std::env::set_var(k, v) },
-                None => unsafe { std::env::remove_var(k) },
-            }
-        }
-
-        let out = f();
-        drop(guard);
-        out
-    }
-
-    /// Points `XDG_CONFIG_HOME` at a fresh, empty scratch directory (keyed by
-    /// `tag` as well as pid, so tests do not share -- and cannot leak state
-    /// through -- the same directory) for the duration of `f`, so
-    /// `register_repo_path`/`unregister_repo_path` -- which call
-    /// `Registry::save` for real -- never touch the user's actual
-    /// `~/.config/dextui/repos.toml`. A suite that rewrote that file on every
-    /// run would be worse than no suite at all.
-    fn with_isolated_registry<T>(tag: &str, f: impl FnOnce() -> T) -> T {
-        let dir = std::env::temp_dir().join(format!(
-            "dextui-test-registry-{tag}-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        with_env(&[("XDG_CONFIG_HOME", Some(dir.to_str().unwrap()))], f)
-    }
+    /// `crate::test_support::with_isolated_registry`, not a copy of its own:
+    /// this module and `registry.rs`'s own tests both mutate the same
+    /// process-wide `XDG_CONFIG_HOME`, and two independent locks -- one per
+    /// module -- would not actually exclude each other from it. Only one
+    /// shared lock, used by both, does.
+    use crate::test_support::with_isolated_registry;
 
     #[test]
     fn registering_adds_the_repo_and_reports_the_change() {
-        with_isolated_registry("add", || {
+        with_isolated_registry("app-register-add", || {
             let mut app = counted(vec![task("a", None, &[])]);
             app.registry = crate::registry::Registry::default();
 
@@ -1938,7 +2032,7 @@ mod tests {
 
     #[test]
     fn registering_a_known_repo_is_reported_not_duplicated() {
-        with_isolated_registry("duplicate", || {
+        with_isolated_registry("app-register-duplicate", || {
             let mut app = counted(vec![task("a", None, &[])]);
             app.registry = crate::registry::Registry::default();
             app.register_repo_path("/x/dextui").unwrap();
@@ -1955,7 +2049,7 @@ mod tests {
     /// the branch or the store -- only the entry and the row.
     #[test]
     fn unregistering_removes_only_the_entry() {
-        with_isolated_registry("removes-only-entry", || {
+        with_isolated_registry("app-unregister-entry", || {
             let mut app = counted(vec![task("a", None, &[])]);
             app.registry = crate::registry::Registry::default();
             app.register_repo_path("/x/one").unwrap();
@@ -1971,7 +2065,7 @@ mod tests {
     /// the end of a now-shorter list.
     #[test]
     fn unregistering_a_loaded_repo_drops_its_row_and_clamps_the_cursor() {
-        with_isolated_registry("loaded-repo", || {
+        with_isolated_registry("app-unregister-loaded-repo", || {
             let mut app = app_with_repos(); // "one" then "two", 6 rows total
             // Through `register_repo_path`, not a bare `registry.add`: the
             // latter only mutates the in-memory copy, and `unregister_repo_path`
@@ -2001,7 +2095,7 @@ mod tests {
     /// read error: a directory sitting where the registry file belongs.
     #[test]
     fn a_failed_unregister_save_is_reported_and_the_row_is_kept() {
-        with_isolated_registry("unregister-save-fails", || {
+        with_isolated_registry("app-unregister-save-fails", || {
             let mut app = app_with_repos();
             app.register_repo_path("/x/one").unwrap();
 
