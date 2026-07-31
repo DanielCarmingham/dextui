@@ -325,18 +325,12 @@ fn main() -> std::io::Result<()> {
             continue;
         }
         match worktree::list(repo_path) {
-            Ok(worktrees) => {
-                let name = std::path::Path::new(repo_path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| repo_path.clone());
-                repos.push(repos::Repo {
-                    name,
-                    path: repo_path.clone(),
-                    worktrees,
-                    open: true,
-                });
-            }
+            Ok(worktrees) => repos.push(repos::Repo {
+                name: repo_name(repo_path),
+                path: repo_path.clone(),
+                worktrees,
+                open: true,
+            }),
             Err(e) => repo_problems.push(format!("{repo_path}: {}", flatten(&e))),
         }
     }
@@ -784,6 +778,12 @@ fn switch_store(
 /// the cursor happens to be on in the sidebar. `git worktree list` always
 /// reports the main checkout first, so that entry is "the repo that has the
 /// worktrees," which is what gets registered.
+///
+/// Writing `repos.toml` is only half of it: the sidebar draws `app.repos`, so
+/// a registration that only persisted would appear to do **nothing at all**
+/// until the next launch -- and the README promises switching between repos
+/// "without restarting". The row is therefore built here too, exactly the way
+/// startup builds one, from the `git worktree list` this already had to run.
 fn register_current_repo(app: &mut App) -> String {
     let cwd = match std::env::current_dir() {
         Ok(c) => c,
@@ -793,21 +793,50 @@ fn register_current_repo(app: &mut App) -> String {
         Ok(w) => w,
         Err(e) => return format!("could not list worktrees: {}", flatten(&e)),
     };
-    let Some(main) = worktrees.first() else {
+    register_repo(app, worktrees)
+}
+
+/// The half of `register_current_repo` that has no I/O of its own, so the
+/// sidebar row it adds can actually be tested -- listing worktrees needs a real
+/// git repo and a real working directory, neither of which a unit test has.
+fn register_repo(app: &mut App, worktrees: Vec<worktree::Worktree>) -> String {
+    // Cloned rather than held as a borrow of `worktrees`: the whole list is
+    // moved into the new row below, and `app` is borrowed mutably in between.
+    let Some(path) = worktrees.first().map(|w| w.path.clone()) else {
         return "no worktrees found".to_string();
     };
-    match app.register_repo_path(&main.path) {
+    match app.register_repo_path(&path) {
         Ok(true) => {
-            log::line("registry", &format!("saved: added {}", main.path));
-            format!("registered {}", main.path)
+            log::line("registry", &format!("saved: added {path}"));
+            app.repos.push(repos::Repo {
+                name: repo_name(&path),
+                path: path.clone(),
+                worktrees,
+                open: true,
+            });
+            // `Registry::add` keeps the file sorted by path, so the next
+            // launch will list them in that order. Sorting here too means the
+            // row does not move the first time the app is restarted.
+            app.repos.sort_by(|a, b| a.path.cmp(&b.path));
+            format!("registered {path}")
         }
-        Ok(false) => format!("{} is already registered", main.path),
+        Ok(false) => format!("{path} is already registered"),
         Err(e) => {
             let e = flatten(&e);
             log::line("registry", &format!("save failed: {e}"));
             format!("could not register: {e}")
         }
     }
+}
+
+/// The last path component, which is what the sidebar shows for a repo.
+/// Shared by startup and `a` so a repo registered mid-run is labelled exactly
+/// the way it will be after a restart.
+fn repo_name(repo_path: &str) -> String {
+    std::path::Path::new(repo_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| repo_path.to_string())
 }
 
 /// Picks the worktree under the sidebar cursor: remembers where the cursor
@@ -1401,6 +1430,72 @@ mod tests {
                 "usage advertises {words:?} but the parser rejects it"
             );
         }
+    }
+
+    fn worktrees_of(name: &str) -> Vec<crate::worktree::Worktree> {
+        vec![
+            crate::worktree::Worktree {
+                path: format!("/x/{name}"),
+                branch: "main".into(),
+                is_main: true,
+                is_locked: false,
+                is_detached: false,
+            },
+            crate::worktree::Worktree {
+                path: format!("/x/{name}-feat"),
+                branch: "feat".into(),
+                is_main: false,
+                is_locked: false,
+                is_detached: false,
+            },
+        ]
+    }
+
+    /// The bug this closes: `a` wrote `repos.toml` and stopped there, so the
+    /// repo it had just registered did not appear in the sidebar until the app
+    /// was restarted -- while the README promises switching between repos
+    /// "without restarting". Persisting and drawing are two separate things,
+    /// and only one of them was happening.
+    #[test]
+    fn registering_a_repo_adds_its_sidebar_row_immediately() {
+        crate::test_support::with_isolated_registry("main-register-row", || {
+            let mut app = App::new(vec![], "t".into(), config::Config::default());
+            assert!(app.repos.is_empty());
+
+            let status = register_repo(&mut app, worktrees_of("one"));
+
+            assert!(status.contains("registered"), "status: {status}");
+            assert_eq!(app.repos.len(), 1, "the sidebar row was not added");
+            assert_eq!(app.repos[0].path, "/x/one");
+            assert_eq!(app.repos[0].name, "one");
+            assert_eq!(
+                app.repos[0].worktrees.len(),
+                2,
+                "the row must carry every worktree, not just the main one"
+            );
+            // Three rows, so the sidebar really does draw the worktrees too.
+            assert_eq!(app.repo_rows().len(), 3);
+        });
+    }
+
+    /// Rows are kept in the order `Registry::add` writes them, so nothing
+    /// jumps around the first time the app is restarted -- and a repo already
+    /// registered adds no second row.
+    #[test]
+    fn registering_keeps_the_rows_sorted_and_never_duplicates_one() {
+        crate::test_support::with_isolated_registry("main-register-order", || {
+            let mut app = App::new(vec![], "t".into(), config::Config::default());
+
+            register_repo(&mut app, worktrees_of("two"));
+            register_repo(&mut app, worktrees_of("one"));
+
+            let paths: Vec<&str> = app.repos.iter().map(|r| r.path.as_str()).collect();
+            assert_eq!(paths, vec!["/x/one", "/x/two"], "rows are not in registry order");
+
+            let status = register_repo(&mut app, worktrees_of("one"));
+            assert!(status.contains("already registered"), "status: {status}");
+            assert_eq!(app.repos.len(), 2, "a duplicate row was added");
+        });
     }
 
     fn repo_app() -> App {
