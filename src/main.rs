@@ -11,6 +11,7 @@ mod theme;
 mod tree;
 mod ui;
 mod watch;
+mod worktree;
 
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
