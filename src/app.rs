@@ -180,6 +180,9 @@ pub struct App {
     pub animate: bool,
     /// Which frame of the in-progress rotation the renderer should draw.
     pub spin_frame: usize,
+    /// Terminal width below which only the focused pane is drawn. From the
+    /// config; 0 disables the behaviour entirely.
+    pub single_pane_below: u16,
     /// Clickable regions of the header row, as `(first_x, last_x, what)`.
     /// Rewritten every frame; empty while the search box owns the row, so a
     /// click can never act on a menu that is not on screen.
@@ -220,6 +223,7 @@ impl App {
             pending_refresh: false,
             animate: cfg.animate,
             spin_frame: 0,
+            single_pane_below: cfg.single_pane_below,
             header_zones: Vec::new(),
         };
 
@@ -350,9 +354,11 @@ impl App {
     }
 
     /// Right arrow: open the node, or step into it if already open.
-    pub fn expand_selected(&mut self) {
+    /// Returns whether it did anything, so a caller can fall through to
+    /// something else when the row has no children to open or step into.
+    pub fn expand_selected(&mut self) -> bool {
         let Some(id) = self.selected.clone() else {
-            return;
+            return false;
         };
         let has_kids = tree::flatten(&self.tree)
             .iter()
@@ -363,6 +369,7 @@ impl App {
         } else if has_kids {
             self.move_selection(1);
         }
+        has_kids
     }
 
     /// Left arrow: close the node, or step out to its parent if already closed.
@@ -671,6 +678,47 @@ impl App {
         };
     }
 
+    /// Whether only one pane is drawn, the focused one filling the width.
+    ///
+    /// Two panes below this leave no room for either: borders, the tree's
+    /// indent guides and the meter gutter all cost columns before a task name
+    /// gets any. So `focus` stops meaning "which border is brighter" and starts
+    /// meaning "which pane you are looking at" -- no new state, and the rules
+    /// that keep a refresh from disturbing the user keep working unchanged.
+    ///
+    /// Measured against the width the renderer last published, so it follows a
+    /// terminal resized under the running app.
+    pub fn single_pane(&self) -> bool {
+        self.single_pane_below > 0 && self.terminal_width < self.single_pane_below
+    }
+
+    /// Moves to the detail pane. What `Enter` does, and what `Right` falls back
+    /// to when there is nothing left to expand.
+    pub fn show_detail(&mut self) {
+        self.focus = Focus::Detail;
+    }
+
+    /// Back to the tree.
+    pub fn show_tree(&mut self) {
+        self.focus = Focus::Tree;
+    }
+
+    /// Which pane occupies `column`.
+    ///
+    /// With one pane it is whichever is on screen, whatever the column -- the
+    /// mouse handlers otherwise compare against `divider_x`, which is 0 there,
+    /// so every click and every wheel tick would land on the detail pane
+    /// including while looking at the tree.
+    pub fn pane_at(&self, column: u16) -> Focus {
+        if self.single_pane() {
+            self.focus
+        } else if column < self.divider_x {
+            Focus::Tree
+        } else {
+            Focus::Detail
+        }
+    }
+
     /// Wrapping on makes horizontal offset meaningless, so it is also reset.
     pub fn toggle_wrap(&mut self) {
         self.wrap = !self.wrap;
@@ -798,6 +846,101 @@ mod tests {
         app.sort_reversed = !app.sort_reversed;
         app.rebuild();
         assert_eq!(app.selected.as_deref(), Some("b"), "reordering is not moving");
+    }
+
+    fn narrow(width: u16) -> App {
+        let mut app = counted(vec![task("a", None, &["b"]), task("b", Some("a"), &[])]);
+        app.single_pane_below = 80;
+        app.terminal_width = width;
+        app.rebuild();
+        app
+    }
+
+    #[test]
+    fn the_split_gives_way_below_the_configured_width() {
+        assert!(narrow(60).single_pane(), "60 columns should be one pane");
+        assert!(!narrow(80).single_pane(), "the threshold itself still splits");
+        assert!(!narrow(100).single_pane());
+    }
+
+    /// The escape hatches at both ends of the setting, which is the reason it is
+    /// a width rather than a boolean.
+    #[test]
+    fn zero_always_splits_and_a_huge_value_never_does() {
+        let mut app = narrow(20);
+        app.single_pane_below = 0;
+        assert!(!app.single_pane(), "0 must disable the behaviour entirely");
+
+        let mut app = narrow(400);
+        app.single_pane_below = 9999;
+        assert!(app.single_pane(), "a huge value must always single-pane");
+    }
+
+    /// With one pane on screen, every column belongs to it. Otherwise the mouse
+    /// handlers compare against `divider_x`, which is 0 there, and every click
+    /// would land on the detail pane -- including while looking at the tree.
+    #[test]
+    fn one_pane_owns_every_column() {
+        let mut app = narrow(60);
+        app.divider_x = 0;
+
+        app.show_tree();
+        for col in [0, 5, 30, 59] {
+            assert_eq!(app.pane_at(col), Focus::Tree, "column {col}");
+        }
+
+        app.show_detail();
+        for col in [0, 5, 30, 59] {
+            assert_eq!(app.pane_at(col), Focus::Detail, "column {col}");
+        }
+    }
+
+    #[test]
+    fn two_panes_split_at_the_divider() {
+        let mut app = narrow(100);
+        app.divider_x = 45;
+        assert_eq!(app.pane_at(44), Focus::Tree);
+        assert_eq!(app.pane_at(45), Focus::Detail);
+    }
+
+    /// There is no divider to grab when only one pane is drawn, and a stale one
+    /// would be an invisible drag target in the middle of the screen.
+    #[test]
+    fn there_is_nothing_to_drag_in_one_pane_mode() {
+        let mut app = narrow(60);
+        app.divider_x = 0;
+        for col in [0, 1, 30, 59] {
+            assert!(!app.on_divider(col), "column {col} looked like a divider");
+        }
+    }
+
+    /// `Right` opens what it can, and only falls through to the detail when
+    /// there was nothing to open -- which is what its return value is for.
+    #[test]
+    fn expanding_reports_whether_it_had_anything_to_do() {
+        let mut app = narrow(60);
+
+        app.selected = Some("a".into()); // has a child
+        app.collapse_all();
+        assert!(app.expand_selected(), "a parent has something to open");
+
+        app.selected = Some("b".into()); // a leaf
+        assert!(!app.expand_selected(), "a leaf has nothing to open");
+    }
+
+    /// Switching panes must not disturb what you were looking at -- the same
+    /// rule a background refresh follows.
+    #[test]
+    fn crossing_to_the_detail_and_back_keeps_the_selection_and_the_tree() {
+        let mut app = narrow(60);
+        app.selected = Some("b".into());
+        app.expanded.insert("a".into());
+        let before = (app.selected.clone(), app.expanded.clone());
+
+        app.show_detail();
+        app.show_tree();
+
+        assert_eq!((app.selected.clone(), app.expanded.clone()), before);
     }
 
     fn clickable(zones: Vec<(u16, u16, HeaderZone)>) -> App {

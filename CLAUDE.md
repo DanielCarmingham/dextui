@@ -401,6 +401,38 @@ but it is fixing the symptom. Of the installed monospace fonts only Menlo has
 those three glyphs at all, and even it is 0.978 cells. Using glyphs the font
 already has is both exact and portable to whatever font someone else runs.
 
+## One pane when there is no room for two
+
+Below `single_pane_below` columns (80 by default, `0` disables it) only the
+focused pane is drawn, filling the width. `Enter` opens the detail; `Left`/`h`
+and `Tab` go back; `Right`/`l` also crosses over, but **only from a leaf** —
+where it did nothing before — so its tree meaning is untouched.
+
+**`App::focus` is the whole implementation.** It already existed to say which
+border is brighter; below the threshold it says which pane is *drawn* instead.
+No new mode, no second source of truth, and the refresh-survival rules keep
+working unchanged because the selection and expansion were never tied to
+layout. `crossing_to_the_detail_and_back_keeps_the_selection_and_the_tree`
+pins that.
+
+Three things that are easy to get wrong:
+
+- **`divider_x` must be zeroed**, not left stale from the last wide frame.
+  `on_divider` is what makes a drag start, and a leftover x would be an
+  invisible drag target down the middle of the screen.
+- **The mouse handlers compare against `divider_x` to pick a pane**, so with it
+  at 0 every click and wheel tick would land on the detail — including while
+  looking at the tree. They go through `App::pane_at`, which answers "the one on
+  screen" when there is only one.
+- **The single-pane path returns early**, so dialogs have to be drawn on the way
+  out. `draw_overlays` is shared by both layouts; forgetting it would make `?`
+  and every confirmation silently do nothing on a narrow terminal.
+
+The pane-crossing fallbacks are deliberately gated on single-pane mode. With
+both panes visible, `Right` on a leaf moving focus would silently redirect
+`j`/`k` to the other pane mid-walk through the tree — a surprise there, and the
+entire point here.
+
 ## Two panes, one set of movement keys
 
 `Tab` moves focus between the tree and the detail pane; the focused one has the

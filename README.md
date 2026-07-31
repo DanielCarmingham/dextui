@@ -100,6 +100,7 @@ Press `?` in the app for this list at any time.
 | `→ ←` `h l` | expand/collapse, or scroll sideways |
 | `g` `G` | first / last |
 | `tab` | switch pane (the focused one has the brighter border) |
+| `enter` | open the detail pane |
 | `z` `Z` | collapse / expand all |
 | `/` | search names and descriptions |
 | `f` | cycle filter — pending / active / all |
@@ -121,6 +122,11 @@ Acting on the selected task:
 | `n` | new top-level task |
 | `a` | new subtask of the selection |
 | `d` | delete, with confirmation |
+
+**Narrow terminals show one pane at a time.** Below `single_pane_below` columns
+(80 by default) the split gives way to tabs: `enter` — or `→` on a task with no
+subtasks — opens the detail full-width, and `←` or `tab` goes back. Two panes
+much narrower than that leave no room for either. Set it to `0` to always split.
 
 **The header is clickable.** Click a word in `[ all  pending  active ]` to switch
 filter, or the sort label to cycle it — right-click the sort label to reverse it,
@@ -182,6 +188,7 @@ filter = "pending"      # pending | active | all
 wrap = true
 icons = "unicode"       # nerd | unicode | ascii
 animate = true          # spin the in-progress marker
+single_pane_below = 80  # below this width, one pane at a time (0 = always split)
 ```
 
 A project file need only mention what it changes:

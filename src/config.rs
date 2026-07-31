@@ -28,6 +28,7 @@ pub struct Raw {
     wrap: Option<bool>,
     icons: Option<String>,
     animate: Option<bool>,
+    single_pane_below: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -40,6 +41,12 @@ pub struct Config {
     /// Whether in-progress rows spin. Off restores the pre-animation event
     /// loop exactly -- see `pulse::poll_timeout`.
     pub animate: bool,
+    /// Terminal width below which only one pane is drawn at a time.
+    ///
+    /// Two panes below about this need every column for borders and indents and
+    /// leave no room for either. `0` never switches, so the split is always
+    /// shown; a value above any terminal you use always switches.
+    pub single_pane_below: u16,
 }
 
 impl Default for Config {
@@ -51,6 +58,7 @@ impl Default for Config {
             wrap: true,
             icons: icons::UNICODE,
             animate: true,
+            single_pane_below: 80,
         }
     }
 }
@@ -113,6 +121,9 @@ fn apply(cfg: &mut Config, raw: Raw, problems: &mut Vec<String>) {
     }
     if let Some(v) = raw.animate {
         cfg.animate = v;
+    }
+    if let Some(v) = raw.single_pane_below {
+        cfg.single_pane_below = v;
     }
 }
 
@@ -231,6 +242,11 @@ icons = "unicode"
 # Breathe the marker on in-progress tasks. Costs nothing while nothing is
 # running.  (DEXTUI_ANIMATE overrides this for one run)
 animate = true
+
+# Below this terminal width, show one pane at a time instead of squeezing both:
+# Enter or Right opens the detail full-width, Left or Tab goes back. Two panes
+# narrower than this leave no room for either.  0 always splits.
+single_pane_below = 80
 "#;
 
 /// Which file a command acts on.

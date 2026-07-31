@@ -397,11 +397,12 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
                 app.dragging_split = true;
             } else if app.in_body(m.row) {
                 // Click to focus, and in the tree also to select the row.
-                if m.column < app.divider_x {
-                    app.focus = Focus::Tree;
-                    app.select_at_row(m.row);
-                } else {
-                    app.focus = Focus::Detail;
+                match app.pane_at(m.column) {
+                    Focus::Tree => {
+                        app.focus = Focus::Tree;
+                        app.select_at_row(m.row);
+                    }
+                    Focus::Detail => app.focus = Focus::Detail,
                 }
             }
         }
@@ -417,17 +418,15 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
         // their *content* with the gesture -- see `App::scroll_tree` for why the
         // tree cannot just move its selection.
         MouseEventKind::ScrollDown => {
-            if m.column < app.divider_x {
-                app.scroll_tree(1);
-            } else {
-                app.scroll_detail(1, 0);
+            match app.pane_at(m.column) {
+                Focus::Tree => app.scroll_tree(1),
+                Focus::Detail => app.scroll_detail(1, 0),
             }
         }
         MouseEventKind::ScrollUp => {
-            if m.column < app.divider_x {
-                app.scroll_tree(-1);
-            } else {
-                app.scroll_detail(-1, 0);
+            match app.pane_at(m.column) {
+                Focus::Tree => app.scroll_tree(-1),
+                Focus::Detail => app.scroll_detail(-1, 0),
             }
         }
         MouseEventKind::ScrollLeft => app.scroll_detail(0, -4),
@@ -650,13 +649,35 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
             Focus::Tree => app.move_selection(-10),
             Focus::Detail => app.scroll_detail(-10, 0),
         },
+        // Enter always opens the detail. It is the deliberate way across, and it
+        // was unbound in Normal mode, so nothing changes meaning.
+        KeyCode::Enter => app.show_detail(),
+
         KeyCode::Right | KeyCode::Char('l') => match app.focus {
-            Focus::Tree => app.expand_selected(),
+            // Falls through to the detail only when there was nothing to open --
+            // a leaf, where this key did nothing at all before. Gated on
+            // single-pane: with both panes visible, a focus jump while walking
+            // the tree would silently redirect j/k to the other pane.
+            Focus::Tree => {
+                if !app.expand_selected() && app.single_pane() {
+                    app.show_detail();
+                }
+            }
             Focus::Detail => app.scroll_detail(0, 4),
         },
         KeyCode::Left | KeyCode::Char('h') => match app.focus {
             Focus::Tree => app.collapse_selected(),
-            Focus::Detail => app.scroll_detail(0, -4),
+            // Sideways first while there is anywhere to go -- a wide table with
+            // wrap off -- and back only when there is not. The same
+            // "nothing to scroll to" rule the wrap toggle already follows.
+            Focus::Detail => {
+                let can_scroll = !app.wrap && app.detail_scroll.1 > 0;
+                if !can_scroll && app.single_pane() {
+                    app.show_tree();
+                } else {
+                    app.scroll_detail(0, -4);
+                }
+            }
         },
         KeyCode::Char('g') => match app.focus {
             Focus::Tree => app.select_first(),

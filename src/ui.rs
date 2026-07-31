@@ -48,20 +48,43 @@ pub fn draw(frame: &mut Frame, app: &mut App, ic: &Icons) {
 
     draw_header(frame, app, ic, top);
 
+    // Set before `single_pane` is consulted: it reads the published width, and on
+    // the very first frame -- or the one after a resize -- the old value would
+    // pick the wrong layout for exactly one frame, which reads as a flicker.
+    app.terminal_width = frame.area().width;
+    app.body_top = body.y;
+    app.body_bottom = body.y + body.height;
+
+    if app.single_pane() {
+        // One pane, filling the width, chosen by focus. There is no divider, so
+        // `divider_x = 0` makes `App::on_divider` false and a drag inert --
+        // rather than leaving a stale x from the last wide frame, which would be
+        // an invisible drag target in the middle of the screen.
+        app.divider_x = 0;
+        match app.focus {
+            Focus::Tree => draw_tree(frame, app, ic, body),
+            Focus::Detail => draw_detail(frame, app, ic, body),
+        }
+        draw_status(frame, app, bottom);
+        draw_overlays(frame, app);
+        return;
+    }
+
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(app.split_percent), Constraint::Fill(1)])
             .areas(body);
 
     // Published for mouse handling: the divider sits where the two borders meet.
     app.divider_x = right.x;
-    app.terminal_width = frame.area().width;
-    app.body_top = body.y;
-    app.body_bottom = body.y + body.height;
 
     draw_tree(frame, app, ic, left);
     draw_detail(frame, app, ic, right);
     draw_status(frame, app, bottom);
+    draw_overlays(frame, app);
+}
 
+/// Dialogs, drawn last so they sit over whichever layout was used.
+fn draw_overlays(frame: &mut Frame, app: &App) {
     match &app.mode {
         Mode::Prompt(prompt) => draw_prompt(frame, prompt),
         Mode::Confirm { message, .. } => draw_message(
@@ -1202,6 +1225,10 @@ Movement follows the focused pane, shown by its brighter border. Turn wrap
 off (w) to scroll a wide table sideways -- wrapping removes the overflow
 there would otherwise be to scroll to.
 
+On a narrow terminal only one pane is shown at a time: enter (or right, on a
+task with no subtasks) opens the detail full-width, and left or tab goes back.
+The width it switches at is single_pane_below in the config.
+
 Mouse: drag the divider to resize, wheel scrolls the pane under the pointer,
 click selects. In the header, click a filter to switch to it, or the sort
 label to cycle it -- right-click the sort to reverse. Hold Shift to select
@@ -2338,6 +2365,106 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
         terminal.draw(|f| draw(f, &mut app, ic)).unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    /// Renders at `width` and returns the whole screen as text.
+    fn screen(width: u16, single_pane_below: u16, focus: Focus) -> String {
+        let mut app = App::new(
+            vec![
+                Task {
+                    // Only the detail pane renders a description, so this is an
+                    // unambiguous marker for it. "priority" is not: that is the
+                    // sort label, and it sits in the header in both layouts.
+                    description: Some("DETAIL-ONLY-MARKER".into()),
+                    ..task("a", None, "A task in the tree")
+                },
+                task("b", None, "Another one"),
+            ],
+            "demo".into(),
+            crate::config::Config::default(),
+        );
+        app.filter = tree::Filter::All;
+        app.single_pane_below = single_pane_below;
+        app.focus = focus;
+        app.selected = Some("a".into());
+        app.rebuild();
+
+        let mut terminal = Terminal::new(TestBackend::new(width, 14)).unwrap();
+        terminal
+            .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Below the threshold `focus` stops meaning "which border is brighter" and
+    /// starts meaning "which pane you are looking at". Both panes carry content
+    /// the other does not, so each is identifiable in the output.
+    #[test]
+    fn below_the_threshold_focus_decides_which_pane_is_drawn() {
+        let tree_view = screen(60, 80, Focus::Tree);
+        assert!(tree_view.contains("Another one"), "no tree: {tree_view}");
+        assert!(
+            !tree_view.contains("DETAIL-ONLY-MARKER"),
+            "the detail pane leaked in: {tree_view}"
+        );
+
+        let detail_view = screen(60, 80, Focus::Detail);
+        assert!(
+            detail_view.contains("DETAIL-ONLY-MARKER"),
+            "no detail pane: {detail_view}"
+        );
+        assert!(
+            !detail_view.contains("Another one"),
+            "the tree leaked in: {detail_view}"
+        );
+    }
+
+    /// Above it, focus goes back to meaning emphasis and both are on screen.
+    #[test]
+    fn above_the_threshold_both_panes_are_drawn_whichever_has_focus() {
+        for focus in [Focus::Tree, Focus::Detail] {
+            let s = screen(100, 80, focus);
+            assert!(s.contains("Another one"), "{focus:?}: no tree: {s}");
+            assert!(
+                s.contains("DETAIL-ONLY-MARKER"),
+                "{focus:?}: no detail: {s}"
+            );
+        }
+    }
+
+    /// A dialog has to survive the layout it is drawn over, and the single-pane
+    /// path returns early -- so this is the assertion that stops it returning
+    /// before the overlays.
+    #[test]
+    fn dialogs_still_draw_over_a_single_pane() {
+        let mut app = App::new(
+            vec![task("a", None, "A task")],
+            "demo".into(),
+            crate::config::Config::default(),
+        );
+        app.single_pane_below = 80;
+        app.mode = Mode::Help;
+        app.rebuild();
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+        terminal
+            .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol())
+            .collect();
+
+        assert!(text.contains("switch pane"), "the help dialog is missing");
     }
 
     /// The glyph changes every frame now, so the assertion that matters is that
