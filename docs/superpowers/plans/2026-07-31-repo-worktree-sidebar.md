@@ -1402,3 +1402,166 @@ git commit -m "docs: the repo sidebar, and what it changes about scope"
 **Type consistency:** `store_dir` is defined once in `repos.rs` (Task 4) and consumed by Tasks 7, 8 and 9. `Row` and `Repo` are defined in Task 4 and consumed in Tasks 6 and 7. `Panes` is defined in Task 5 and consumed in Task 7. `Worktree` is defined in Task 2 and consumed in Tasks 4 and 7. `Registry` is defined in Task 3 and consumed in Tasks 6 and 8.
 
 **Ordering:** Tasks 1–4 are independent. Task 5 needs nothing. Task 6 needs 3 and 4. Task 7 needs 4, 5, 6. Task 8 needs 6 and 7. Task 9 needs 1 and 4. Task 10 last.
+
+---
+
+### Task 11: A sync log
+
+**Added mid-plan.** Troubleshooting the watcher/refresh path has no evidence to work
+from: the app's only feedback is `app.status`, one line, overwritten, no history —
+and once the alternate screen is up, stdout and stderr belong to the TUI, so nothing
+can be printed. The stat-gated safety net from Task 9 makes this sharper, because it
+introduces a "decided **not** to refresh" branch that is invisible by design.
+
+**Files:**
+- Create: `src/log.rs`
+- Modify: `src/main.rs`, `src/watch.rs`
+- Modify: `CLAUDE.md`, `README.md`
+
+**Interfaces:**
+- Produces: `log::init()`, `log::line(area: &str, msg: &str)`, `log::path() -> Option<PathBuf>`.
+
+**Design, decided:**
+- Always on. An opt-in log is off precisely when the bug you did not expect happens,
+  and sync faults are the kind that will not reproduce on demand.
+- File only, at `$XDG_STATE_HOME/dextui/log`, falling back to `~/.local/state/dextui/log`.
+  State, not config: it is machine-local, disposable, and must never sit beside
+  `config.toml`, which is the user's hand-edited text.
+- **Size-capped by truncation at startup**, not rotation. A log you `tail -f` while
+  reproducing does not need history, and rotation is machinery for a problem this
+  does not have.
+- **Failure is silent and total.** If the file cannot be opened or written, the app
+  behaves exactly as if logging were off. A logger that can break the program it
+  exists to diagnose is worse than no logger.
+- Never `stdout`/`stderr` once the TUI owns the terminal.
+
+**Format:** `HH:MM:SS  area  message`, area padded so the column reads straight.
+Areas: `watch`, `dex`, `store`, `registry`.
+
+**What must be logged**, chosen so a sync fault is diagnosable from the file alone:
+- `watch` — a watcher registered for a store, an FS event received, and **every
+  safety tick with its outcome**, including `unchanged` (the invisible branch).
+- `dex` — each `list` issued, which store, how many tasks came back, and how long it
+  took. The duration is what makes a slow store obvious.
+- `store` — switching the selected worktree, from and to.
+- `registry` — loaded, saved, and any failure of either.
+
+- [ ] **Step 1: Write the failing tests**
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole value is that it is already on when something goes wrong, so a
+    /// missing directory must be created rather than silently dropping the log.
+    #[test]
+    fn a_line_is_appended_and_the_directory_is_created() {
+        let dir = std::env::temp_dir().join(format!("dextui-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("nested").join("log");
+
+        write_line(&file, "watch", "registered /x/.dex");
+        write_line(&file, "dex", "list /x/.dex - 14 tasks 173ms");
+
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("registered /x/.dex"), "{text}");
+        assert!(text.contains("14 tasks"), "{text}");
+        assert_eq!(text.lines().count(), 2, "appended, not overwritten: {text}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A logger that can break the program it exists to diagnose is worse than no
+    /// logger. An unwritable path must be a no-op, not a panic and not an error
+    /// the caller has to handle.
+    #[test]
+    fn an_unwritable_path_is_silently_ignored() {
+        // /dev/null/x cannot be created: /dev/null is not a directory.
+        write_line(std::path::Path::new("/dev/null/x/log"), "watch", "ignored");
+    }
+
+    /// Truncation, not rotation. Reproducing a fault does not need history, and a
+    /// log that grows without bound is its own problem.
+    #[test]
+    fn an_oversized_log_is_truncated_at_startup() {
+        let dir = std::env::temp_dir().join(format!("dextui-log-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("log");
+        std::fs::write(&file, "x".repeat(CAP + 1)).unwrap();
+
+        truncate_if_oversized(&file);
+
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_log_within_the_cap_survives_startup() {
+        let dir = std::env::temp_dir().join(format!("dextui-log-keep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("log");
+        std::fs::write(&file, "kept").unwrap();
+
+        truncate_if_oversized(&file);
+
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The area column is what makes the file skimmable; a ragged one is not.
+    #[test]
+    fn the_area_column_is_aligned() {
+        let a = format_line("watch", "one");
+        let b = format_line("registry", "two");
+        let col = |s: &str| s.find("one").or_else(|| s.find("two")).unwrap();
+        assert_eq!(col(&a), col(&b), "ragged columns:\n{a}\n{b}");
+    }
+}
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `cargo test --bin dextui log 2>&1 | tail -10`
+Expected: FAIL — `cannot find function 'write_line'`.
+
+- [ ] **Step 3: Implement**
+
+`src/log.rs`, with `CAP`, `format_line`, `write_line`, `truncate_if_oversized`, a
+process-wide resolved path set by `init()`, and a `line(area, msg)` front door that
+does nothing when `init()` found no usable path. Resolve the path like
+`config::path()` does, but from `XDG_STATE_HOME` then `HOME/.local/state`.
+
+Every write opens with `OpenOptions::append(true).create(true)` and discards any
+error. No buffering held across calls — an append per event is cheap at human tempo,
+and a buffer loses exactly the lines you need when the app dies.
+
+- [ ] **Step 4: Wire the call sites**
+
+`log::init()` early in `main`, before the TUI. Then the events listed above, in
+`src/watch.rs` (registered / event / tick outcome) and `src/main.rs` (list with
+duration and count, store switch, registry load and save).
+
+- [ ] **Step 5: Run to verify they pass, and read the real file**
+
+```bash
+cargo test --bin dextui 2>&1 | tail -3
+cargo clippy --all-targets 2>&1 | grep -c warning
+cargo build && ls -la target/debug/dextui
+scripts/render-check.sh
+cat ~/.local/state/dextui/log
+```
+
+Expected: tests pass, zero clippy warnings, and a log containing a watcher
+registration, at least one `list` with a duration, and — after ~20s idle — safety
+ticks recorded as `unchanged`.
+
+- [ ] **Step 6: Document and commit**
+
+Add the log's path and purpose to `README.md`'s troubleshooting section, and a note
+in `CLAUDE.md` on why it is always-on, file-only, truncating, and silent on failure.
+
+```bash
+git add src/log.rs src/main.rs src/watch.rs CLAUDE.md README.md
+git commit -m "feat: an always-on sync log, so the watcher can be debugged"
+```
