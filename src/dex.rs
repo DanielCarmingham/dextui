@@ -309,6 +309,21 @@ pub fn requires_dex(err: &str) -> String {
 
 pub struct Dex {
     runner: Box<dyn Runner>,
+    /// The store every call targets, or `None` to let dex resolve it from the
+    /// working directory.
+    ///
+    /// Held here rather than passed per call because a verb that forgets the
+    /// flag writes to a different project's task list, silently. One field and
+    /// one argv builder means there is exactly one place that can be wrong.
+    store: Option<String>,
+}
+
+impl std::fmt::Debug for Dex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Dex")
+            .field("store", &self.store)
+            .finish_non_exhaustive()
+    }
 }
 
 fn s(v: &str) -> String {
@@ -317,11 +332,46 @@ fn s(v: &str) -> String {
 
 impl Dex {
     pub fn new(runner: Box<dyn Runner>) -> Self {
-        Self { runner }
+        Self { runner, store: None }
     }
 
     pub fn real() -> Self {
         Self::new(Box::new(ProcessRunner))
+    }
+
+    /// Targets a specific store directory.
+    ///
+    /// Rejects a path ending in `.jsonl` because dex accepts it, finds no tasks,
+    /// and returns an empty list rather than an error -- a wrong store would
+    /// look like an empty project.
+    #[allow(dead_code)]
+    pub fn for_store(store_dir: &str) -> Result<Self, String> {
+        Self::for_store_with(store_dir, Box::new(ProcessRunner))
+    }
+
+    #[allow(dead_code)]
+    pub fn for_store_with(store_dir: &str, runner: Box<dyn Runner>) -> Result<Self, String> {
+        if store_dir.ends_with(".jsonl") {
+            return Err(format!(
+                "store path must be the .dex directory, not a file: {store_dir}"
+            ));
+        }
+        Ok(Self {
+            runner,
+            store: Some(store_dir.to_string()),
+        })
+    }
+
+    /// The full argv for a call, with the global option ahead of the verb.
+    fn argv(&self, rest: &[String]) -> Vec<String> {
+        match &self.store {
+            Some(dir) => {
+                let mut v = vec![s("--storage-path"), dir.clone()];
+                v.extend_from_slice(rest);
+                v
+            }
+            None => rest.to_vec(),
+        }
     }
 
     /// Resolves the store dex is actually using.
@@ -329,7 +379,7 @@ impl Dex {
     /// This is NOT always `./.dex`: outside a git repo dex falls back to a global
     /// store under `~/.config/dex`, so the watcher must follow whatever this says.
     pub fn store_dir(&self) -> Result<String, String> {
-        let out = self.runner.run(&[s("dir")])?;
+        let out = self.runner.run(&self.argv(&[s("dir")]))?;
         if out.ok() {
             Ok(out.stdout.trim().to_string())
         } else {
@@ -342,7 +392,7 @@ impl Dex {
     pub fn list(&self) -> Result<Vec<Task>, String> {
         let out = self
             .runner
-            .run(&[s("list"), s("--json"), s("--all")])?;
+            .run(&self.argv(&[s("list"), s("--json"), s("--all")]))?;
 
         if !out.ok() {
             return Err(out.message("dex list"));
@@ -352,7 +402,7 @@ impl Dex {
     }
 
     pub fn start(&self, id: &str) -> Result<(), String> {
-        self.void(&[s("start"), s(id)], "dex start")
+        self.void(&self.argv(&[s("start"), s(id)]), "dex start")
     }
 
     /// `--no-commit` is always sent: for tasks synced to GitHub, dex refuses to
@@ -369,7 +419,7 @@ impl Dex {
         if force {
             args.push(s("--force"));
         }
-        self.void(&args, "dex complete")
+        self.void(&self.argv(&args), "dex complete")
     }
 
     pub fn create(&self, name: &str, description: &str, parent: Option<&str>) -> Result<(), String> {
@@ -382,7 +432,7 @@ impl Dex {
             args.push(s("--parent"));
             args.push(s(p));
         }
-        self.void(&args, "dex create")
+        self.void(&self.argv(&args), "dex create")
     }
 
     pub fn edit(&self, id: &str, name: Option<&str>, description: Option<&str>) -> Result<(), String> {
@@ -395,13 +445,13 @@ impl Dex {
             args.push(s("--description"));
             args.push(s(d));
         }
-        self.void(&args, "dex edit")
+        self.void(&self.argv(&args), "dex edit")
     }
 
     /// Always forced: dex prompts interactively when subtasks exist, which would
     /// hang a TUI that has no way to answer.
     pub fn delete(&self, id: &str) -> Result<(), String> {
-        self.void(&[s("delete"), s(id), s("--force")], "dex delete")
+        self.void(&self.argv(&[s("delete"), s(id), s("--force")]), "dex delete")
     }
 
     fn void(&self, args: &[String], label: &str) -> Result<(), String> {
@@ -1104,5 +1154,60 @@ mod tests {
             branch: None,
         };
         assert_eq!(c.short_sha(), "abc");
+    }
+
+    /// The whole point of `for_store`: a verb cannot forget the flag, because no
+    /// verb builds its own argv any more.
+    #[test]
+    fn every_verb_carries_the_storage_path() {
+        let fake = Fake::new("[]", "", 0);
+        let dex = Dex::for_store_with("/tmp/x/.dex", Box::new(fake.clone())).unwrap();
+
+        let _ = dex.list();
+        assert_eq!(
+            &fake.last()[..2],
+            &["--storage-path".to_string(), "/tmp/x/.dex".to_string()],
+            "list lost the store: {:?}",
+            fake.last()
+        );
+
+        let _ = dex.start("abc");
+        assert_eq!(
+            &fake.last()[..2],
+            &["--storage-path".to_string(), "/tmp/x/.dex".to_string()],
+            "start lost the store: {:?}",
+            fake.last()
+        );
+    }
+
+    /// dex puts global options before the command, so the flag has to lead.
+    #[test]
+    fn the_storage_path_precedes_the_verb() {
+        let fake = Fake::new("[]", "", 0);
+        let dex = Dex::for_store_with("/tmp/x/.dex", Box::new(fake.clone())).unwrap();
+        let _ = dex.list();
+
+        let argv = fake.last();
+        assert_eq!(argv[0], "--storage-path");
+        assert_eq!(argv[2], "list", "the verb must follow the global option");
+    }
+
+    /// `--storage-path` pointed at tasks.jsonl returns an empty list rather than an
+    /// error, so a wrong path here is silent. Reject it where it can still be seen.
+    #[test]
+    fn a_store_path_must_be_the_directory_not_the_file() {
+        let err = Dex::for_store_with("/tmp/x/.dex/tasks.jsonl", Box::new(Fake::new("", "", 0)))
+            .unwrap_err();
+        assert!(err.contains("directory"), "unhelpful message: {err}");
+    }
+
+    /// The cwd-resolving constructor must stay flagless, or every existing call
+    /// would start targeting a store it did not ask for.
+    #[test]
+    fn the_default_dex_passes_no_storage_path() {
+        let fake = Fake::new("[]", "", 0);
+        let dex = Dex::new(Box::new(fake.clone()));
+        let _ = dex.list();
+        assert_eq!(fake.last()[0], "list", "unexpected flag: {:?}", fake.last());
     }
 }
