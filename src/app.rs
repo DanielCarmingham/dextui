@@ -176,6 +176,11 @@ pub struct App {
     /// Geometry the renderer publishes so mouse maths can be exact rather than
     /// re-derived from assumptions about the layout.
     pub divider_x: u16,
+    /// The first column *after* the repo sidebar, or 0 when the sidebar is not
+    /// drawn as its own pane. Published for the same reason `divider_x` is:
+    /// the sidebar's width is a `ui` constant, and mouse maths that re-derived
+    /// it here would be a second copy free to drift from the layout.
+    pub repos_right: u16,
     pub body_top: u16,
     pub body_bottom: u16,
     pub terminal_width: u16,
@@ -260,6 +265,7 @@ impl App {
             split_percent: 45,
             dragging_split: false,
             divider_x: 0,
+            repos_right: 0,
             body_top: 0,
             body_bottom: 0,
             terminal_width: 0,
@@ -795,9 +801,18 @@ impl App {
     /// mouse handlers otherwise compare against `divider_x`, which is 0 there,
     /// so every click and every wheel tick would land on the detail pane
     /// including while looking at the tree.
+    ///
+    /// The sidebar is tested first and only when it is actually drawn
+    /// (`repos_right > 0`, which `Panes::Three` alone sets). Without that arm
+    /// its columns all answered `Focus::Tree`, since they sit left of
+    /// `divider_x` -- so clicking a repo row moved the *task* selection and
+    /// the wheel over the sidebar scrolled the tree, both of which are the
+    /// selection-disturbing behaviour this app exists to avoid.
     pub fn pane_at(&self, column: u16) -> Focus {
         if self.single_pane() {
             self.focus
+        } else if self.repos_right > 0 && column < self.repos_right {
+            Focus::Repos
         } else if column < self.divider_x {
             Focus::Tree
         } else {
@@ -924,6 +939,41 @@ impl App {
         }
         let current = self.selected_repo_row as isize;
         self.selected_repo_row = (current + delta).clamp(0, len as isize - 1) as usize;
+    }
+
+    /// Selects the sidebar row drawn on `row`, if any -- the mouse half of
+    /// `move_repo_row`, and the exact counterpart of `select_at_row` in the
+    /// tree, down to the `+1` that skips the pane's top border and the use of
+    /// the offset the renderer last published.
+    ///
+    /// Selecting only. Switching store stays on `enter`/`l`, so a stray click
+    /// in the sidebar cannot cost a ~180ms dex call and replace both other
+    /// panes.
+    pub fn select_repo_at_row(&mut self, row: u16) {
+        let Some(index) = row
+            .checked_sub(self.body_top + 1)
+            .map(|r| r as usize + self.repos_offset)
+        else {
+            return;
+        };
+        // Past the last row is dead space: it must not move the cursor to the
+        // end, which is what clamping would do.
+        if index < self.repo_rows().len() {
+            self.selected_repo_row = index;
+        }
+    }
+
+    /// A wheel over the sidebar. Slides the content and holds the cursor on
+    /// its screen row, exactly as `scroll_tree` does and for the same reason --
+    /// two panes an inch apart must not answer one gesture in two directions.
+    pub fn scroll_repos(&mut self, delta: isize) {
+        let len = self.repo_rows().len();
+        if len == 0 {
+            return;
+        }
+        let last = len as isize - 1;
+        self.repos_offset = (self.repos_offset as isize + delta).clamp(0, last) as usize;
+        self.move_repo_row(delta);
     }
 
     pub fn select_first_repo_row(&mut self) {
@@ -1364,6 +1414,105 @@ mod tests {
         app.divider_x = 45;
         assert_eq!(app.pane_at(44), Focus::Tree);
         assert_eq!(app.pane_at(45), Focus::Detail);
+    }
+
+    /// The bug this closes: with three panes the sidebar's own columns sit
+    /// left of `divider_x`, so `pane_at` called every one of them
+    /// `Focus::Tree` -- and the click handler then moved the *task* selection
+    /// when you clicked a repo row, while the wheel over the sidebar scrolled
+    /// the task tree.
+    #[test]
+    fn the_sidebar_owns_its_own_columns() {
+        let mut app = ladder(200);
+        app.divider_x = 90;
+        app.repos_right = 26;
+
+        for col in [0, 1, 25] {
+            assert_eq!(app.pane_at(col), Focus::Repos, "column {col}");
+        }
+        for col in [26, 60, 89] {
+            assert_eq!(app.pane_at(col), Focus::Tree, "column {col}");
+        }
+        for col in [90, 150, 199] {
+            assert_eq!(app.pane_at(col), Focus::Detail, "column {col}");
+        }
+    }
+
+    /// `repos_right` is only set where the sidebar is actually drawn, so the
+    /// two-pane layout keeps answering exactly as it did -- a stale width from
+    /// an earlier wide frame would be an invisible dead zone down the left of
+    /// the tree.
+    #[test]
+    fn without_a_sidebar_pane_no_column_belongs_to_it() {
+        let mut app = narrow(100);
+        app.divider_x = 45;
+        app.repos_right = 0;
+        for col in [0, 1, 44] {
+            assert_eq!(app.pane_at(col), Focus::Tree, "column {col}");
+        }
+    }
+
+    /// A click in the sidebar selects the row under it, exactly as the tree
+    /// does -- and, crucially, leaves the task selection alone.
+    #[test]
+    fn clicking_a_sidebar_row_selects_it_and_leaves_the_tasks_alone() {
+        let mut app = app_with_repos();
+        let task_before = app.selected.clone();
+
+        app.select_repo_at_row(app.body_top + 1 + 3); // fourth row: Repo(two)
+
+        assert_eq!(app.selected_repo_row, 3);
+        assert_eq!(app.selected, task_before, "a sidebar click moved the task selection");
+    }
+
+    /// Dead space below the last row must do nothing -- not jump the cursor to
+    /// the end, which is what clamping would do. The same rule
+    /// `clicking_empty_header_space_changes_nothing` pins for the header.
+    #[test]
+    fn clicking_below_the_last_sidebar_row_changes_nothing() {
+        let mut app = app_with_repos();
+        app.selected_repo_row = 1;
+
+        app.select_repo_at_row(app.body_top + 1 + 50);
+
+        assert_eq!(app.selected_repo_row, 1);
+    }
+
+    /// Through the offset the renderer last published, so a click lands on the
+    /// row actually drawn rather than the one that would be there unscrolled.
+    #[test]
+    fn a_scrolled_sidebar_click_addresses_the_row_actually_drawn() {
+        let mut app = app_with_repos();
+        app.repos_offset = 2;
+
+        app.select_repo_at_row(app.body_top + 1);
+
+        assert_eq!(app.selected_repo_row, 2);
+    }
+
+    /// The wheel slides the sidebar's content and the cursor keeps its screen
+    /// row -- the same gesture `scroll_tree` gives the tree, so two panes an
+    /// inch apart cannot answer one drag in two directions.
+    #[test]
+    fn the_sidebar_wheel_moves_the_content_and_the_cursor_together() {
+        let mut app = app_with_repos();
+
+        app.scroll_repos(2);
+        assert_eq!(app.repos_offset, 2);
+        assert_eq!(app.selected_repo_row, 2);
+
+        app.scroll_repos(-2);
+        assert_eq!(app.repos_offset, 0);
+        assert_eq!(app.selected_repo_row, 0);
+    }
+
+    /// An empty sidebar has nothing to slide, and must not underflow trying.
+    #[test]
+    fn scrolling_an_empty_sidebar_does_nothing() {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.scroll_repos(3);
+        assert_eq!(app.repos_offset, 0);
+        assert_eq!(app.selected_repo_row, 0);
     }
 
     /// There is no divider to grab when only one pane is drawn, and a stale one

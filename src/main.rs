@@ -561,10 +561,16 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
                         app.select_at_row(m.row);
                     }
                     Focus::Detail => app.focus = Focus::Detail,
-                    // The repo pane has no click-to-select yet -- only the
-                    // keyboard path (`3`, then j/k/enter) does -- so a click
-                    // only focuses it.
-                    Focus::Repos => app.focus = Focus::Repos,
+                    // Selects, like the tree -- which is what the help
+                    // already promises ("click selects"). Switching store
+                    // stays on `enter`/`l`: a click is how you *look* at a
+                    // row, and making it also spend a ~180ms dex call and
+                    // replace both other panes would make the sidebar
+                    // dangerous to point at.
+                    Focus::Repos => {
+                        app.focus = Focus::Repos;
+                        app.select_repo_at_row(m.row);
+                    }
                 }
             }
         }
@@ -583,17 +589,14 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
             match app.pane_at(m.column) {
                 Focus::Tree => app.scroll_tree(1),
                 Focus::Detail => app.scroll_detail(1, 0),
-                // The wheel has no effect here yet -- only j/k/PageUp/PageDown
-                // move the sidebar cursor, and it has no separate scroll
-                // offset of its own to slide.
-                Focus::Repos => {}
+                Focus::Repos => app.scroll_repos(1),
             }
         }
         MouseEventKind::ScrollUp => {
             match app.pane_at(m.column) {
                 Focus::Tree => app.scroll_tree(-1),
                 Focus::Detail => app.scroll_detail(-1, 0),
-                Focus::Repos => {}
+                Focus::Repos => app.scroll_repos(-1),
             }
         }
         MouseEventKind::ScrollLeft => app.scroll_detail(0, -4),

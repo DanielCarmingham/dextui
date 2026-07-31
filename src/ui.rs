@@ -71,6 +71,11 @@ pub fn draw(frame: &mut Frame, app: &mut App, ic: &Icons) {
             // frame, which would be an invisible drag target in the middle of
             // the screen.
             app.divider_x = 0;
+            // No sidebar column to hit: with one pane, `pane_at` answers
+            // `focus` for every column anyway, and a stale width from the last
+            // three-pane frame would be an invisible dead zone on the left of
+            // whichever pane is up.
+            app.repos_right = 0;
             match app.focus {
                 Focus::Tree => draw_tree(frame, app, ic, body),
                 Focus::Detail => draw_detail(frame, app, ic, body),
@@ -87,6 +92,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, ic: &Icons) {
             // Published for mouse handling: the divider sits where the two
             // borders meet.
             app.divider_x = right.x;
+            app.repos_right = 0;
 
             draw_tree(frame, app, ic, left);
             draw_detail(frame, app, ic, right);
@@ -105,6 +111,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, ic: &Icons) {
             .areas(body);
 
             app.divider_x = right.x;
+            // Where the sidebar ends and the tree begins, so `pane_at` can
+            // tell a click on a repo row from a click on a task.
+            app.repos_right = left.x;
 
             draw_repos(frame, app, ic, repos);
             draw_tree(frame, app, ic, left);
