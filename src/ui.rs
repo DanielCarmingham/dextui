@@ -924,6 +924,28 @@ fn draw_repos(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
                     ));
                 }
             }
+
+            // How much is outstanding in each store, right-aligned. Drawn from
+            // the same cache a switch reads, so it costs no `dex` call and
+            // cannot disagree with what selecting the row would show. A store
+            // that has not been read yet gets nothing rather than `0`: absent
+            // and empty are different answers and must stay tellable apart.
+            let store = match row {
+                crate::repos::Row::Repo { index } => app.repos[*index].store(None),
+                crate::repos::Row::Worktree { repo, index } => {
+                    let r = &app.repos[*repo];
+                    r.store(Some(&r.worktrees[*index]))
+                }
+            };
+            if let Some(c) = app.counts_for_store(&store).filter(|c| c.pending > 0) {
+                let tail = c.pending.to_string();
+                let used = span_width(&spans) + tail.chars().count();
+                let inner = area.width.saturating_sub(2) as usize;
+                if used < inner {
+                    spans.push(Span::raw(" ".repeat(inner - used)));
+                    spans.push(Span::styled(tail, Style::default().fg(TODO)));
+                }
+            }
             ListItem::new(Line::from(spans))
         })
         .collect();

@@ -250,13 +250,18 @@ pub struct App {
     /// below the visible area with nothing on screen ever moving to show it.
     pub repos_offset: usize,
     pub registry: crate::registry::Registry,
-    /// Per-store task counts, keyed by store directory (`repos::store_dir`).
-    /// The selected worktree's store additionally holds its full task list in
-    /// `self.tasks`/`self.by_id`; every other registered store holds counts
-    /// only, re-read when its own watcher fires and never on a timer -- see
-    /// the startup wiring in `main.rs` and CLAUDE.md's refresh model for why
-    /// polling every store was rejected.
-    pub worktree_counts: HashMap<String, Counts>,
+    /// Every sidebar store's task list, keyed by store directory.
+    ///
+    /// This is what lets moving the sidebar cursor change the panes as
+    /// immediately as moving the tree cursor changes the detail -- one model
+    /// for both, rather than two that look identical and are not. A switch is
+    /// a lookup here, not a `dex list`.
+    ///
+    /// It costs nothing extra to keep: the startup join and every watcher
+    /// update already fetch the whole list for each store and used to reduce
+    /// it to counts on arrival, discarding exactly the thing a switch then
+    /// paid ~180ms to fetch again.
+    pub store_tasks: HashMap<String, Vec<Task>>,
 }
 
 impl App {
@@ -312,7 +317,7 @@ impl App {
             selected_repo_row: 0,
             repos_offset: 0,
             registry: crate::registry::Registry::default(),
-            worktree_counts: HashMap::new(),
+            store_tasks: HashMap::new(),
         };
 
         // Everything is "new" on first load, so the collapse-new-tasks rule would
@@ -1104,6 +1109,14 @@ impl App {
         if let Some(i) = found {
             self.selected_repo_row = i;
         }
+    }
+
+    /// A cached store's counts, for the sidebar. `None` means it has not been
+    /// read yet -- a repo registered mid-run, or one whose read failed -- which
+    /// is a different thing from a store with no tasks and must stay tellable
+    /// apart.
+    pub fn counts_for_store(&self, store_dir: &str) -> Option<Counts> {
+        self.store_tasks.get(store_dir).map(|t| counts_for(t))
     }
 
     /// Whether any row of `repo` is the store this run is currently reading.

@@ -33,7 +33,6 @@ use dex::{Dex, Task};
 
 /// Everything the main loop reacts to, from every thread, on one channel.
 enum Msg {
-    StoreChanged,
     /// A task list, tagged with the store directory it was actually read
     /// from.
     ///
@@ -55,11 +54,13 @@ enum Msg {
         result: String,
         error: String,
     },
-    /// A registered store other than the selected one changed. Carries its
-    /// freshly re-read task list (or the failure), keyed by store directory
-    /// to match `App::worktree_counts` -- the selected store keeps using
-    /// plain `Msg::Tasks` via the existing `dex`/`refresh` path, unchanged.
-    WorktreeCounts {
+    /// A sidebar store was re-read. Carries its freshly listed tasks (or the
+    /// failure), keyed by store directory.
+    ///
+    /// Every store gets this, the selected one included: the cache it fills is
+    /// what makes moving the sidebar cursor change the panes immediately, so
+    /// the store being read cannot be the one store missing from it.
+    StoreLoaded {
         dir: String,
         result: Result<Vec<Task>, String>,
     },
@@ -384,26 +385,9 @@ fn main() -> std::io::Result<()> {
 
     let (tx, rx) = channel::<Msg>();
 
-    // Watcher. Kept alive for the whole run; dropping it stops notifications.
-    // `watch_tx` itself is kept (cloned into `spawn` rather than moved) so
-    // `switch_store` can start a fresh watcher on the same channel when the
-    // repo pane picks a different worktree.
-    let (watch_tx, watch_rx) = channel::<()>();
-    let mut watcher = watch::spawn(&store_dir, watch_tx.clone());
-    {
-        let tx = tx.clone();
-        thread::spawn(move || {
-            while watch_rx.recv().is_ok() {
-                if tx.send(Msg::StoreChanged).is_err() {
-                    return;
-                }
-            }
-        });
-    }
-
     // Which registered worktree the app is actually reading -- the one whose
     // store is `store_dir`, already resolved above by the preflight `dex
-    // dir` call. Everything else registered gets counts only; see below.
+    // dir` call.
     app.selected_worktree = app
         .repos
         .iter()
@@ -416,29 +400,45 @@ fn main() -> std::io::Result<()> {
     // first.
     app.select_current_store_row();
 
-    // Every OTHER registered worktree -- the selected one keeps the watcher
-    // and stat-gated 10s safety net set up above, exactly as today.
-    let other_worktrees: Vec<String> = app
+    // Every store the sidebar can reach, the selected one included.
+    //
+    // It used to be "every store *except* the selected one", which kept its
+    // own `watch::spawn` and its own channel. Two mechanisms for one job was
+    // survivable while a switch cost a `dex list` anyway -- but a switch is
+    // now a cache lookup, and restarting a watcher on every cursor move would
+    // have been the only thing left making it expensive. One fleet, set up
+    // once, means `switch_store` touches no watcher at all.
+    let all_store_dirs: Vec<String> = app
         .repos
         .iter()
-        .flat_map(|r| r.worktrees.iter())
-        .map(|w| w.path.clone())
-        .filter(|p| Some(p.as_str()) != app.selected_worktree.as_deref())
+        .flat_map(|r| {
+            let repo_store = r.store(None);
+            r.worktrees
+                .iter()
+                .map(|w| r.store(Some(w)))
+                .chain(r.worktrees.is_empty().then_some(repo_store))
+                .collect::<Vec<_>>()
+        })
         .collect();
 
-    // Their counts, read **concurrently** -- one thread per store calling
-    // `Dex::for_store` then `.list()`, joined before the first draw. A `dex`
-    // call costs ~180ms of Node startup; done one after another, ten stores
-    // would be 1.8s of blank screen before the first frame.
+    // Read **concurrently** -- one thread per store calling `Dex::for_store`
+    // then `.list()`, joined before the first draw. A `dex` call costs ~180ms
+    // of Node startup; done one after another, ten stores would be 1.8s of
+    // blank screen before the first frame.
     //
-    // `repos::has_store` first, since it is a plain on-disk check: a
-    // worktree with no `.dex` yet is an ordinary row, not worth a process
-    // spawn that would only come back empty.
-    let handles: Vec<_> = other_worktrees
+    // The whole task list is kept, not just its counts. This is the same work
+    // as before -- the lists were already being fetched here and reduced to
+    // counts on arrival -- but keeping them is what lets a later switch to any
+    // of these stores cost nothing at all.
+    //
+    // `repos::has_store` first, since it is a plain on-disk check: a store
+    // that does not exist yet is an ordinary row, not worth a process spawn
+    // that would only come back empty.
+    let handles: Vec<_> = all_store_dirs
         .iter()
-        .filter(|p| repos::has_store(p))
-        .map(|p| {
-            let dir = repos::store_dir(p);
+        .filter(|dir| *dir != &store_dir && std::path::Path::new(dir).is_dir())
+        .map(|dir| {
+            let dir = dir.clone();
             thread::spawn(move || {
                 let start = std::time::Instant::now();
                 let result = Dex::for_store(&dir).and_then(|d| d.list());
@@ -448,29 +448,27 @@ fn main() -> std::io::Result<()> {
         })
         .collect();
     for h in handles {
-        // A store that failed to read is simply not in the map yet -- it
-        // gets another chance the next time its own watcher fires, or when
-        // it is selected. Nothing here is fatal.
+        // A store that failed to read is simply absent from the cache -- it
+        // gets another chance the next time its own watcher fires, or when it
+        // is selected. Absent and empty stay distinguishable, which is what
+        // lets a switch tell "not read yet" from "no tasks". Nothing here is
+        // fatal.
         if let Ok((dir, Ok(store_tasks))) = h.join() {
-            app.worktree_counts.insert(dir, app::counts_for(&store_tasks));
+            app.store_tasks.insert(dir, store_tasks);
         }
     }
-    // The selected store already has its full task list in `tasks` above --
-    // no second `dex list` needed to seed its own entry in the same cache.
-    app.worktree_counts
-        .insert(store_dir.clone(), app::counts_for(&app.tasks));
+    // The selected store already has its full task list in `tasks` above -- no
+    // second `dex list` to seed its own entry.
+    app.store_tasks.insert(store_dir.clone(), app.tasks.clone());
 
-    // Every other registered store's watcher, via the same stat-gated safety
-    // net `watch::spawn` gives the selected store -- no extra polling loop
-    // added here, and no `dex list` at all until a store's own fingerprint
-    // actually changes. That is what keeps this from becoming the "ten node
-    // spawns every ten seconds forever" alternative CLAUDE.md rules out.
-    // `_other_store_watchers` must stay alive for the whole run; dropping it
+    // One watcher per store, each with the same stat-gated safety net: no
+    // extra polling loop, and no `dex list` at all until a store's own
+    // fingerprint actually changes. That is what keeps this from becoming the
+    // "ten node spawns every ten seconds forever" alternative CLAUDE.md rules
+    // out. `_store_watchers` must stay alive for the whole run; dropping it
     // stops every one of these notifications.
-    let other_store_dirs: Vec<String> =
-        other_worktrees.iter().map(|p| repos::store_dir(p)).collect();
     let (worktree_tx, worktree_rx) = channel::<String>();
-    let _other_store_watchers = watch::spawn_many(&other_store_dirs, worktree_tx);
+    let _store_watchers = watch::spawn_many(&all_store_dirs, worktree_tx);
     {
         let tx = tx.clone();
         thread::spawn(move || {
@@ -478,7 +476,7 @@ fn main() -> std::io::Result<()> {
                 let start = std::time::Instant::now();
                 let result = Dex::for_store(&dir).and_then(|d| d.list());
                 log_list_outcome(&dir, &result, start.elapsed());
-                if tx.send(Msg::WorktreeCounts { dir, result }).is_err() {
+                if tx.send(Msg::StoreLoaded { dir, result }).is_err() {
                     return;
                 }
             }
@@ -535,11 +533,11 @@ fn main() -> std::io::Result<()> {
         }
 
         while let Ok(msg) = rx.try_recv() {
-            // `WorktreeCounts` updates a store nobody is looking at -- ui.rs
-            // does not draw `app.worktree_counts` anywhere yet, so redrawing
-            // for it would be exactly the idle-cost regression the pulse
-            // guarantee exists to prevent, for zero visible change.
-            let visible = !matches!(msg, Msg::WorktreeCounts { .. });
+            // A `StoreLoaded` for a store nobody is looking at changes only
+            // the cache, so redrawing for it would be exactly the idle-cost
+            // regression the pulse guarantee exists to prevent, for zero
+            // visible change. One for the store on screen is a real refresh.
+            let visible = !matches!(&msg, Msg::StoreLoaded { dir, .. } if *dir != app.store_dir);
             handle_msg(&mut app, msg, &dex, &tx);
             dirty = dirty || visible;
         }
@@ -561,7 +559,7 @@ fn main() -> std::io::Result<()> {
         // that runs on every keystroke, so the ~180ms dex call is the same
         // trade the preflight and the `$EDITOR` handoff already make.
         if let Some(path) = app.pending_store.take() {
-            switch_store(&mut app, &mut dex, &mut watcher, &watch_tx, &path);
+            switch_store(&mut app, &mut dex, &tx, &path);
             dirty = true;
         }
     }
@@ -617,6 +615,7 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
                     Focus::Repos => {
                         app.focus = Focus::Repos;
                         app.select_repo_at_row(m.row);
+                        follow_repo_cursor(app);
                     }
                 }
             }
@@ -636,14 +635,20 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
             match app.pane_at(m.column) {
                 Focus::Tree => app.scroll_tree(1),
                 Focus::Detail => app.scroll_detail(1, 0),
-                Focus::Repos => app.scroll_repos(1),
+                Focus::Repos => {
+                    app.scroll_repos(1);
+                    follow_repo_cursor(app);
+                }
             }
         }
         MouseEventKind::ScrollUp => {
             match app.pane_at(m.column) {
                 Focus::Tree => app.scroll_tree(-1),
                 Focus::Detail => app.scroll_detail(-1, 0),
-                Focus::Repos => app.scroll_repos(-1),
+                Focus::Repos => {
+                    app.scroll_repos(-1);
+                    follow_repo_cursor(app);
+                }
             }
         }
         MouseEventKind::ScrollLeft => app.scroll_detail(0, -4),
@@ -655,15 +660,6 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
 
 fn handle_msg(app: &mut App, msg: Msg, dex: &Arc<Dex>, tx: &Sender<Msg>) {
     match msg {
-        Msg::StoreChanged => {
-            if app.is_modal() {
-                // Deferred rather than dropped; applied when the dialog closes.
-                app.pending_refresh = true;
-            } else {
-                refresh(dex, tx, app);
-            }
-        }
-
         // A refresh that was already in flight when the store changed under
         // it. Dropped rather than applied: it describes a store nobody is
         // looking at any more, and painting it would leave the tree and the
@@ -695,16 +691,31 @@ fn handle_msg(app: &mut App, msg: Msg, dex: &Arc<Dex>, tx: &Sender<Msg>) {
             };
         }
 
-        // A store nobody is looking at right now. On success its cached
-        // count is simply replaced; on failure it is left exactly as it was
-        // -- the same "keep the last good model" rule `Msg::Tasks(Err)`
-        // follows for the selected store, just without a status message,
-        // since surfacing an error for a store the user is not even viewing
-        // would violate "a refresh must never disturb the user."
-        Msg::WorktreeCounts { dir, result } => {
-            if let Ok(store_tasks) = result {
-                app.worktree_counts.insert(dir, app::counts_for(&store_tasks));
+        // A store's watcher fired and it has been re-read. On success the
+        // cache entry is replaced; on failure it is left exactly as it was --
+        // the same "keep the last good model" rule `Msg::Tasks(Err)` follows,
+        // and without a status message for a store nobody is looking at,
+        // since that would violate "a refresh must never disturb the user."
+        Msg::StoreLoaded { dir, result } => {
+            let Ok(store_tasks) = result else { return };
+
+            // The store on screen goes through `apply_tasks`, which is what
+            // preserves the selection, the expansion set and any open dialog.
+            // Writing only the cache here would leave the panes stale until
+            // something else happened to redraw them -- this message replaced
+            // the watcher path the visible panes used to have of their own.
+            if dir == app.store_dir {
+                if app.is_modal() {
+                    // Deferred rather than dropped; applied when the dialog
+                    // closes. The cache is still updated, so a switch away and
+                    // back cannot resurrect the older list.
+                    app.store_tasks.insert(dir, store_tasks);
+                    app.pending_refresh = true;
+                    return;
+                }
+                app.apply_tasks(store_tasks.clone());
             }
+            app.store_tasks.insert(dir, store_tasks);
         }
     }
 }
@@ -795,22 +806,34 @@ fn flatten(s: &str) -> String {
     s.replace(['\n', '\r'], " ").trim().to_string()
 }
 
-/// Points the running app at a different worktree's dex store: swaps the
-/// active `Dex`, restarts its watcher on the new directory, and reloads the
-/// task list. Leaves everything untouched on failure, so a bad target does
-/// not blank out a working view.
-fn switch_store(
-    app: &mut App,
-    dex: &mut Arc<Dex>,
-    watcher: &mut watch::StoreWatcher,
-    watch_tx: &Sender<()>,
-    worktree_path: &str,
-) {
+/// Points the running app at a different worktree's dex store.
+///
+/// **Does no I/O on the common path**, which is what lets the sidebar cursor
+/// drive the panes as immediately as the tree cursor drives the detail. Every
+/// sidebar store is already listed at startup and kept current by its own
+/// watcher, so a switch is a cache lookup and a `Dex` swap; and because the
+/// watchers cover every store rather than only the unselected ones, there is
+/// none to restart here either.
+///
+/// A miss -- a repo registered mid-run, or a store whose read failed -- falls
+/// back to an async list. It shows the new store's label over an **empty**
+/// tree while that runs, never the old store's tasks under the new name: dex
+/// reports the wrong store as an empty project rather than an error, so the
+/// one thing this must never do is make a wrong store look plausible.
+fn switch_store(app: &mut App, dex: &mut Arc<Dex>, tx: &Sender<Msg>, worktree_path: &str) {
     // Through the sidebar, not `repos::store_dir`: the global row's path is
     // already its store, and deriving `<path>/.dex` from it would point dex at
-    // a directory that does not exist -- which it reports as an empty project
-    // rather than as an error.
+    // a directory that does not exist.
     let dir = app.store_for_path(worktree_path);
+    // The early return is what keeps a cursor move cheap when it does not
+    // actually change store -- a repo row and its main worktree row resolve to
+    // the same one -- and it is what stops the log filling with switches that
+    // did not happen.
+    if dir == app.store_dir {
+        return;
+    }
+    log::line("store", &format!("switching from {} to {dir}", app.store_dir));
+
     let new_dex = match Dex::for_store(&dir) {
         Ok(d) => d,
         Err(e) => {
@@ -818,26 +841,37 @@ fn switch_store(
             return;
         }
     };
-    let start = std::time::Instant::now();
-    let result = new_dex.list();
-    log_list_outcome(&dir, &result, start.elapsed());
-    match result {
-        Ok(tasks) => {
-            *dex = Arc::new(new_dex);
-            *watcher = watch::spawn(&dir, watch_tx.clone());
-            // `load_store`, not `apply_tasks`: the latter's whole job is
-            // preserving a selection and expansion set the *same* store
-            // made, by resolving them against the new task list -- but this
-            // is a different store, so `self.selected`/`self.expanded` refer
-            // to ids that belong nowhere here. Using it anyway is exactly
-            // the collapsed-single-root bug CLAUDE.md already records: every
-            // old expanded id would fail to match the new tree and
-            // `expand_all` would never run, so the new store would open
-            // fully collapsed.
-            app.load_store(tasks, dir.clone());
+    *dex = Arc::new(new_dex);
+
+    // `load_store`, not `apply_tasks`: the latter's whole job is preserving a
+    // selection and expansion set the *same* store made, by resolving them
+    // against the new task list -- but this is a different store, so
+    // `self.selected`/`self.expanded` refer to ids that belong nowhere here.
+    // Using it anyway is exactly the collapsed-single-root bug CLAUDE.md
+    // records: every old expanded id would fail to match the new tree and
+    // `expand_all` would never run, so the new store would open fully
+    // collapsed.
+    match app.store_tasks.get(&dir) {
+        Some(cached) => {
+            app.load_store(cached.clone(), dir.clone());
             app.status = format!("switched to {}", app.store_label);
         }
-        Err(e) => app.status = format!("could not read {dir}: {}", flatten(&e)),
+        None => {
+            app.load_store(Vec::new(), dir.clone());
+            app.status = format!("reading {}…", app.store_label);
+            // Tagged with its store, so if the cursor has moved on again by
+            // the time this lands, `handle_msg` drops it rather than painting
+            // one store's tasks under another's name.
+            let dex = Arc::clone(dex);
+            let tx = tx.clone();
+            let store = dir.clone();
+            thread::spawn(move || {
+                let start = std::time::Instant::now();
+                let result = dex.list();
+                log_list_outcome(&store, &result, start.elapsed());
+                let _ = tx.send(Msg::StoreLoaded { dir: store, result });
+            });
+        }
     }
 }
 
@@ -968,16 +1002,33 @@ fn repo_name(repo_path: &str) -> String {
 /// store swap for the main loop -- `handle_normal` only ever sees `&Arc<Dex>`,
 /// not a way to replace what it points to.
 fn select_worktree_under_cursor(app: &mut App) {
+    follow_repo_cursor(app);
+    // `enter` is now only about focus: the store already changed when the
+    // cursor landed here. Kept because moving to the pane you just chose is
+    // exactly what you want next, and because `l` means the same thing.
+    if app.selected_worktree_path().is_some() {
+        app.focus = Focus::Tree;
+    }
+}
+
+fn move_repo_cursor(app: &mut App, delta: isize) {
+    app.move_repo_row(delta);
+    follow_repo_cursor(app);
+}
+
+/// Points the task panes at whatever the sidebar cursor is on now.
+///
+/// This is what makes the sidebar and the task tree one model rather than two
+/// that look identical: moving the tree cursor changes the detail pane on
+/// every keystroke, and moving the sidebar cursor now changes the tree and
+/// detail the same way. It used to take `enter`, on the grounds that a switch
+/// cost a ~180ms `dex list` -- which stopped being true once every sidebar
+/// store's task list was cached rather than reduced to counts and thrown away.
+/// See `switch_store` for what a move actually costs now.
+fn follow_repo_cursor(app: &mut App) {
     if let Some(path) = app.selected_worktree_path() {
-        // Captured before `select_worktree` overwrites it -- by the time
-        // `switch_store` runs on the main loop, `app.selected_worktree` is
-        // already the new path, so "from" has to be recorded here or it is
-        // gone.
-        let from = app.selected_worktree.clone().unwrap_or_else(|| "(none)".into());
-        log::line("store", &format!("switching from {from} to {path}"));
         app.select_worktree(&path);
         app.pending_store = Some(path);
-        app.focus = Focus::Tree;
     }
 }
 
@@ -1140,22 +1191,22 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         KeyCode::Down | KeyCode::Char('j') => match app.focus {
             Focus::Tree => app.move_selection(1),
             Focus::Detail => app.scroll_detail(1, 0),
-            Focus::Repos => app.move_repo_row(1),
+            Focus::Repos => move_repo_cursor(app, 1),
         },
         KeyCode::Up | KeyCode::Char('k') => match app.focus {
             Focus::Tree => app.move_selection(-1),
             Focus::Detail => app.scroll_detail(-1, 0),
-            Focus::Repos => app.move_repo_row(-1),
+            Focus::Repos => move_repo_cursor(app, -1),
         },
         KeyCode::PageDown => match app.focus {
             Focus::Tree => app.move_selection(10),
             Focus::Detail => app.scroll_detail(10, 0),
-            Focus::Repos => app.move_repo_row(10),
+            Focus::Repos => move_repo_cursor(app, 10),
         },
         KeyCode::PageUp => match app.focus {
             Focus::Tree => app.move_selection(-10),
             Focus::Detail => app.scroll_detail(-10, 0),
-            Focus::Repos => app.move_repo_row(-10),
+            Focus::Repos => move_repo_cursor(app, -10),
         },
         // Enter always opens the detail -- except from the repo pane, where it
         // instead picks the worktree under the cursor. It was unbound in
@@ -1220,12 +1271,18 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         KeyCode::Char('g') => match app.focus {
             Focus::Tree => app.select_first(),
             Focus::Detail => app.detail_to_top(),
-            Focus::Repos => app.select_first_repo_row(),
+            Focus::Repos => {
+                app.select_first_repo_row();
+                follow_repo_cursor(app);
+            }
         },
         KeyCode::Char('G') => match app.focus {
             Focus::Tree => app.select_last(),
             Focus::Detail => app.detail_to_bottom(),
-            Focus::Repos => app.select_last_repo_row(),
+            Focus::Repos => {
+                app.select_last_repo_row();
+                follow_repo_cursor(app);
+            }
         },
         // `z` is tmux's zoom-pane, which is where the reflex comes from. That
         // cost collapse/expand their old keys -- and `-`/`+` is the better
