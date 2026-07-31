@@ -94,9 +94,9 @@ pub enum Mode {
 pub enum Focus {
     Tree,
     Detail,
-    /// Not yet reachable -- no key sets it until the task that wires it, but
-    /// it already has to exist so `App`'s new fields and match arms compile.
-    #[allow(dead_code)]
+    /// The repo/worktree sidebar. `3` sets it directly; `Tab` never cycles
+    /// into it -- that key's contract is "the other of two panes," and a
+    /// third destination would make it ambiguous which one Tab returns to.
     Repos,
 }
 
@@ -165,6 +165,11 @@ pub struct App {
     pub pending_editor: Option<String>,
     /// Set by `,`; the main loop opens the config file in $EDITOR and reloads.
     pub pending_config_edit: bool,
+    /// Set by `enter`/`l` in the repo pane; the main loop picks it up and
+    /// swaps which store the task panes read. Handled the same way as
+    /// `pending_editor`: `handle_key` only ever sees `&Arc<Dex>`, so replacing
+    /// what it points to has to happen one level up, in `main`.
+    pub pending_store: Option<String>,
     /// Width of the tree pane as a percentage. Dragged with the mouse.
     pub split_percent: u16,
     pub dragging_split: bool,
@@ -211,16 +216,13 @@ pub struct App {
     /// click can never act on a menu that is not on screen.
     pub header_zones: Vec<(u16, u16, HeaderZone)>,
     /// Which worktree's store the task tree is showing.
-    #[allow(dead_code)] // not yet consumed by the renderer -- a later task draws the pane
     pub selected_worktree: Option<String>,
     /// Task selection per worktree path, so switching back returns the cursor.
     /// Session-only: this is view state, not something to persist.
-    #[allow(dead_code)] // not yet consumed by the renderer -- a later task draws the pane
     pub task_memory: HashMap<String, String>,
     /// Registered repos with their worktrees, and whether each is expanded.
     pub repos: Vec<crate::repos::Repo>,
     pub selected_repo_row: usize,
-    #[allow(dead_code)] // not yet consumed by the renderer -- a later task draws the pane
     pub registry: crate::registry::Registry,
 }
 
@@ -243,6 +245,7 @@ impl App {
             should_quit: false,
             pending_editor: None,
             pending_config_edit: false,
+            pending_store: None,
             split_percent: 45,
             dragging_split: false,
             divider_x: 0,
@@ -847,7 +850,6 @@ impl App {
 
     /// Switches which store the task panes read, remembering where the cursor
     /// was in the worktree being left.
-    #[allow(dead_code)] // not yet consumed by the renderer -- a later task wires the keys
     pub fn select_worktree(&mut self, path: &str) {
         if self.selected_worktree.as_deref() == Some(path) {
             return;
@@ -864,6 +866,72 @@ impl App {
     /// repo list changed underneath it, since `Row` carries bare indices.
     pub fn repo_rows(&self) -> Vec<crate::repos::Row> {
         crate::repos::rows(&self.repos)
+    }
+
+    /// Moves the sidebar cursor, clamped the same way `move_selection` clamps
+    /// the tree's -- a no-op on an empty list rather than a panic.
+    pub fn move_repo_row(&mut self, delta: isize) {
+        let len = self.repo_rows().len();
+        if len == 0 {
+            return;
+        }
+        let current = self.selected_repo_row as isize;
+        self.selected_repo_row = (current + delta).clamp(0, len as isize - 1) as usize;
+    }
+
+    pub fn select_first_repo_row(&mut self) {
+        self.selected_repo_row = 0;
+    }
+
+    pub fn select_last_repo_row(&mut self) {
+        self.selected_repo_row = self.repo_rows().len().saturating_sub(1);
+    }
+
+    /// The repo owning the row under the sidebar cursor -- a worktree row
+    /// resolves to its parent, since `D` unregisters the whole entry, not one
+    /// worktree inside it.
+    pub fn selected_repo(&self) -> Option<&crate::repos::Repo> {
+        let index = match self.repo_rows().get(self.selected_repo_row)? {
+            crate::repos::Row::Repo { index } => *index,
+            crate::repos::Row::Worktree { repo, .. } => *repo,
+        };
+        self.repos.get(index)
+    }
+
+    /// The exact worktree path under the sidebar cursor -- a repo row
+    /// resolves to its own (main) worktree, which `git worktree list` always
+    /// reports first and which shares the repo's own registered path.
+    pub fn selected_worktree_path(&self) -> Option<String> {
+        match self.repo_rows().get(self.selected_repo_row)? {
+            crate::repos::Row::Repo { index } => self.repos.get(*index).map(|r| r.path.clone()),
+            crate::repos::Row::Worktree { repo, index } => self
+                .repos
+                .get(*repo)
+                .and_then(|r| r.worktrees.get(*index))
+                .map(|w| w.path.clone()),
+        }
+    }
+
+    /// Registers a repo. Returns whether the registry changed, so a duplicate
+    /// can be reported rather than looking inert.
+    pub fn register_repo_path(&mut self, repo_path: &str) -> Result<bool, String> {
+        let changed = self.registry.add(repo_path);
+        if changed {
+            self.registry.save()?;
+        }
+        Ok(changed)
+    }
+
+    /// Unregistering is a view operation: it never touches the worktree, the
+    /// branch or the store, only the entry and the row it drew.
+    pub fn unregister_repo_path(&mut self, repo_path: &str) {
+        if self.registry.remove(repo_path) {
+            let _ = self.registry.save();
+            self.repos.retain(|r| r.path != repo_path);
+            self.selected_repo_row = self
+                .selected_repo_row
+                .min(self.repo_rows().len().saturating_sub(1));
+        }
     }
 }
 
@@ -1584,6 +1652,208 @@ mod tests {
 
         app.select_worktree("/x/one");
         assert_eq!(app.selected.as_deref(), Some("a"));
+    }
+
+    fn wt(path: &str, branch: &str, main: bool) -> crate::worktree::Worktree {
+        crate::worktree::Worktree {
+            path: path.to_string(),
+            branch: branch.to_string(),
+            is_main: main,
+            is_locked: false,
+            is_detached: false,
+        }
+    }
+
+    fn repo(name: &str) -> crate::repos::Repo {
+        crate::repos::Repo {
+            name: name.to_string(),
+            path: format!("/x/{name}"),
+            worktrees: vec![
+                wt(&format!("/x/{name}"), "main", true),
+                wt(&format!("/x/{name}-feat"), "feat", false),
+            ],
+            open: true,
+        }
+    }
+
+    fn app_with_repos() -> App {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.repos = vec![repo("one"), repo("two")];
+        app
+    }
+
+    /// The rows are [Repo(one), Worktree(one,main), Worktree(one,feat),
+    /// Repo(two), Worktree(two,main), Worktree(two,feat)].
+    #[test]
+    fn a_repo_row_resolves_to_its_own_main_worktree() {
+        let mut app = app_with_repos();
+        app.selected_repo_row = 0;
+        assert_eq!(app.selected_worktree_path().as_deref(), Some("/x/one"));
+        assert_eq!(app.selected_repo().unwrap().name, "one");
+    }
+
+    #[test]
+    fn a_worktree_row_resolves_to_that_exact_worktree() {
+        let mut app = app_with_repos();
+        app.selected_repo_row = 2; // Worktree(one, feat)
+        assert_eq!(app.selected_worktree_path().as_deref(), Some("/x/one-feat"));
+        // But the *repo* it belongs to is still "one", not a worktree-shaped
+        // thing -- D unregisters the entry, not one worktree inside it.
+        assert_eq!(app.selected_repo().unwrap().name, "one");
+    }
+
+    #[test]
+    fn a_worktree_row_deep_in_the_second_repo_resolves_to_the_second_repo() {
+        let mut app = app_with_repos();
+        app.selected_repo_row = 4; // Worktree(two, main)
+        assert_eq!(app.selected_repo().unwrap().name, "two");
+    }
+
+    #[test]
+    fn an_empty_repo_list_resolves_nothing_rather_than_panicking() {
+        let app = counted(vec![task("a", None, &[])]);
+        assert_eq!(app.selected_worktree_path(), None);
+        assert!(app.selected_repo().is_none());
+    }
+
+    #[test]
+    fn repo_row_movement_clamps_at_both_ends() {
+        let mut app = app_with_repos(); // 6 rows: indices 0..=5
+        app.move_repo_row(-1);
+        assert_eq!(app.selected_repo_row, 0, "must not go negative");
+
+        app.move_repo_row(100);
+        assert_eq!(app.selected_repo_row, 5, "must not run past the last row");
+
+        app.move_repo_row(-2);
+        assert_eq!(app.selected_repo_row, 3);
+    }
+
+    #[test]
+    fn repo_row_movement_on_an_empty_list_does_nothing() {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.selected_repo_row = 0;
+        app.move_repo_row(5);
+        assert_eq!(app.selected_repo_row, 0);
+    }
+
+    #[test]
+    fn g_and_shift_g_jump_to_the_first_and_last_repo_row() {
+        let mut app = app_with_repos();
+        app.selected_repo_row = 2;
+
+        app.select_last_repo_row();
+        assert_eq!(app.selected_repo_row, 5);
+
+        app.select_first_repo_row();
+        assert_eq!(app.selected_repo_row, 0);
+    }
+
+    /// `std::env::set_var` is unsafe in edition 2024 and mutates process-wide
+    /// state, so this runs under one lock and restores what it set --
+    /// mirrors `editor::tests::with_env`, duplicated because that helper is
+    /// private to its own module.
+    fn with_env<T>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        let saved: Vec<(String, Option<String>)> = vars
+            .iter()
+            .map(|(k, _)| ((*k).to_string(), std::env::var(k).ok()))
+            .collect();
+
+        for (k, v) in vars {
+            match v {
+                Some(v) => unsafe { std::env::set_var(k, v) },
+                None => unsafe { std::env::remove_var(k) },
+            }
+        }
+
+        let out = f();
+
+        for (k, v) in saved {
+            match v {
+                Some(v) => unsafe { std::env::set_var(&k, v) },
+                None => unsafe { std::env::remove_var(&k) },
+            }
+        }
+        out
+    }
+
+    /// Points `XDG_CONFIG_HOME` at a scratch directory for the duration of
+    /// `f`, so `register_repo_path`/`unregister_repo_path` -- which call
+    /// `Registry::save` for real -- never touch the user's actual
+    /// `~/.config/dextui/repos.toml`. A suite that rewrote that file on every
+    /// run would be worse than no suite at all.
+    fn with_isolated_registry<T>(f: impl FnOnce() -> T) -> T {
+        let dir = std::env::temp_dir().join(format!("dextui-test-registry-{}", std::process::id()));
+        with_env(&[("XDG_CONFIG_HOME", Some(dir.to_str().unwrap()))], f)
+    }
+
+    #[test]
+    fn registering_adds_the_repo_and_reports_the_change() {
+        with_isolated_registry(|| {
+            let mut app = counted(vec![task("a", None, &[])]);
+            app.registry = crate::registry::Registry::default();
+
+            assert!(app.register_repo_path("/x/dextui").unwrap());
+            assert_eq!(app.registry.repos, vec!["/x/dextui".to_string()]);
+        });
+    }
+
+    #[test]
+    fn registering_a_known_repo_is_reported_not_duplicated() {
+        with_isolated_registry(|| {
+            let mut app = counted(vec![task("a", None, &[])]);
+            app.registry = crate::registry::Registry::default();
+            app.register_repo_path("/x/dextui").unwrap();
+
+            assert!(
+                !app.register_repo_path("/x/dextui").unwrap(),
+                "a duplicate must report that nothing changed"
+            );
+            assert_eq!(app.registry.repos.len(), 1);
+        });
+    }
+
+    /// Unregistering is a view operation. It must never touch the worktree,
+    /// the branch or the store -- only the entry and the row.
+    #[test]
+    fn unregistering_removes_only_the_entry() {
+        with_isolated_registry(|| {
+            let mut app = counted(vec![task("a", None, &[])]);
+            app.registry = crate::registry::Registry::default();
+            app.register_repo_path("/x/one").unwrap();
+            app.register_repo_path("/x/two").unwrap();
+
+            app.unregister_repo_path("/x/one");
+            assert_eq!(app.registry.repos, vec!["/x/two".to_string()]);
+        });
+    }
+
+    /// Removing a repo that is actually loaded into `app.repos` must also
+    /// drop its row, and clamp the cursor rather than leave it pointing past
+    /// the end of a now-shorter list.
+    #[test]
+    fn unregistering_a_loaded_repo_drops_its_row_and_clamps_the_cursor() {
+        with_isolated_registry(|| {
+            let mut app = app_with_repos(); // "one" then "two", 6 rows total
+            app.registry.add("/x/one");
+            app.registry.add("/x/two");
+            app.selected_repo_row = 5; // last row, inside "two"
+
+            app.unregister_repo_path("/x/two");
+
+            assert_eq!(app.repos.len(), 1, "the repo's own row must be gone too");
+            assert_eq!(app.repos[0].name, "one");
+            assert!(
+                app.selected_repo_row < app.repo_rows().len(),
+                "cursor left pointing past the end: {} vs {} rows",
+                app.selected_repo_row,
+                app.repo_rows().len()
+            );
+        });
     }
 
     /// Otherwise `,`-reload would silently ignore the key, which is exactly the

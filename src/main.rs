@@ -259,7 +259,9 @@ fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    let dex = Arc::new(Dex::real());
+    // `mut`: selecting a worktree in the repo pane replaces this with a
+    // `Dex::for_store` targeting the chosen store -- see `switch_store`.
+    let mut dex = Arc::new(Dex::real());
 
     // Preflight before taking over the terminal, so a failure prints plainly
     // instead of leaving a half-initialised TUI behind.
@@ -283,11 +285,20 @@ fn main() -> std::io::Result<()> {
     };
 
     let (cfg, config_problem) = config::load();
+    // Loaded before `App::new`, which otherwise defaults it to empty: without
+    // this, the first `register_repo_path` call of the run would `save()` an
+    // empty-plus-one-entry registry over whatever was already on disk,
+    // silently dropping every repo registered in an earlier session.
+    let (registry, registry_problem) = registry::Registry::load();
 
     let mut app = App::new(tasks, store_label(&store_dir), cfg);
-    if let Some(msg) = config_problem {
-        app.status = format!("config: {msg}");
-    }
+    app.registry = registry;
+    app.status = match (config_problem, registry_problem) {
+        (Some(c), Some(r)) => format!("config: {c}; repos: {r}"),
+        (Some(c), None) => format!("config: {c}"),
+        (None, Some(r)) => format!("repos: {r}"),
+        (None, None) => String::new(),
+    };
 
     if matches!(command, Command::SelfTest) {
         println!("store   {store_dir}");
@@ -298,8 +309,11 @@ fn main() -> std::io::Result<()> {
     let (tx, rx) = channel::<Msg>();
 
     // Watcher. Kept alive for the whole run; dropping it stops notifications.
+    // `watch_tx` itself is kept (cloned into `spawn` rather than moved) so
+    // `switch_store` can start a fresh watcher on the same channel when the
+    // repo pane picks a different worktree.
     let (watch_tx, watch_rx) = channel::<()>();
-    let _watcher = watch::spawn(&store_dir, watch_tx);
+    let mut watcher = watch::spawn(&store_dir, watch_tx.clone());
     {
         let tx = tx.clone();
         thread::spawn(move || {
@@ -376,6 +390,15 @@ fn main() -> std::io::Result<()> {
             edit_config(&mut terminal, &mut app, &mut glyphs)?;
             dirty = true;
         }
+
+        // Requested by `enter`/`l` in the repo pane. Synchronous, like the
+        // preflight `dex list` above: a discrete action rather than something
+        // that runs on every keystroke, so the ~180ms dex call is the same
+        // trade the preflight and the `$EDITOR` handoff already make.
+        if let Some(path) = app.pending_store.take() {
+            switch_store(&mut app, &mut dex, &mut watcher, &watch_tx, &path);
+            dirty = true;
+        }
     }
 
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
@@ -406,8 +429,9 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
                         app.select_at_row(m.row);
                     }
                     Focus::Detail => app.focus = Focus::Detail,
-                    // The repo pane has no click-to-select yet -- that lands in
-                    // the task that draws it -- so a click only focuses it.
+                    // The repo pane has no click-to-select yet -- only the
+                    // keyboard path (`3`, then j/k/enter) does -- so a click
+                    // only focuses it.
                     Focus::Repos => app.focus = Focus::Repos,
                 }
             }
@@ -427,8 +451,9 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
             match app.pane_at(m.column) {
                 Focus::Tree => app.scroll_tree(1),
                 Focus::Detail => app.scroll_detail(1, 0),
-                // Nothing to scroll yet -- the repo pane is not drawn until a
-                // later task, so there is no content to move.
+                // The wheel has no effect here yet -- only j/k/PageUp/PageDown
+                // move the sidebar cursor, and it has no separate scroll
+                // offset of its own to slide.
                 Focus::Repos => {}
             }
         }
@@ -563,6 +588,72 @@ fn flatten(s: &str) -> String {
     s.replace(['\n', '\r'], " ").trim().to_string()
 }
 
+/// Points the running app at a different worktree's dex store: swaps the
+/// active `Dex`, restarts its watcher on the new directory, and reloads the
+/// task list. Leaves everything untouched on failure, so a bad target does
+/// not blank out a working view.
+fn switch_store(
+    app: &mut App,
+    dex: &mut Arc<Dex>,
+    watcher: &mut watch::StoreWatcher,
+    watch_tx: &Sender<()>,
+    worktree_path: &str,
+) {
+    let dir = repos::store_dir(worktree_path);
+    let new_dex = match Dex::for_store(&dir) {
+        Ok(d) => d,
+        Err(e) => {
+            app.status = format!("could not switch store: {e}");
+            return;
+        }
+    };
+    match new_dex.list() {
+        Ok(tasks) => {
+            *dex = Arc::new(new_dex);
+            *watcher = watch::spawn(&dir, watch_tx.clone());
+            app.store_label = store_label(&dir);
+            app.apply_tasks(tasks);
+            app.status = format!("switched to {}", app.store_label);
+        }
+        Err(e) => app.status = format!("could not read {dir}: {}", flatten(&e)),
+    }
+}
+
+/// Registers the repo dextui is currently running against -- not whatever row
+/// the cursor happens to be on in the sidebar. `git worktree list` always
+/// reports the main checkout first, so that entry is "the repo that has the
+/// worktrees," which is what gets registered.
+fn register_current_repo(app: &mut App) -> String {
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(e) => return format!("could not resolve the current directory: {e}"),
+    };
+    let worktrees = match worktree::list(&cwd.to_string_lossy()) {
+        Ok(w) => w,
+        Err(e) => return format!("could not list worktrees: {}", flatten(&e)),
+    };
+    let Some(main) = worktrees.first() else {
+        return "no worktrees found".to_string();
+    };
+    match app.register_repo_path(&main.path) {
+        Ok(true) => format!("registered {}", main.path),
+        Ok(false) => format!("{} is already registered", main.path),
+        Err(e) => format!("could not register: {}", flatten(&e)),
+    }
+}
+
+/// Picks the worktree under the sidebar cursor: remembers where the cursor
+/// was in the worktree being left, focuses the tree, and queues the actual
+/// store swap for the main loop -- `handle_normal` only ever sees `&Arc<Dex>`,
+/// not a way to replace what it points to.
+fn select_worktree_under_cursor(app: &mut App) {
+    if let Some(path) = app.selected_worktree_path() {
+        app.select_worktree(&path);
+        app.pending_store = Some(path);
+        app.focus = Focus::Tree;
+    }
+}
+
 fn refresh(dex: &Arc<Dex>, tx: &Sender<Msg>) {
     let dex = Arc::clone(dex);
     let tx = tx.clone();
@@ -603,8 +694,18 @@ fn handle_key(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>) {
 
         Mode::Confirm { id, .. } => {
             if matches!(key.code, KeyCode::Enter | KeyCode::Char('y')) {
-                let name = app.by_id.get(&id).map(|t| t.name.clone()).unwrap_or_default();
-                act(dex, tx, format!("deleted {name}"), move |d| d.delete(&id));
+                // `id` is overloaded: a `repo:` prefix means `D` queued an
+                // unregister rather than `d` queuing a task delete. Unlike a
+                // task id (a short slug with no colon), a repo path can never
+                // collide with this prefix, and it keeps `Mode::Confirm` a
+                // single dialog rather than two -- see the repo sidebar docs.
+                if let Some(path) = id.strip_prefix("repo:") {
+                    app.unregister_repo_path(path);
+                    app.status = format!("unregistered {path}");
+                } else {
+                    let name = app.by_id.get(&id).map(|t| t.name.clone()).unwrap_or_default();
+                    act(dex, tx, format!("deleted {name}"), move |d| d.delete(&id));
+                }
             }
             close_modal(app, dex, tx);
         }
@@ -643,33 +744,34 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
 
         // Movement drives whichever pane has focus. Action keys below stay
         // global, because they always act on the selected task.
-        //
-        // The repo pane's own movement is wired in the task that draws it, so
-        // it gets an inert arm here rather than borrowing the tree's or the
-        // detail's meaning.
         KeyCode::Down | KeyCode::Char('j') => match app.focus {
             Focus::Tree => app.move_selection(1),
             Focus::Detail => app.scroll_detail(1, 0),
-            Focus::Repos => {}
+            Focus::Repos => app.move_repo_row(1),
         },
         KeyCode::Up | KeyCode::Char('k') => match app.focus {
             Focus::Tree => app.move_selection(-1),
             Focus::Detail => app.scroll_detail(-1, 0),
-            Focus::Repos => {}
+            Focus::Repos => app.move_repo_row(-1),
         },
         KeyCode::PageDown => match app.focus {
             Focus::Tree => app.move_selection(10),
             Focus::Detail => app.scroll_detail(10, 0),
-            Focus::Repos => {}
+            Focus::Repos => app.move_repo_row(10),
         },
         KeyCode::PageUp => match app.focus {
             Focus::Tree => app.move_selection(-10),
             Focus::Detail => app.scroll_detail(-10, 0),
-            Focus::Repos => {}
+            Focus::Repos => app.move_repo_row(-10),
         },
-        // Enter always opens the detail. It is the deliberate way across, and it
-        // was unbound in Normal mode, so nothing changes meaning.
-        KeyCode::Enter => app.show_detail(),
+        // Enter always opens the detail -- except from the repo pane, where it
+        // instead picks the worktree under the cursor. It was unbound in
+        // Normal mode before the detail case existed, so neither meaning was
+        // ever taken from something else.
+        KeyCode::Enter => match app.focus {
+            Focus::Repos => select_worktree_under_cursor(app),
+            _ => app.show_detail(),
+        },
 
         // Straight to a pane by number, the way LazyGit and gitui do it. The
         // numbers are only *drawn* in zoom mode, where there is a hidden pane to
@@ -678,6 +780,7 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         // for no benefit.
         KeyCode::Char('1') => app.show_tree(),
         KeyCode::Char('2') => app.show_detail(),
+        KeyCode::Char('3') => app.focus = Focus::Repos,
 
         KeyCode::Right | KeyCode::Char('l') => match app.focus {
             // Falls through to the detail only when there was nothing to open --
@@ -690,7 +793,7 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
                 }
             }
             Focus::Detail => app.scroll_detail(0, 4),
-            Focus::Repos => {}
+            Focus::Repos => select_worktree_under_cursor(app),
         },
         KeyCode::Left | KeyCode::Char('h') => match app.focus {
             Focus::Tree => app.collapse_selected(),
@@ -705,17 +808,21 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
                     app.scroll_detail(0, -4);
                 }
             }
+            // Nothing to step out to yet -- the sidebar has no notion of
+            // "collapse this worktree back to its repo," and stealing focus
+            // to another pane on a key that does nothing elsewhere in this
+            // pane would be a surprise.
             Focus::Repos => {}
         },
         KeyCode::Char('g') => match app.focus {
             Focus::Tree => app.select_first(),
             Focus::Detail => app.detail_to_top(),
-            Focus::Repos => {}
+            Focus::Repos => app.select_first_repo_row(),
         },
         KeyCode::Char('G') => match app.focus {
             Focus::Tree => app.select_last(),
             Focus::Detail => app.detail_to_bottom(),
-            Focus::Repos => {}
+            Focus::Repos => app.select_last_repo_row(),
         },
         // `z` is tmux's zoom-pane, which is where the reflex comes from. That
         // cost collapse/expand their old keys -- and `-`/`+` is the better
@@ -753,6 +860,28 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
             if let Some(t) = selected {
                 let id = t.id.clone();
                 act(dex, tx, format!("started {}", t.name), move |d| d.start(&id));
+            }
+        }
+        // Guarded, and placed ahead of the unguarded `a` below on purpose:
+        // match arms are tried top to bottom, so without this ordering every
+        // `a` press in the repo pane would fall through and silently open a
+        // "new subtask" prompt instead of registering anything.
+        KeyCode::Char('a') if app.focus == Focus::Repos => {
+            app.status = register_current_repo(app);
+        }
+        // `D` (shift) rather than a bare second use of `d`: unregistering is a
+        // sidebar-only, no-dex action, and sharing a key with task deletion
+        // would suggest it also deletes something. Confirms via the existing
+        // dialog rather than a second one -- see the `Mode::Confirm` handler.
+        KeyCode::Char('D') if app.focus == Focus::Repos => {
+            if let Some(r) = app.selected_repo() {
+                app.mode = Mode::Confirm {
+                    id: format!("repo:{}", r.path),
+                    message: format!(
+                        "\"{}\" will be unregistered. Its worktrees are not touched.",
+                        r.name
+                    ),
+                };
             }
         }
         KeyCode::Char('a') => {
@@ -1055,5 +1184,67 @@ mod tests {
                 "usage advertises {words:?} but the parser rejects it"
             );
         }
+    }
+
+    fn repo_app() -> App {
+        let mut app = App::new(vec![], "t".into(), config::Config::default());
+        app.repos = vec![crate::repos::Repo {
+            name: "one".into(),
+            path: "/x/one".into(),
+            worktrees: vec![crate::worktree::Worktree {
+                path: "/x/one".into(),
+                branch: "main".into(),
+                is_main: true,
+                is_locked: false,
+                is_detached: false,
+            }],
+            open: true,
+        }];
+        app.focus = Focus::Repos;
+        app
+    }
+
+    /// This is the glue `enter` and `l` share in the repo pane: it has to pick
+    /// the worktree under the cursor, remember it as the current one, queue
+    /// the actual store swap for the main loop (which alone holds a mutable
+    /// `Arc<Dex>`), and hand focus back to the tree.
+    #[test]
+    fn select_worktree_under_cursor_queues_the_switch_and_returns_focus_to_the_tree() {
+        let mut app = repo_app();
+        app.selected_repo_row = 0;
+
+        select_worktree_under_cursor(&mut app);
+
+        assert_eq!(app.pending_store.as_deref(), Some("/x/one"));
+        assert_eq!(app.selected_worktree.as_deref(), Some("/x/one"));
+        assert_eq!(app.focus, Focus::Tree);
+    }
+
+    /// An empty sidebar has no row to resolve, so this must not steal focus or
+    /// queue a switch to nowhere -- the same "dead space does nothing" rule
+    /// `clicking_empty_header_space_changes_nothing` pins for the header.
+    #[test]
+    fn select_worktree_under_cursor_on_an_empty_sidebar_does_nothing() {
+        let mut app = App::new(vec![], "t".into(), config::Config::default());
+        app.focus = Focus::Repos;
+
+        select_worktree_under_cursor(&mut app);
+
+        assert_eq!(app.pending_store, None);
+        assert_eq!(app.focus, Focus::Repos, "must not steal focus with nothing to select");
+    }
+
+    /// `Mode::Confirm.id` is overloaded to carry either a task id or, with a
+    /// `repo:` prefix, a repo path to unregister. A real task id is a short
+    /// slug that can never itself start with that prefix, so the two can never
+    /// collide -- this pins the encoding the key handler and this match both
+    /// rely on.
+    #[test]
+    fn a_repo_confirm_id_is_distinguishable_from_a_task_id() {
+        let repo_id = format!("repo:{}", "/x/one");
+        assert!(repo_id.strip_prefix("repo:").is_some());
+
+        let task_id = "b4d5gfpl";
+        assert!(task_id.strip_prefix("repo:").is_none());
     }
 }
