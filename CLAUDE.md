@@ -1162,6 +1162,32 @@ reported coordinates match where you clicked but the task named is wrong, the
 fault is the arithmetic (`tree_offset`, `body_top`); if the coordinates
 themselves are wrong, it is below the app entirely.
 
+**A wrong screen does not heal on its own, and `^L` is why that key exists.**
+`terminal.draw` writes only the cells that changed since the frame *ratatui*
+last drew. Corruption from outside the app — a terminal that drops output, a
+multiplexer repainting a pane, another process writing over it — is therefore
+invisible to it: those cells are already correct as far as its buffer knows, so
+they are never rewritten. And since the app draws only when something it knows
+about changes, nothing else brings them back either. The result is a screen
+that stays wrong indefinitely while the state underneath is perfectly fine —
+which reads as "clicking does nothing", because the click *did* land and the
+cells that would show it were never repainted.
+
+`Ctrl-L` sets `App::force_redraw`, and the event loop calls `terminal.clear()`
+before the next draw, discarding ratatui's idea of what is on screen. Note the
+contrast with `examples/mouse.rs`, which cannot get stuck this way: it issues
+`Clear(ClearType::All)` and repaints every cell every frame. That difference is
+the reason a mouse probe can look perfect in a terminal where the app looks
+broken, and it is worth remembering before concluding that the coordinates are
+at fault.
+
+The binding **must stay above the unguarded `KeyCode::Char('l')`** that means
+expand / cross to the detail: match arms are tried in order and that one does
+not inspect modifiers. `ctrl_l_forces_a_redraw_and_is_not_swallowed_by_the_plain_l`
+pins it, because the layout of a `match` is not something anything else checks
+— the compiler warns here only by luck, and would say nothing if the shadowing
+arm were reachable-but-wrong.
+
 **Check the binary is actually fresh before believing a capture.** `cargo build`
 has twice reported `Finished` while leaving `target/debug/dextui` hours stale:
 `cargo test` rebuilds its own binary, so the suite goes green against new code

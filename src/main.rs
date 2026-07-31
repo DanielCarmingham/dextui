@@ -507,6 +507,14 @@ fn main() -> std::io::Result<()> {
             dirty = true;
         }
 
+        if std::mem::take(&mut app.force_redraw) {
+            // Discards ratatui's idea of what is on screen, so the next draw
+            // writes every cell rather than the difference against a buffer
+            // that may no longer describe reality.
+            terminal.clear()?;
+            dirty = true;
+        }
+
         if dirty {
             terminal.draw(|f| ui::draw(f, &mut app, &glyphs))?;
             dirty = false;
@@ -551,8 +559,14 @@ fn main() -> std::io::Result<()> {
                         handle_mouse(&mut app, m);
                         dirty = true;
                     }
-                    CtEvent::Resize(..) => dirty = true,
-                    _ => {}
+                    // Everything else -- focus changes, paste, key releases --
+                    // repaints too. It costs nothing at idle, since none of it
+                    // arrives unless something is actually happening, and a
+                    // frame is the cheapest possible insurance against a
+                    // screen that has gone stale for a reason the app cannot
+                    // see. `Resize` is no longer special-cased for the same
+                    // reason.
+                    _ => dirty = true,
                 }
 
                 // Anything that is about to hand the terminal to someone else
@@ -1282,6 +1296,28 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.should_quit = true
         }
+
+        // Ctrl-L, the universal "redraw the screen", and unbound before this.
+        //
+        // `terminal.draw` writes only the cells that changed since the frame
+        // ratatui itself last drew, so corruption from *outside* the app is
+        // invisible to it: those cells are already right as far as its buffer
+        // knows, so they are never rewritten -- and the app draws nothing at
+        // all until something it knows about changes. A wrong screen therefore
+        // persists instead of healing. Worth having even once a particular
+        // cause is found, because the cause is by definition somewhere this
+        // app does not control.
+        //
+        // **Must stay above the unguarded `Char('l')`** that means expand /
+        // cross to the detail: match arms are tried in order and that one does
+        // not look at modifiers, so it would swallow this. The compiler says
+        // so (`unreachable pattern`), which is the only reason this is not a
+        // silently dead key -- `Char('r')`'s guarded arm is correct today only
+        // because it happens to be written above the plain `r`.
+        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.force_redraw = true;
+            app.status = "redrew the screen".into();
+        }
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
 
         KeyCode::Tab | KeyCode::BackTab => app.toggle_focus(),
@@ -1412,6 +1448,7 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             refresh(dex, tx, app)
         }
+
         KeyCode::Char('?') => app.open_help(),
         // Reuses the $EDITOR machinery rather than building a settings form.
         KeyCode::Char(',') => app.pending_config_edit = true,
@@ -1735,6 +1772,42 @@ mod tests {
             problems[0].starts_with("/nonexistent-repo-for-tests"),
             "the problem names the repo, not its store: {problems:?}"
         );
+    }
+
+    /// Ctrl-L must reach `force_redraw` rather than being eaten by the plain
+    /// `l` that means expand / cross to the detail.
+    ///
+    /// Match arms are tried in order and the plain arm does not look at
+    /// modifiers, so the guarded one only works because it is written above
+    /// it. That is a property of the file's *layout*, which nothing else
+    /// checks -- the compiler happens to warn here (`unreachable pattern`),
+    /// but it cannot warn when the shadowing arm is merely reachable-but-wrong.
+    #[test]
+    fn ctrl_l_forces_a_redraw_and_is_not_swallowed_by_the_plain_l() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let dex = Arc::new(Dex::real());
+
+        let mut app = App::new(vec![], "demo".into(), crate::config::Config::default());
+        app.focus = Focus::Tree;
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+            &dex,
+            &tx,
+        );
+        assert!(app.force_redraw, "ctrl-l was swallowed by the plain `l`");
+
+        // And the plain `l` still means what it always did: it crosses to the
+        // detail from a leaf, and does not ask for a repaint.
+        let mut app = App::new(vec![], "demo".into(), crate::config::Config::default());
+        app.focus = Focus::Tree;
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+            &dex,
+            &tx,
+        );
+        assert!(!app.force_redraw, "the plain `l` should not force a redraw");
     }
 
     /// `?` is pressed by someone looking for a key, and resuming halfway down

@@ -1605,6 +1605,7 @@ o / O      sort / reverse    a   new subtask of selection
 f          cycle filter      ^R  refresh now
 ,          edit config       q   quit
 - / +      collapse / expand all
+^L         redraw the screen (if the terminal has corrupted it)
 
 In the repo sidebar these keys act on repos, not on tasks:
 1          focus repos       b   show / hide the sidebar
@@ -2157,6 +2158,7 @@ mod tests {
         assert!(HELP.contains("r   rename"), "help: r renames");
         assert!(HELP.contains("e   edit description"), "help: e edits");
         assert!(HELP.contains("^R  refresh now"), "help: Ctrl-R refreshes");
+        assert!(HELP.contains("^L         redraw the screen"), "help: Ctrl-L redraws");
     }
 
     /// The sidebar's keys were on neither surface: the strip still read

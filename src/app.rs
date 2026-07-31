@@ -260,6 +260,15 @@ pub struct App {
     /// renderer a frame earlier.
     pub mouse_log: Vec<String>,
     pub mouse_debug: bool,
+    /// Set by Ctrl-L: repaint every cell rather than only what changed.
+    ///
+    /// ratatui's `draw` diffs against the buffer *it* last drew, so anything
+    /// that corrupts the screen from outside the app -- a terminal that drops
+    /// output, a multiplexer redrawing a pane, another process writing over it
+    /// -- leaves cells ratatui believes are already correct and will therefore
+    /// never rewrite. The screen then stays wrong indefinitely, because the
+    /// app also only draws when something *it* knows about has changed.
+    pub force_redraw: bool,
     pub registry: crate::registry::Registry,
     /// Every sidebar store's task list, keyed by store directory.
     ///
@@ -329,6 +338,7 @@ impl App {
             selected_repo_row: 0,
             repos_offset: 0,
             mouse_log: Vec::new(),
+            force_redraw: false,
             mouse_debug: std::env::var_os("DEXTUI_MOUSE_DEBUG").is_some(),
             registry: crate::registry::Registry::default(),
             store_tasks: HashMap::new(),
