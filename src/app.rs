@@ -668,6 +668,24 @@ impl App {
         row >= self.body_top && row < self.body_bottom
     }
 
+    /// Which item a pane's list drew on `row`, given the offset it was drawn
+    /// with -- or `None` if `row` is not one of its item rows at all.
+    ///
+    /// Both borders have to be excluded, and only one of them is excluded by
+    /// arithmetic that looks obviously right. `in_body` bounds the *body*,
+    /// whose last row is the pane's bottom border, so `row - (body_top + 1)`
+    /// mapped that border to one index past the last item drawn: clicking
+    /// `└───┘` selected a task that was not on screen, and then scrolled the
+    /// list to reveal what you had supposedly just clicked. The top border
+    /// escaped only because `checked_sub` happens to reject it.
+    fn list_row_index(&self, row: u16, offset: usize) -> Option<usize> {
+        if row + 1 >= self.body_bottom {
+            return None;
+        }
+        row.checked_sub(self.body_top + 1)
+            .map(|r| r as usize + offset)
+    }
+
     /// What sits under `column` on the header row, if anything.
     pub fn header_zone_at(&self, column: u16) -> Option<HeaderZone> {
         self.header_zones
@@ -706,11 +724,7 @@ impl App {
 
     /// Selects the task drawn on `row`, if any.
     pub fn select_at_row(&mut self, row: u16) {
-        // +1 skips the pane's top border.
-        let Some(index) = row
-            .checked_sub(self.body_top + 1)
-            .map(|r| r as usize + self.tree_offset)
-        else {
+        let Some(index) = self.list_row_index(row, self.tree_offset) else {
             return;
         };
 
@@ -1003,10 +1017,7 @@ impl App {
     /// in the sidebar cannot cost a ~180ms dex call and replace both other
     /// panes.
     pub fn select_repo_at_row(&mut self, row: u16) {
-        let Some(index) = row
-            .checked_sub(self.body_top + 1)
-            .map(|r| r as usize + self.repos_offset)
-        else {
+        let Some(index) = self.list_row_index(row, self.repos_offset) else {
             return;
         };
         // Past the last row is dead space: it must not move the cursor to the
@@ -2170,6 +2181,14 @@ mod tests {
     fn app_with_repos() -> App {
         let mut app = counted(vec![task("a", None, &[])]);
         app.repos = vec![repo("one"), repo("two")];
+        // The geometry a real frame publishes. Left at its `App::new` default
+        // of 0/0 these tests could not tell a click on an item row from one on
+        // the pane's bottom border -- which is the shape of the bug
+        // `clicking_a_row_selects_the_task_drawn_on_it_and_nothing_otherwise`
+        // exists for, and the reason it had to be checked against a rendered
+        // frame rather than against numbers picked here.
+        app.body_top = 1;
+        app.body_bottom = 21;
         app
     }
 

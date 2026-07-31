@@ -1681,6 +1681,132 @@ mod tests {
         }
     }
 
+    /// A click must select the task drawn on that row, and a click on a row
+    /// with no task on it must change nothing at all.
+    ///
+    /// Every row of the body is walked, borders included, against a real
+    /// rendered frame -- because the frame is the only thing that knows which
+    /// row each task ended up on, and because the rows that are *not* items are
+    /// where this went wrong. The pre-existing tests called `select_at_row`
+    /// with hand-computed rows and `body_top = 0`, so they encoded the same
+    /// assumption the bug did: clicking the pane's bottom border selected one
+    /// index past the last drawn row -- a task not on screen -- and then
+    /// scrolled the list to reveal what you had supposedly clicked.
+    #[test]
+    fn clicking_a_row_selects_the_task_drawn_on_it_and_nothing_otherwise() {
+        let tasks: Vec<Task> = (0..12)
+            .map(|i| task(&format!("t{i}"), None, &format!("TASK-{i:02}")))
+            .collect();
+
+        let mut app = App::new(tasks, "demo".into(), crate::config::Config::default());
+        app.filter = tree::Filter::All;
+        app.rebuild();
+
+        // Deliberately shorter than the list, so the offset is load-bearing,
+        // and wide enough for three panes -- the layout the sidebar puts the
+        // tree in, where its x moves but its rows must not.
+        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+
+        for scroll in [0isize, 3, 6] {
+            app.scroll_tree(scroll);
+            terminal
+                .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+                .unwrap();
+
+            let buf = terminal.backend().buffer().clone();
+            let line = |y: u16| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            };
+
+            for row in app.body_top..app.body_bottom {
+                let drawn = line(row);
+                let shown = drawn
+                    .split_whitespace()
+                    .find(|w| w.starts_with("TASK-"))
+                    .map(str::to_string);
+
+                let before = app.selected_task().map(|t| t.name.clone());
+                app.select_at_row(row);
+                let after = app.selected_task().map(|t| t.name.clone());
+
+                match shown {
+                    Some(name) => assert_eq!(
+                        after.as_deref(),
+                        Some(name.as_str()),
+                        "row {row} (offset {}) draws {name:?}, click selected {after:?}",
+                        app.tree_offset
+                    ),
+                    None => assert_eq!(
+                        after, before,
+                        "row {row} draws no task, but clicking it moved the selection:\n{drawn}"
+                    ),
+                }
+            }
+        }
+    }
+
+    /// The sidebar's own copy of the rule above. It shares `list_row_index`
+    /// with the tree, so this is what stops the two drifting apart again.
+    #[test]
+    fn clicking_a_sidebar_row_selects_the_worktree_drawn_on_it() {
+        let mut app = App::new(vec![], "demo".into(), crate::config::Config::default());
+        app.repos = (0..6)
+            .map(|i| crate::repos::Repo {
+                name: format!("REPO-{i}"),
+                path: format!("/tmp/r{i}"),
+                open: true,
+                worktrees: vec![crate::worktree::Worktree {
+                    path: format!("/tmp/r{i}"),
+                    branch: format!("BR-{i}"),
+                    is_main: true,
+                    is_locked: false,
+                    is_detached: false,
+                }],
+            })
+            .collect();
+        app.focus = Focus::Repos;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        terminal
+            .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let rows = app.repo_rows();
+
+        for row in app.body_top..app.body_bottom {
+            let drawn = (0..buf.area.width)
+                .map(|x| buf[(x, row)].symbol())
+                .collect::<String>();
+            let shown = drawn
+                .split_whitespace()
+                .find(|w| w.starts_with("REPO-") || w.starts_with("BR-"))
+                .map(str::to_string);
+
+            let before = app.selected_repo_row;
+            app.select_repo_at_row(row);
+            let after = app.selected_repo_row;
+
+            match shown {
+                Some(label) => {
+                    let picked = match &rows[after] {
+                        crate::repos::Row::Repo { index } => app.repos[*index].name.clone(),
+                        crate::repos::Row::Worktree { repo, index } => {
+                            app.repos[*repo].worktrees[*index].branch.clone()
+                        }
+                    };
+                    assert_eq!(picked, label, "row {row} draws {label:?}, click picked {picked:?}");
+                }
+                None => assert_eq!(
+                    after, before,
+                    "row {row} draws no repo, but clicking it moved the cursor:\n{drawn}"
+                ),
+            }
+        }
+    }
+
     fn render_tasks(tasks: Vec<Task>, w: u16, h: u16, ic: &Icons) -> Vec<String> {
         let mut app = App::new(tasks, "demo".into(), crate::config::Config::default());
         app.filter = tree::Filter::All;
