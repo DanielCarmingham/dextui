@@ -40,6 +40,9 @@ and to check behaviour where no interactive terminal exists.
 | File | Purpose |
 | --- | --- |
 | `src/dex.rs` | The only module that knows dex exists: model, argv, JSON, status. |
+| `src/worktree.rs` | Parses `git worktree list --porcelain` into `Worktree` rows. |
+| `src/registry.rs` | The writable list of registered repos -- `repos.toml`, kept apart from the read-only config. |
+| `src/repos.rs` | Flattens repos and worktrees into sidebar rows, mirroring `tree::visible_rows`. |
 | `src/icons.rs` | Glyph sets in three tiers (nerd / unicode / ascii). |
 | `src/theme.rs` | Every colour, and nothing else. |
 | `src/tree.rs` | Flat list → hierarchy, search and status filtering, row prefixes. |
@@ -94,6 +97,14 @@ These were all discovered the hard way; do not re-derive them.
   so `tree::build` re-sorts by priority, then creation time, then name.
 - **A `dex` call costs ~180ms** (Node startup). Cheap on a change, unaffordable
   per keystroke — hence no `dex show` call when the selection moves.
+- **`--storage-path` wants the `.dex` directory, not `tasks.jsonl`, and says
+  nothing when you get it wrong.** Pointed at the file, dex finds no tasks and
+  returns an empty list rather than an error — a wrong store looks exactly
+  like an empty project, discovered nowhere near the mistake that caused it.
+  `Dex::for_store` is the *only* place that builds this flag, ahead of every
+  verb's own argv rather than threaded through each call site, so no verb can
+  forget it or misconstruct it; it also rejects a `.jsonl`-suffixed path
+  outright, where the mistake can still be seen.
 
 ## Architecture: reads vs writes
 
@@ -170,14 +181,77 @@ resolves the path into a process-wide `OnceLock` that every later `log::line`
 call reads. Areas are `watch`, `dex`, `store`, `registry` — padded to a fixed
 column so the file reads straight. What lands in each: `watch` gets every
 watcher registration, FS event, and safety tick outcome (including
-`unchanged`, the branch this exists for); `dex` gets each `list` with the
-store, task count and duration — logged in `refresh()`, the function every
-watcher-triggered, Ctrl-R-triggered and post-write reload goes through (the
-one-off `dex list` calls in the startup preflight, a worktree switch, and the
-background worktree-counts fetch are not instrumented -- `refresh()` is where
-a sync fault would actually show up as a pattern); `store` gets worktree
-switches, from and to; `registry` gets every load and save, success or
-failure.
+`unchanged`, the branch this exists for); `dex` gets every `list` call once
+the terminal is up — `refresh()` (the function every watcher-triggered,
+Ctrl-R-triggered and post-write reload goes through), the startup
+worktree-counts join, the background per-worktree watcher thread, and a
+worktree switch's own list all share one `log_list_outcome(store, result,
+elapsed)` helper, logging the store *directory* rather than a display label so
+a background store's chain is greppable end to end by the same string
+`watch`'s `registered`/`event`/`tick` lines already use for it. Only the very
+first `dex list`, in the startup preflight before the terminal is touched,
+stays dark — a failure there is already printed to stderr and the process
+exits before any of this exists to log it. `store` gets worktree switches,
+from and to; `registry` gets every load and save, success or failure.
+
+## Repos, worktrees and the registry
+
+**`~/.config/dextui/repos.toml` is a second file, not a new key in
+`config.toml`.** That file is deliberately read-only to the app — see
+Preferences below — and folding the registry into it would mean either giving
+up that guarantee or teaching `w`/`o`/`O`/`f` to persist too, since there
+would be no longer a principled reason for `a` and `D` to write back while
+those do not. `registry.rs` owns `repos.toml` the way `config.rs` owns the
+other file — same XDG resolution, same "missing is normal, an unreadable file
+is a hard stop rather than a silent empty registry" rule on load — but
+write-side, because unlike every runtime toggle, a registration is meant to
+survive the run that made it.
+
+**Every verb that can target a chosen store goes through `Dex::for_store` /
+`for_store_with`** — see the `--storage-path` bullet above for why a wrong
+store is silent, and why that is what makes this the *only* place the flag
+gets built rather than a parameter threaded through each call site.
+`repos::store_dir` is the one place that knows a worktree's store lives at
+`<worktree path>/.dex`, and it is what every sidebar call site hands to
+`for_store`.
+
+**There is no staleness gap for a worktree you are not looking at.** The
+original plan for this feature accepted one on purpose: poll only the
+selected store right away, and let every other registered store go stale
+until you switched to it, on the theory that watching all of them on a timer
+would multiply the exact idle cost `watch.rs`'s safety net exists to control.
+That trade stopped being necessary once the safety net itself became
+stat-gated instead of firing blindly (see "Architecture: reads vs writes"
+above) — at that point watching ten stores costs the same as watching one, for
+as long as nothing changes in nine of them. `watch::spawn_many` gives every
+registered store its own notify watcher and its own copy of the same
+stat-gated net `watch::spawn` gives the selected one, so a change in a
+worktree nobody is looking at is picked up exactly as promptly as a change in
+the one on screen. `App::worktree_counts`, keyed by store directory, is where
+the result lands — nothing renders it yet; it exists for whichever task draws
+per-repo counts in the sidebar next.
+
+**`repos_pane_above = 0` does not mean "no repo pane" — it means "never as a
+*third* pane."** `src/config.rs`'s own doc comment says only that it "matches
+what `single_pane_below = 0` means for the split," which reads as "the
+sidebar is unreachable" and is not what happens: `App::single_pane` treats
+`Focus::Repos` at a width with no room for a third pane as one more
+single-pane condition, alongside zoom and the width threshold, so `3` still
+gets you the sidebar full-width even with the rung disabled — see
+`repos_focus_becomes_a_single_pane_when_the_ladder_has_no_room_for_it`.
+
+`D`'s confirmation dialog reuses `Mode::Confirm` rather than adding a second
+one: its `id` field carries a `repo:`-prefixed path instead of a task id, and
+since a real dex id is a short slug with no colon in it the two can never
+collide. Cheaper than a second dialog, and the one thing to keep in mind if
+`Mode::Confirm` ever grows a third caller — the prefix trick stops being safe
+the moment something else's id could contain a colon too.
+
+One residual worth knowing about: `repos::Row`/`repos::rows` already support a
+closed repo hiding its worktrees (`Repo::open`), the same way the task tree
+collapses a node, but nothing currently sets `open` to anything but `true` —
+every registered repo shows every worktree, always. There is no key bound to
+toggle it yet.
 
 ## The invariant: refresh must never disturb the user
 
@@ -196,6 +270,16 @@ selection, collapse an expanded node, or interrupt typing.
   has been shipped as a bug once already.
 - While a dialog is open, refreshes set `pending_refresh` and are applied on
   close. Never let one land mid-dialog.
+- **A worktree switch is deliberately not a refresh.** Everything above is
+  `apply_tasks` reconciling a new task list against the *same* store's ids.
+  Switching stores loads an entirely different store's ids, so `App::load_store`
+  follows `App::new`'s first-load rule instead — expand everything, do not try
+  to resolve `self.selected` against ids that belong to nowhere — rather than
+  reusing `apply_tasks` and letting `next_ids.contains(&sel)` succeed by
+  coincidence on another store's slug. `task_memory`, keyed by worktree path,
+  is what makes this feel like it kept your place anyway: `select_worktree`
+  restores whatever was selected the last time you were in that worktree,
+  immediately before `load_store` runs and would otherwise reset it.
 
 ## Display conventions
 
@@ -543,6 +627,12 @@ brighter border. `j/k/h/l`, `g/G` and page keys drive whichever has focus, while
 the action keys (`s c e n a d f / r ?`) stay global because they always operate
 on the selected task.
 
+The repo sidebar is a third pane, reached only by `3` — `Tab` deliberately
+never lands on it or leaves it. `App::toggle_focus` only ever alternates tree
+and detail, so pressing `Tab` from the sidebar always returns to the tree
+rather than bouncing between two panes it was never documented to cross. See
+"Repos, worktrees and the registry" below for its own key model.
+
 **`w` toggles wrapping, and that is not cosmetic.** Wrapping and horizontal
 scrolling are mutually exclusive in ratatui: `Paragraph::scroll((y, x))` honours
 the x offset only when wrapping is off, because wrapping removes the overflow
@@ -859,7 +949,13 @@ looking at colour work. Needs Pillow on whichever `python3` is first on `PATH`.
 
 ## Scope
 
-In: browse, search, filter, start, complete, edit, create, subtask, delete.
-Out (run these from the shell): `sync`, `import`, `export`, `plan`,
-`archive`, and multi-project views. dextui shows the current directory's store
-only.
+In: browse, search, filter, start, complete, edit, create, subtask, delete —
+across every worktree of every repo you register, not just the one dextui
+started in. This file used to end with "dextui shows the current directory's
+store only"; the repo sidebar is exactly the feature that made that false, and
+removing the sentence is the point of this section.
+
+Out (run these from the shell): `sync`, `import`, `export`, `plan`, `archive`.
+Registering a repo only teaches the sidebar about it — nothing about sync
+configuration, importing or the rest becomes a dextui concern just because
+there is now more than one store on screen.

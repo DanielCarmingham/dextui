@@ -1,9 +1,10 @@
 # dextui
 
-A two-pane terminal UI for browsing and triaging [dex](https://dex.rip/) tasks —
-task tree on the left, full detail on the right.
+A terminal UI for browsing and triaging [dex](https://dex.rip/) tasks —
+task tree on the left, full detail on the right, and — wide enough, or once
+you have registered more than one — a sidebar of every repo and its worktrees.
 
-![dextui showing a task tree with progress meters, a selected row and a detail pane](docs/img/dextui-dark.png)
+![dextui showing a task tree with progress meters, a selected row, a detail pane and the repo sidebar](docs/img/dextui-dark.png)
 
 <sub>Nerd Font glyphs; the default set works in any terminal. Regenerate with
 `scripts/screenshot.sh`.</sub>
@@ -61,6 +62,9 @@ cd ~/your/project && dextui
 **dextui reads the store for the current directory**, so run it from the project
 whose tasks you want. If the tasks look wrong, `dex dir` tells you which store is
 actually in use — outside a git repo, dex falls back to a shared global one.
+That is just where it starts, though — register other repos from inside the
+app and switch between them without restarting; see
+[Multiple repos](#multiple-repos) below.
 
 ## Reading the display
 
@@ -124,6 +128,33 @@ The tabs are clickable, and the header sheds the same way the wide one does —
 but the tabs are reserved before any of that, so the way back is never the thing
 that disappears.
 
+## Multiple repos
+
+dextui can watch more than one repo at once — other projects, or other
+worktrees of the one you are in. Press `3` to focus the sidebar, `a` to
+register the repo dextui is currently running in (not necessarily whichever
+row the cursor is on), and `enter` or `l` on any worktree to switch the tree
+and detail panes to its store. `D` unregisters an entry, with confirmation —
+that only removes the sidebar row; nothing on disk, in the worktree, or in
+the store itself is touched.
+
+Wide enough — `repos_pane_above` columns, 110 by default — and the sidebar
+gets a third pane alongside the tree and detail. Narrower than that, `3`
+still gets you there: focusing it zooms the app down to just the sidebar, the
+same way the whole app zooms below `single_pane_below`.
+
+Every registered repo is watched continuously, not only the one on screen —
+switching to a worktree you have not looked at in a while shows it already
+caught up, with nothing to wait for.
+
+| key | does |
+| --- | --- |
+| `3` | focus the repo sidebar |
+| `j` `k` `g` `G` | move the cursor |
+| `enter`, `l` | switch to the worktree under the cursor |
+| `a` | register the repo dextui is running in |
+| `D` | unregister the entry under the cursor, with confirmation |
+
 ## Keys
 
 Press `?` in the app for this list at any time.
@@ -135,7 +166,7 @@ Press `?` in the app for this list at any time.
 | `g` `G` | first / last |
 | `tab` | switch pane (the focused one has the brighter border) |
 | `enter` | open the detail pane |
-| `1` `2` | jump straight to the tree / the detail |
+| `1` `2` `3` | jump straight to the tree / the detail / the repo sidebar |
 | `z` | zoom — one pane at a time |
 | `-` `+` | collapse / expand all |
 | `/` | search names and descriptions |
@@ -158,6 +189,9 @@ Acting on the selected task:
 | `n` | new top-level task |
 | `a` | new subtask of the selection |
 | `d` | delete, with confirmation |
+
+`a` means something different with the repo sidebar focused — see
+[Multiple repos](#multiple-repos).
 
 
 
@@ -222,6 +256,7 @@ wrap = true
 icons = "unicode"       # nerd | unicode | ascii
 animate = true          # spin the in-progress marker
 single_pane_below = 80  # below this width, one pane at a time (0 = always split)
+repos_pane_above = 110  # at/above this, the sidebar gets a pane of its own (0 = never)
 ```
 
 A project file need only mention what it changes:
@@ -233,6 +268,12 @@ wrap = false
 
 Both files are **read-only** to the app — `w`, `o`, `O` and `f` change only the
 current run, so nothing you toggle is written back over a file you hand-edited.
+
+Registered repos live in their own file, `~/.config/dextui/repos.toml` — not a
+third config layer, and not read-only like the two above. `a` and `D` write it
+directly, which is exactly why it is kept separate: folding it into
+`config.toml` would mean either giving up that file's read-only guarantee or
+starting to persist every other toggle too.
 
 Set `animate = false` if you would rather nothing moved. dextui only redraws when
 something changes, so with it off the app costs nothing at all while you are not
@@ -293,10 +334,12 @@ rotated) if it grows past 1&nbsp;MB, so history is limited to the current run.
 
 ## Scope
 
-In: browse, search, filter, start, complete, edit, create, subtask, delete.
+In: browse, search, filter, start, complete, edit, create, subtask, delete —
+across every repo and worktree you register, not just the one you started
+dextui in.
 
-Out, because the CLI already does them well: `sync`, `import`, `export`, `plan`,
-`archive`, and multi-project views. dextui shows the current directory's store.
+Out, because the CLI already does them well: `sync`, `import`, `export`,
+`plan`, `archive`.
 
 ## Development
 
