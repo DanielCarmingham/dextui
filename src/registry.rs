@@ -10,7 +10,6 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[allow(dead_code)]
 pub struct Registry {
     #[serde(default)]
     pub repos: Vec<String>,
@@ -19,7 +18,6 @@ pub struct Registry {
 impl Registry {
     /// Returns whether the list changed, so a duplicate `a` can be reported
     /// rather than looking like nothing happened.
-    #[allow(dead_code)]
     pub fn add(&mut self, path: &str) -> bool {
         if self.repos.iter().any(|p| p == path) {
             return false;
@@ -29,7 +27,6 @@ impl Registry {
         true
     }
 
-    #[allow(dead_code)]
     pub fn remove(&mut self, path: &str) -> bool {
         let before = self.repos.len();
         self.repos.retain(|p| p != path);
@@ -37,7 +34,6 @@ impl Registry {
     }
 
     /// Parses registry text, reporting a problem rather than failing.
-    #[allow(dead_code)]
     pub fn parse(text: &str) -> (Registry, Option<String>) {
         if text.trim().is_empty() {
             return (Registry::default(), None);
@@ -48,7 +44,6 @@ impl Registry {
         }
     }
 
-    #[allow(dead_code)]
     pub fn load() -> (Registry, Option<String>) {
         let Some(p) = path() else {
             return (Registry::default(), None);
@@ -70,14 +65,41 @@ impl Registry {
         }
     }
 
-    #[allow(dead_code)]
+    /// Writes the registry **atomically**: to a temporary file beside the
+    /// target, then `rename` into place.
+    ///
+    /// `std::fs::write` truncates first and writes second, so a crash, a full
+    /// disk or a second instance writing at the same moment can leave a
+    /// truncated -- or entirely empty -- `repos.toml` on disk. `parse` treats
+    /// empty text as a legitimately empty registry, silently, so the next `a`
+    /// would then persist a one-entry file over everything that was there.
+    /// That is the same silent-data-loss shape `load` and `add_and_save`
+    /// already guard their own halves of, and this is the third and last way
+    /// in.
+    ///
+    /// `rename` is atomic within a filesystem, and the temporary deliberately
+    /// sits in the *same directory* as the target so it always is one -- a
+    /// temp under `/tmp` could land on a different volume, where `rename`
+    /// degrades to copy-then-delete and the guarantee is gone. A reader
+    /// therefore sees either the whole old file or the whole new one, never a
+    /// partial, which also closes the concurrent-instance race properly
+    /// rather than merely narrowing it the way re-reading first does.
     pub fn save(&self) -> Result<(), String> {
         let p = path().ok_or_else(|| "could not resolve a config directory".to_string())?;
         if let Some(dir) = p.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
         let text = toml::to_string(self).map_err(|e| format!("could not serialise: {e}"))?;
-        std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))
+
+        let tmp = p.with_extension("toml.tmp");
+        std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, &p).map_err(|e| {
+            // The old file is still intact -- the rename is what would have
+            // replaced it -- so the only thing to clean up is the temporary,
+            // which must not be left behind to be mistaken for a registry.
+            let _ = std::fs::remove_file(&tmp);
+            format!("{}: {e}", p.display())
+        })
     }
 
     /// Adds `path` against whatever is actually on disk right now, not
@@ -92,7 +114,6 @@ impl Registry {
     /// since each process started. It also refuses to write anything at all
     /// when the on-disk file cannot be read back honestly (see `load`),
     /// rather than overwriting content this process never actually saw.
-    #[allow(dead_code)]
     pub fn add_and_save(&mut self, path: &str) -> Result<bool, String> {
         let (mut current, problem) = Registry::load();
         if let Some(p) = problem {
@@ -110,7 +131,6 @@ impl Registry {
     /// the in-memory removal -- when the change could not actually be
     /// persisted, so the caller can say so instead of reporting success on an
     /// entry that will simply reappear at the next launch.
-    #[allow(dead_code)]
     pub fn remove_and_save(&mut self, path: &str) -> Result<bool, String> {
         let (mut current, problem) = Registry::load();
         if let Some(p) = problem {
@@ -126,7 +146,6 @@ impl Registry {
 }
 
 /// Beside `config.toml`, resolved the same way so both follow XDG.
-#[allow(dead_code)]
 pub fn path() -> Option<PathBuf> {
     let base = match std::env::var_os("XDG_CONFIG_HOME") {
         Some(x) if !x.is_empty() => PathBuf::from(x),
@@ -303,6 +322,60 @@ mod tests {
             // rather than half-applied -- so the caller's own state does not
             // silently disagree with what is (or isn't) actually on disk.
             assert_eq!(r.repos, vec!["/x/one".to_string()]);
+        });
+    }
+
+    /// The temporary is an implementation detail of the atomic write, and it
+    /// lives in the config directory beside the real file -- so a failure to
+    /// clean it up would leave a stray `repos.toml.tmp` sitting next to the
+    /// registry forever, looking like a half-finished write nobody can
+    /// explain.
+    #[test]
+    fn a_save_leaves_no_temporary_file_behind() {
+        with_isolated_registry("registry-no-tmp", || {
+            let mut r = Registry::default();
+            r.add_and_save("/x/one").unwrap();
+            r.add_and_save("/x/two").unwrap();
+
+            let dir = path().unwrap().parent().unwrap().to_path_buf();
+            let strays: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".tmp"))
+                .collect();
+            assert!(strays.is_empty(), "left behind: {strays:?}");
+        });
+    }
+
+    /// The failure this closes: a truncate-then-write left a window where the
+    /// file on disk was empty, and `parse` reads empty as a legitimately empty
+    /// registry. Writing through a rename means the target is only ever
+    /// replaced whole, so a registry that was on disk before a save is either
+    /// still entirely there or entirely superseded -- and in particular the
+    /// second save here cannot lose the first one's entry.
+    #[test]
+    fn an_existing_registry_survives_a_save_of_new_content() {
+        with_isolated_registry("registry-survives", || {
+            let p = path().unwrap();
+
+            let mut r = Registry::default();
+            r.add_and_save("/x/one").unwrap();
+            let before = std::fs::read_to_string(&p).unwrap();
+            assert!(!before.trim().is_empty(), "nothing was written at all");
+
+            r.add_and_save("/x/two").unwrap();
+
+            // Whole, parseable, and carrying both entries -- never the empty
+            // or half-written file the old path could leave.
+            let after = std::fs::read_to_string(&p).unwrap();
+            let (parsed, problem) = Registry::parse(&after);
+            assert!(problem.is_none(), "the saved file did not parse: {problem:?}");
+            assert_eq!(
+                parsed.repos,
+                vec!["/x/one".to_string(), "/x/two".to_string()],
+                "the earlier entry did not survive the second save"
+            );
         });
     }
 

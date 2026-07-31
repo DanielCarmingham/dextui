@@ -21,7 +21,6 @@ pub enum Row {
 }
 
 /// Every visible row, top to bottom.
-#[allow(dead_code)]
 pub fn rows(repos: &[Repo]) -> Vec<Row> {
     let mut out = Vec::new();
     for (i, r) in repos.iter().enumerate() {
@@ -36,7 +35,6 @@ pub fn rows(repos: &[Repo]) -> Vec<Row> {
 }
 
 /// The dex store for a worktree.
-#[allow(dead_code)]
 pub fn store_dir(worktree_path: &str) -> String {
     format!("{}/.dex", worktree_path.trim_end_matches('/'))
 }
@@ -44,7 +42,6 @@ pub fn store_dir(worktree_path: &str) -> String {
 /// Whether a worktree has a store yet. A plain on-disk check, deliberately not a
 /// dex call: this runs for every row, and a worktree without tasks is an
 /// ordinary row rather than an error.
-#[allow(dead_code)]
 pub fn has_store(worktree_path: &str) -> bool {
     std::path::Path::new(&store_dir(worktree_path)).is_dir()
 }
