@@ -29,6 +29,7 @@ pub struct Raw {
     icons: Option<String>,
     animate: Option<bool>,
     single_pane_below: Option<u16>,
+    repos_pane_above: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -47,6 +48,11 @@ pub struct Config {
     /// leave no room for either. `0` never switches, so the split is always
     /// shown; a value above any terminal you use always switches.
     pub single_pane_below: u16,
+    /// Terminal width at or above which the repo pane is drawn as a third pane.
+    ///
+    /// Three panes need roughly this much before each is worth having. `0` never
+    /// shows it, matching what `single_pane_below = 0` means for the split.
+    pub repos_pane_above: u16,
 }
 
 impl Default for Config {
@@ -59,6 +65,7 @@ impl Default for Config {
             icons: icons::UNICODE,
             animate: true,
             single_pane_below: 80,
+            repos_pane_above: 110,
         }
     }
 }
@@ -124,6 +131,9 @@ fn apply(cfg: &mut Config, raw: Raw, problems: &mut Vec<String>) {
     }
     if let Some(v) = raw.single_pane_below {
         cfg.single_pane_below = v;
+    }
+    if let Some(v) = raw.repos_pane_above {
+        cfg.repos_pane_above = v;
     }
 }
 
@@ -247,6 +257,10 @@ animate = true
 # Enter or Right opens the detail full-width, Left or Tab goes back. Two panes
 # narrower than this leave no room for either.  0 always splits.
 single_pane_below = 80
+
+# At or above this terminal width, show the repo pane as a third pane alongside
+# the tree and detail panes.  0 never shows it.
+repos_pane_above = 110
 "#;
 
 /// Which file a command acts on.

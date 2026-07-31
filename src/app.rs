@@ -96,6 +96,16 @@ pub enum Focus {
     Detail,
 }
 
+/// How many panes are drawn. A single ordered ladder, so first-fit can only
+/// ever shed -- see `the_pane_ladder_is_monotone`.
+#[allow(dead_code)] // not yet consumed by the renderer -- a later task draws the pane
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Panes {
+    One,
+    Two,
+    Three,
+}
+
 /// Something in the header you can click.
 ///
 /// Published by the renderer each frame from **what it actually drew**, the same
@@ -185,6 +195,9 @@ pub struct App {
     /// Terminal width below which only the focused pane is drawn. From the
     /// config; 0 disables the behaviour entirely.
     pub single_pane_below: u16,
+    /// Terminal width at or above which the repo pane is drawn as a third pane.
+    /// From the config; 0 disables the behaviour entirely.
+    pub repos_pane_above: u16,
     /// A manual answer to "zoomed?", set by `z`, which outranks the width rule.
     /// `None` means decide by width. Pressing the key is an explicit decision,
     /// so it holds until it is pressed again rather than being undone by a
@@ -231,6 +244,7 @@ impl App {
             animate: cfg.animate,
             spin_frame: 0,
             single_pane_below: cfg.single_pane_below,
+            repos_pane_above: cfg.repos_pane_above,
             zoom: None,
             header_zones: Vec::new(),
         };
@@ -682,6 +696,7 @@ impl App {
         self.filter = cfg.filter;
         self.wrap = cfg.wrap;
         self.animate = cfg.animate;
+        self.repos_pane_above = cfg.repos_pane_above;
         self.rebuild();
     }
 
@@ -707,6 +722,18 @@ impl App {
             Some(z) => z,
             None => self.single_pane_below > 0 && self.terminal_width < self.single_pane_below,
         }
+    }
+
+    /// See [`Panes`].
+    #[allow(dead_code)] // not yet consumed by the renderer -- a later task draws the pane
+    pub fn panes(&self) -> Panes {
+        if self.single_pane() {
+            return Panes::One;
+        }
+        if self.repos_pane_above > 0 && self.terminal_width >= self.repos_pane_above {
+            return Panes::Three;
+        }
+        Panes::Two
     }
 
     /// Flips what you are looking at, and keeps it that way.
@@ -933,6 +960,71 @@ mod tests {
         let mut app = narrow(400);
         app.single_pane_below = 9999;
         assert!(app.single_pane(), "a huge value must always single-pane");
+    }
+
+    /// Widening the terminal may never take a pane away. This is the same rule
+    /// `the_header_never_brings_back_what_it_has_already_dropped` enforces, and for
+    /// the same reason: a two-stage size calculation once made an element reappear
+    /// as the terminal *narrowed*, and nothing about a bigger window should reveal
+    /// less.
+    #[test]
+    fn the_pane_ladder_is_monotone() {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.single_pane_below = 80;
+        app.repos_pane_above = 110;
+
+        let count = |p: Panes| match p {
+            Panes::One => 1,
+            Panes::Two => 2,
+            Panes::Three => 3,
+        };
+
+        let mut last = 0;
+        for w in 40..=200u16 {
+            app.terminal_width = w;
+            let n = count(app.panes());
+            assert!(n >= last, "widening to {w} dropped a pane: {last} -> {n}");
+            last = n;
+        }
+    }
+
+    #[test]
+    fn the_ladder_hits_each_rung_at_its_threshold() {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.single_pane_below = 80;
+        app.repos_pane_above = 110;
+
+        app.terminal_width = 79;
+        assert_eq!(app.panes(), Panes::One);
+        app.terminal_width = 80;
+        assert_eq!(app.panes(), Panes::Two);
+        app.terminal_width = 109;
+        assert_eq!(app.panes(), Panes::Two);
+        app.terminal_width = 110;
+        assert_eq!(app.panes(), Panes::Three);
+    }
+
+    /// `0` disables a rung, matching what `single_pane_below = 0` already means.
+    #[test]
+    fn zero_disables_a_rung() {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.single_pane_below = 0;
+        app.repos_pane_above = 0;
+
+        app.terminal_width = 200;
+        assert_eq!(app.panes(), Panes::Two, "the repos rung is off");
+        app.terminal_width = 20;
+        assert_eq!(app.panes(), Panes::Two, "the single-pane rung is off");
+    }
+
+    /// Zoom still wins, at any width, as it does today.
+    #[test]
+    fn zoom_overrides_the_ladder() {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.repos_pane_above = 110;
+        app.terminal_width = 200;
+        app.zoom = Some(true);
+        assert_eq!(app.panes(), Panes::One);
     }
 
     /// With one pane on screen, every column belongs to it. Otherwise the mouse
