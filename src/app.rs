@@ -94,6 +94,10 @@ pub enum Mode {
 pub enum Focus {
     Tree,
     Detail,
+    /// Not yet reachable -- no key sets it until the task that wires it, but
+    /// it already has to exist so `App`'s new fields and match arms compile.
+    #[allow(dead_code)]
+    Repos,
 }
 
 /// How many panes are drawn. A single ordered ladder, so first-fit can only
@@ -207,6 +211,19 @@ pub struct App {
     /// Rewritten every frame; empty while the search box owns the row, so a
     /// click can never act on a menu that is not on screen.
     pub header_zones: Vec<(u16, u16, HeaderZone)>,
+    /// Which worktree's store the task tree is showing.
+    #[allow(dead_code)] // not yet consumed by the renderer -- a later task draws the pane
+    pub selected_worktree: Option<String>,
+    /// Task selection per worktree path, so switching back returns the cursor.
+    /// Session-only: this is view state, not something to persist.
+    #[allow(dead_code)] // not yet consumed by the renderer -- a later task draws the pane
+    pub task_memory: HashMap<String, String>,
+    /// Registered repos with their worktrees, and whether each is expanded.
+    pub repos: Vec<crate::repos::Repo>,
+    #[allow(dead_code)] // not yet consumed by the renderer -- a later task draws the pane
+    pub selected_repo_row: usize,
+    #[allow(dead_code)] // not yet consumed by the renderer -- a later task draws the pane
+    pub registry: crate::registry::Registry,
 }
 
 impl App {
@@ -247,6 +264,11 @@ impl App {
             repos_pane_above: cfg.repos_pane_above,
             zoom: None,
             header_zones: Vec::new(),
+            selected_worktree: None,
+            task_memory: HashMap::new(),
+            repos: Vec::new(),
+            selected_repo_row: 0,
+            registry: crate::registry::Registry::default(),
         };
 
         // Everything is "new" on first load, so the collapse-new-tasks rule would
@@ -704,6 +726,11 @@ impl App {
         self.focus = match self.focus {
             Focus::Tree => Focus::Detail,
             Focus::Detail => Focus::Tree,
+            // Tab has never been the way into the repo pane -- that is a
+            // dedicated key, wired in a later task -- so leaving it lands back
+            // on the tree rather than bouncing between two panes that are not
+            // the one Tab is documented to cross.
+            Focus::Repos => Focus::Tree,
         };
     }
 
@@ -819,6 +846,28 @@ impl App {
 
     pub fn is_modal(&self) -> bool {
         !matches!(self.mode, Mode::Normal | Mode::Search)
+    }
+
+    /// Switches which store the task panes read, remembering where the cursor
+    /// was in the worktree being left.
+    #[allow(dead_code)] // not yet consumed by the renderer -- a later task wires the keys
+    pub fn select_worktree(&mut self, path: &str) {
+        if self.selected_worktree.as_deref() == Some(path) {
+            return;
+        }
+        if let (Some(old), Some(sel)) = (self.selected_worktree.clone(), self.selected.clone()) {
+            self.task_memory.insert(old, sel);
+        }
+        self.selected_worktree = Some(path.to_string());
+        self.selected = self.task_memory.get(path).cloned();
+    }
+
+    /// Rebuilt from `self.repos` on every call, exactly as the task tree is
+    /// rebuilt every frame -- a cached `Vec<Row>` would go stale the moment the
+    /// repo list changed underneath it, since `Row` carries bare indices.
+    #[allow(dead_code)] // not yet consumed by the renderer -- a later task draws it
+    pub fn repo_rows(&self) -> Vec<crate::repos::Row> {
+        crate::repos::rows(&self.repos)
     }
 }
 
@@ -1498,6 +1547,47 @@ mod tests {
         for ms in (0..3000).step_by(50) {
             assert!(!app.pulse_tick(std::time::Duration::from_millis(ms), 10), "{ms}ms");
         }
+    }
+
+    /// Switching away and back must return the cursor to where it was, or the
+    /// pane is tedious for exactly the comparison it exists to serve.
+    #[test]
+    fn each_worktree_remembers_where_you_were() {
+        let mut app = counted(vec![task("a", None, &[]), task("b", None, &[])]);
+        app.selected_worktree = Some("/x/one".into());
+        app.selected = Some("b".into());
+
+        app.select_worktree("/x/two");
+        assert_eq!(app.selected_worktree.as_deref(), Some("/x/two"));
+
+        app.selected = Some("a".into());
+        app.select_worktree("/x/one");
+        assert_eq!(
+            app.selected.as_deref(),
+            Some("b"),
+            "returning to a worktree lost the task selection"
+        );
+    }
+
+    /// The refresh invariant, extended: a refresh may not move the worktree either.
+    #[test]
+    fn a_refresh_never_changes_the_selected_worktree() {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.selected_worktree = Some("/x/one".into());
+
+        app.apply_tasks(vec![task("a", None, &[]), task("c", None, &[])]);
+
+        assert_eq!(app.selected_worktree.as_deref(), Some("/x/one"));
+    }
+
+    #[test]
+    fn selecting_the_same_worktree_twice_is_harmless() {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.selected_worktree = Some("/x/one".into());
+        app.selected = Some("a".into());
+
+        app.select_worktree("/x/one");
+        assert_eq!(app.selected.as_deref(), Some("a"));
     }
 
     /// Otherwise `,`-reload would silently ignore the key, which is exactly the

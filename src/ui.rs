@@ -65,6 +65,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, ic: &Icons) {
         match app.focus {
             Focus::Tree => draw_tree(frame, app, ic, body),
             Focus::Detail => draw_detail(frame, app, ic, body),
+            // Nothing draws the repo pane yet -- that lands in a later task --
+            // so falling here shows the tree rather than a blank pane.
+            Focus::Repos => draw_tree(frame, app, ic, body),
         }
         draw_status(frame, app, bottom);
         draw_overlays(frame, app);

@@ -406,6 +406,9 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
                         app.select_at_row(m.row);
                     }
                     Focus::Detail => app.focus = Focus::Detail,
+                    // The repo pane has no click-to-select yet -- that lands in
+                    // the task that draws it -- so a click only focuses it.
+                    Focus::Repos => app.focus = Focus::Repos,
                 }
             }
         }
@@ -424,12 +427,16 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
             match app.pane_at(m.column) {
                 Focus::Tree => app.scroll_tree(1),
                 Focus::Detail => app.scroll_detail(1, 0),
+                // Nothing to scroll yet -- the repo pane is not drawn until a
+                // later task, so there is no content to move.
+                Focus::Repos => {}
             }
         }
         MouseEventKind::ScrollUp => {
             match app.pane_at(m.column) {
                 Focus::Tree => app.scroll_tree(-1),
                 Focus::Detail => app.scroll_detail(-1, 0),
+                Focus::Repos => {}
             }
         }
         MouseEventKind::ScrollLeft => app.scroll_detail(0, -4),
@@ -636,21 +643,29 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
 
         // Movement drives whichever pane has focus. Action keys below stay
         // global, because they always act on the selected task.
+        //
+        // The repo pane's own movement is wired in the task that draws it, so
+        // it gets an inert arm here rather than borrowing the tree's or the
+        // detail's meaning.
         KeyCode::Down | KeyCode::Char('j') => match app.focus {
             Focus::Tree => app.move_selection(1),
             Focus::Detail => app.scroll_detail(1, 0),
+            Focus::Repos => {}
         },
         KeyCode::Up | KeyCode::Char('k') => match app.focus {
             Focus::Tree => app.move_selection(-1),
             Focus::Detail => app.scroll_detail(-1, 0),
+            Focus::Repos => {}
         },
         KeyCode::PageDown => match app.focus {
             Focus::Tree => app.move_selection(10),
             Focus::Detail => app.scroll_detail(10, 0),
+            Focus::Repos => {}
         },
         KeyCode::PageUp => match app.focus {
             Focus::Tree => app.move_selection(-10),
             Focus::Detail => app.scroll_detail(-10, 0),
+            Focus::Repos => {}
         },
         // Enter always opens the detail. It is the deliberate way across, and it
         // was unbound in Normal mode, so nothing changes meaning.
@@ -675,6 +690,7 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
                 }
             }
             Focus::Detail => app.scroll_detail(0, 4),
+            Focus::Repos => {}
         },
         KeyCode::Left | KeyCode::Char('h') => match app.focus {
             Focus::Tree => app.collapse_selected(),
@@ -689,14 +705,17 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
                     app.scroll_detail(0, -4);
                 }
             }
+            Focus::Repos => {}
         },
         KeyCode::Char('g') => match app.focus {
             Focus::Tree => app.select_first(),
             Focus::Detail => app.detail_to_top(),
+            Focus::Repos => {}
         },
         KeyCode::Char('G') => match app.focus {
             Focus::Tree => app.select_last(),
             Focus::Detail => app.detail_to_bottom(),
+            Focus::Repos => {}
         },
         // `z` is tmux's zoom-pane, which is where the reflex comes from. That
         // cost collapse/expand their old keys -- and `-`/`+` is the better
