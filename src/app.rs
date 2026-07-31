@@ -110,6 +110,8 @@ pub enum HeaderZone {
     /// The lone filter name a narrow header falls back to. With no options on
     /// screen there is nothing to pick, so a click advances instead.
     FilterCycle,
+    /// A numbered pane tab. Only drawn in zoom mode, so only clickable there.
+    Pane(Focus),
 }
 
 /// What the header reports about the whole store. See [`App::counts`] for why
@@ -636,6 +638,12 @@ impl App {
             _ if secondary => return false,
             HeaderZone::Filter(f) => self.filter = f,
             HeaderZone::FilterCycle => self.filter = self.filter.next(),
+            // Nothing to rebuild -- the tree is unchanged, only which pane is
+            // looked at -- but returning true still marks the click as handled.
+            HeaderZone::Pane(f) => {
+                self.focus = f;
+                return true;
+            }
         }
         self.rebuild();
         true

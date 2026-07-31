@@ -46,14 +46,15 @@ pub fn draw(frame: &mut Frame, app: &mut App, ic: &Icons) {
     ])
     .areas(frame.area());
 
-    draw_header(frame, app, ic, top);
-
-    // Set before `single_pane` is consulted: it reads the published width, and on
-    // the very first frame -- or the one after a resize -- the old value would
-    // pick the wrong layout for exactly one frame, which reads as a flicker.
+    // Set before anything consults `single_pane`, the header included: it reads
+    // the published width, and on the first frame -- or the one after a resize --
+    // a stale value picks the wrong layout for exactly one frame. The header
+    // asks earliest of all, to decide whether to draw the pane tabs.
     app.terminal_width = frame.area().width;
     app.body_top = body.y;
     app.body_bottom = body.y + body.height;
+
+    draw_header(frame, app, ic, top);
 
     if app.single_pane() {
         // One pane, filling the width, chosen by focus. There is no divider, so
@@ -355,6 +356,8 @@ fn right_zones(right: &[Span], x0: u16, sort_label: &str) -> Vec<(u16, u16, Head
         if w > 0 {
             let zone = if span.content == sort_label {
                 Some(HeaderZone::Sort)
+            } else if let Some(pane) = tab_zone(&span.content) {
+                Some(pane)
             } else {
                 tree::Filter::MENU
                     .iter()
@@ -380,6 +383,43 @@ fn right_zones(right: &[Span], x0: u16, sort_label: &str) -> Vec<(u16, u16, Head
         }
     }
     found
+}
+
+/// Which pane a drawn tab span selects, if it is one.
+///
+/// Matched on content like every other zone here, so a tab that was not drawn
+/// offers nothing to click. The vocabulary is four strings and cannot collide
+/// with a sort label or a filter name.
+fn tab_zone(content: &str) -> Option<HeaderZone> {
+    match content {
+        "[1]" | " 1 " => Some(HeaderZone::Pane(Focus::Tree)),
+        "[2]" | " 2 " => Some(HeaderZone::Pane(Focus::Detail)),
+        _ => None,
+    }
+}
+
+/// The pane tabs, `[1] 2`, drawn only when one pane is hidden.
+///
+/// LazyGit and gitui both number their panels so you can jump straight to one.
+/// The same idea earns its place here only in zoom mode: with both panes on
+/// screen there is nothing to navigate *to*, and the numbers would be
+/// decoration competing for a row that already sheds elements to fit.
+///
+/// Both states are three cells wide -- `[1]` against ` 2 ` -- so switching tabs
+/// cannot shift anything else in the header sideways.
+fn tab_spans(focus: Focus) -> Vec<Span<'static>> {
+    let mut out = vec![Span::raw(" ")];
+    for (n, f) in [(1, Focus::Tree), (2, Focus::Detail)] {
+        if f == focus {
+            out.push(Span::styled(
+                format!("[{n}]"),
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            out.push(Span::styled(format!(" {n} "), Style::default().fg(DIM)));
+        }
+    }
+    out
 }
 
 /// One filter's name, marked if it is the one in force.
@@ -674,14 +714,36 @@ fn draw_header(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
     // vanished leaving a dangling " · ", and narrower still the row read
     // `dexA-Z`. Splitting the row first means an overlap cannot be expressed,
     // and each side is then free to degrade honestly inside its own space.
+    // Reserved before the ladder runs rather than competing inside it, so the
+    // tabs outlive the sort label and the filter menu. In zoom mode they are the
+    // only thing on screen saying the other pane exists; a rung that dropped
+    // them would hide the way back.
+    // Room the identity needs to say *something* -- a glyph, a letter or two of
+    // the store, an ellipsis. Below that the tabs would take the whole row and
+    // the store label would vanish with nothing marking it as clipped, which
+    // the ladder's own rule forbids: the label is in every rung because "wrong
+    // tasks" is this app's most common confusion.
+    const IDENTITY_FLOOR: usize = 8;
+
+    let tabs = match app.single_pane() {
+        true => tab_spans(app.focus),
+        false => Vec::new(),
+    };
+    let tabs = if span_width(&tabs) + IDENTITY_FLOOR <= area.width as usize {
+        tabs
+    } else {
+        Vec::new()
+    };
+
     let (mut spans, right) = header_sides(
         &app.store_label,
         ic,
         app.sort.label(app.sort_reversed),
         app.filter,
         counts_floor(c, ic),
-        area.width as usize,
+        (area.width as usize).saturating_sub(span_width(&tabs)),
     );
+    let right = [tabs, right].concat();
     let [left_area, right_area] = Layout::horizontal([
         Constraint::Min(0),
         Constraint::Length(span_width(&right) as u16),
@@ -1225,9 +1287,10 @@ Movement follows the focused pane, shown by its brighter border. Turn wrap
 off (w) to scroll a wide table sideways -- wrapping removes the overflow
 there would otherwise be to scroll to.
 
-On a narrow terminal only one pane is shown at a time: enter (or right, on a
-task with no subtasks) opens the detail full-width, and left or tab goes back.
-The width it switches at is single_pane_below in the config.
+On a narrow terminal it zooms: one pane at a time, with [1] [2] tabs in the
+header. Press 1 or 2 to jump, enter (or right, on a task with no subtasks) to
+open the detail, left or tab to go back. The width it switches at is
+single_pane_below in the config.
 
 Mouse: drag the divider to resize, wheel scrolls the pane under the pointer,
 click selects. In the header, click a filter to switch to it, or the sort
@@ -1572,6 +1635,69 @@ mod tests {
         assert!(HELP.contains("^R  refresh now"), "help: Ctrl-R refreshes");
     }
 
+    /// The tabs are the only thing on screen saying the other pane exists, so
+    /// they appear exactly when one is hidden -- and never when both are up,
+    /// where they would be decoration on a row that already sheds to fit.
+    #[test]
+    fn the_pane_tabs_appear_only_when_a_pane_is_hidden() {
+        let zoomed = screen(60, 80, Focus::Tree);
+        assert!(zoomed.contains("[1]"), "no tabs in zoom mode: {zoomed}");
+        assert!(zoomed.contains(" 2 "), "no second tab: {zoomed}");
+
+        let split = screen(100, 80, Focus::Tree);
+        assert!(!split.contains("[1]"), "tabs drawn beside both panes: {split}");
+    }
+
+    #[test]
+    fn the_current_pane_is_the_marked_tab() {
+        let on_tree = screen(60, 80, Focus::Tree);
+        assert!(on_tree.contains("[1]"), "{on_tree}");
+        assert!(!on_tree.contains("[2]"), "two tabs marked at once: {on_tree}");
+
+        let on_detail = screen(60, 80, Focus::Detail);
+        assert!(on_detail.contains("[2]"), "{on_detail}");
+        assert!(!on_detail.contains("[1]"), "two tabs marked at once: {on_detail}");
+    }
+
+    /// Both states must be the same width, or switching tabs would shove the
+    /// rest of the header sideways -- the jitter the whole header design avoids.
+    #[test]
+    fn switching_tabs_does_not_move_anything_else() {
+        assert_eq!(
+            span_width(&tab_spans(Focus::Tree)),
+            span_width(&tab_spans(Focus::Detail))
+        );
+    }
+
+    /// The tabs are reserved before the ladder runs, so they outlive the sort
+    /// label and the filter menu. A rung that dropped them would hide the only
+    /// indication that there is a way back.
+    #[test]
+    fn the_tabs_survive_a_terminal_too_narrow_for_anything_else() {
+        for w in [60u16, 50, 40, 30, 24] {
+            let s = screen(w, 80, Focus::Detail);
+            assert!(
+                s.contains("[2]"),
+                "{w} columns dropped the tabs, hiding the way back:\n{s}"
+            );
+        }
+    }
+
+    /// At an absurd width the tabs would take the whole row and the store label
+    /// would vanish with nothing marking it as clipped. The ladder's rule is
+    /// that the label survives everything, so the tabs are what yields.
+    #[test]
+    fn the_tabs_yield_to_the_store_label_at_absurd_widths() {
+        for w in [4u16, 6, 8, 10] {
+            let s = screen(w, 80, Focus::Tree);
+            let head = s.lines().next().unwrap_or("");
+            assert!(
+                !head.contains("[1]") || head.trim().len() > 4,
+                "{w} columns: tabs took the whole row: {head:?}"
+            );
+        }
+    }
+
     /// Renders a frame and returns the header zones the renderer published.
     fn zones_for(w: u16, filter: tree::Filter, mode: Mode) -> Vec<(u16, u16, HeaderZone)> {
         let mut app = App::new(
@@ -1809,6 +1935,10 @@ mod tests {
             store.into(),
             crate::config::Config::default(),
         );
+        // The ladder is the subject here, so zoom mode is switched off: its tabs
+        // are reserved ahead of the ladder and would otherwise confound every
+        // width below the threshold. The tabs have their own tests.
+        app.single_pane_below = 0;
         let mut terminal = Terminal::new(TestBackend::new(w, 8)).unwrap();
         terminal.draw(|f| draw(f, &mut app, ic)).unwrap();
         let buf = terminal.backend().buffer().clone();

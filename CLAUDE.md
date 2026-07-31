@@ -401,12 +401,32 @@ but it is fixing the symptom. Of the installed monospace fonts only Menlo has
 those three glyphs at all, and even it is 0.978 cells. Using glyphs the font
 already has is both exact and portable to whatever font someone else runs.
 
-## One pane when there is no room for two
+## Zoom: one pane when there is no room for two
 
 Below `single_pane_below` columns (80 by default, `0` disables it) only the
 focused pane is drawn, filling the width. `Enter` opens the detail; `Left`/`h`
-and `Tab` go back; `Right`/`l` also crosses over, but **only from a leaf** —
-where it did nothing before — so its tree meaning is untouched.
+and `Tab` go back; `1` and `2` jump straight to a pane; `Right`/`l` also crosses
+over, but **only from a leaf** — where it did nothing before — so its tree
+meaning is untouched.
+
+The **`[1] [2]` tabs** are the LazyGit/gitui idea, and they earn their place
+only here: with both panes on screen there is nothing to navigate *to*, and the
+numbers would be decoration on a row that already sheds elements to fit. They
+are **reserved before the ladder runs** rather than competing inside it, so they
+outlive the sort label and the filter menu — a rung that dropped them would hide
+the only sign that there is a way back. Below `IDENTITY_FLOOR` columns of
+remaining room they yield in turn, because the store label is the one thing the
+ladder promises always survives.
+
+Both tab states are the same width — `[1]` against ` 2 ` — so switching cannot
+shove the rest of the header sideways. The keys work at any width even though
+the tabs are only drawn in zoom mode: they were unbound, and refusing them with
+both panes visible would be a rule to remember for no benefit.
+
+`draw` must publish `terminal_width` **before** `draw_header`, because the header
+is the earliest thing to ask `single_pane()` — it decides there whether to draw
+tabs at all. With the assignment after, the first frame and every frame after a
+resize used a stale width and drew the wrong thing for exactly one frame.
 
 **`App::focus` is the whole implementation.** It already existed to say which
 border is brighter; below the threshold it says which pane is *drawn* instead.

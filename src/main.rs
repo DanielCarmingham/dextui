@@ -653,6 +653,14 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         // was unbound in Normal mode, so nothing changes meaning.
         KeyCode::Enter => app.show_detail(),
 
+        // Straight to a pane by number, the way LazyGit and gitui do it. The
+        // numbers are only *drawn* in zoom mode, where there is a hidden pane to
+        // reach, but the keys work at any width -- they were unbound, and
+        // refusing them when both panes are visible would be a rule to remember
+        // for no benefit.
+        KeyCode::Char('1') => app.show_tree(),
+        KeyCode::Char('2') => app.show_detail(),
+
         KeyCode::Right | KeyCode::Char('l') => match app.focus {
             // Falls through to the detail only when there was nothing to open --
             // a leaf, where this key did nothing at all before. Gated on
