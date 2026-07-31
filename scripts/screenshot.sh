@@ -11,6 +11,8 @@
 #
 #   scripts/screenshot.sh                        # -> docs/img/dextui-dark.png
 #   DEXTUI_ICONS=unicode scripts/screenshot.sh out.png
+#   COLS=60 scripts/screenshot.sh out.png        # the single-pane layout
+#   COLS=60 KEYS=Enter scripts/screenshot.sh …   # after pressing a key
 #
 # Nerd Font glyphs by default, since that is the set worth showing off.
 set -uo pipefail
@@ -19,11 +21,16 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$REPO/docs/img/dextui-dark.png}"
 ICONS="${DEXTUI_ICONS:-nerd}"
 SOCK="dextui-shot"
-COLS=116
+# 116 is comfortably above `single_pane_below`, so the default shot shows the
+# split. Drop below that and the app draws one pane -- which is worth its own
+# picture rather than a paragraph.
+COLS="${COLS:-116}"
 # Tall enough to show the tree's depth and the detail pane's metadata, short
 # enough to stop before the demo description's fenced code block -- which is
 # real output, but a half-drawn ```rust fence is a poor first impression.
-ROWS=21
+ROWS="${ROWS:-21}"
+# Keys to send before capturing, space-separated tmux key names.
+KEYS="${KEYS:-}"
 
 command -v tmux >/dev/null || { echo "screenshot.sh: tmux is not on PATH" >&2; exit 1; }
 [ -x "$REPO/target/debug/dextui" ] || { echo "screenshot.sh: cargo build first" >&2; exit 1; }
@@ -55,5 +62,10 @@ sleep 3
 # the selection gutter appears on a row that also carries a meter.
 tmux -L "$SOCK" send-keys -t shot Down
 sleep 1
+
+for k in $KEYS; do
+  tmux -L "$SOCK" send-keys -t shot "$k"
+  sleep 1
+done
 
 tmux -L "$SOCK" capture-pane -t shot -p -e | python3 "$REPO/scripts/screenshot.py" "$OUT"

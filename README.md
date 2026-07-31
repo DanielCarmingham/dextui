@@ -128,6 +128,19 @@ Acting on the selected task:
 subtasks — opens the detail full-width, and `←` or `tab` goes back. Two panes
 much narrower than that leave no room for either. Set it to `0` to always split.
 
+<table>
+<tr>
+<td><img alt="the task tree filling a 60-column terminal" src="docs/img/dextui-narrow.png"></td>
+<td><img alt="the detail pane filling the same terminal after pressing enter" src="docs/img/dextui-narrow-detail.png"></td>
+</tr>
+<tr>
+<td align="center"><sub>60 columns — <code>enter</code> →</sub></td>
+<td align="center"><sub><sub>← <code>tab</code></sub> — the same terminal</sub></td>
+</tr>
+</table>
+
+The header sheds the same way the wide one does, down to bare glyph counts.
+
 **The header is clickable.** Click a word in `[ all  pending  active ]` to switch
 filter, or the sort label to cycle it — right-click the sort label to reverse it,
 the same pair as `o` and `O`. When the terminal is too narrow to show the whole
