@@ -413,7 +413,9 @@ fn main() -> std::io::Result<()> {
         .map(|p| {
             let dir = repos::store_dir(p);
             thread::spawn(move || {
+                let start = std::time::Instant::now();
                 let result = Dex::for_store(&dir).and_then(|d| d.list());
+                log_list_outcome(&dir, &result, start.elapsed());
                 (dir, result)
             })
         })
@@ -446,7 +448,9 @@ fn main() -> std::io::Result<()> {
         let tx = tx.clone();
         thread::spawn(move || {
             while let Ok(dir) = worktree_rx.recv() {
+                let start = std::time::Instant::now();
                 let result = Dex::for_store(&dir).and_then(|d| d.list());
+                log_list_outcome(&dir, &result, start.elapsed());
                 if tx.send(Msg::WorktreeCounts { dir, result }).is_err() {
                     return;
                 }
@@ -753,7 +757,10 @@ fn switch_store(
             return;
         }
     };
-    match new_dex.list() {
+    let start = std::time::Instant::now();
+    let result = new_dex.list();
+    log_list_outcome(&dir, &result, start.elapsed());
+    match result {
         Ok(tasks) => {
             *dex = Arc::new(new_dex);
             *watcher = watch::spawn(&dir, watch_tx.clone());
@@ -821,6 +828,23 @@ fn select_worktree_under_cursor(app: &mut App) {
     }
 }
 
+/// One log line per `dex list`, in the one format every call site below
+/// shares -- so the file stays greppable by store regardless of which path
+/// issued the call. `store` is whatever identifies the store to the *caller*:
+/// `refresh()` passes `app.store_label` (a short display name, since there is
+/// only ever one selected store and no ambiguity to resolve), everywhere else
+/// passes the store directory -- the same string `watch.rs` logs in its
+/// `registered`/`event`/`tick` lines for that store, so a `tick <dir>
+/// changed` can be grepped straight through to the `list <dir> ...` it
+/// caused.
+fn log_list_outcome(store: &str, result: &Result<Vec<Task>, String>, elapsed: std::time::Duration) {
+    let ms = elapsed.as_millis();
+    match result {
+        Ok(tasks) => log::line("dex", &format!("list {store} - {} tasks {ms}ms", tasks.len())),
+        Err(e) => log::line("dex", &format!("list {store} failed after {ms}ms: {}", flatten(e))),
+    }
+}
+
 /// `store` is a display label (`store_label`), not a full path -- just enough
 /// to tell two stores apart in the log without an extra `dex dir` spawn.
 fn refresh(dex: &Arc<Dex>, tx: &Sender<Msg>, store: &str) {
@@ -830,11 +854,7 @@ fn refresh(dex: &Arc<Dex>, tx: &Sender<Msg>, store: &str) {
     thread::spawn(move || {
         let start = std::time::Instant::now();
         let result = dex.list();
-        let ms = start.elapsed().as_millis();
-        match &result {
-            Ok(tasks) => log::line("dex", &format!("list {store} - {} tasks {ms}ms", tasks.len())),
-            Err(e) => log::line("dex", &format!("list {store} failed after {ms}ms: {}", flatten(e))),
-        }
+        log_list_outcome(&store, &result, start.elapsed());
         let _ = tx.send(Msg::Tasks(result));
     });
 }
