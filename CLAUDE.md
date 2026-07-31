@@ -1146,6 +1146,14 @@ with `tmux send-keys` are 1-based. Mixing them is a one-cell error that looks
 exactly like a layout bug. It also enables `?1003h` by hand for motion with no
 button held, which `EnableMouseCapture` does not turn on.
 
+`cargo run --example mouse -- --raw` is the third rung, for when a coordinate
+is not merely off but *wildly* wrong: it prints the literal bytes with no
+parser in between, so a left press at column 60 row 6 should read exactly
+`ESC [ < 0 ; 60 ; 6 M`. If that is what arrives and the crosshair sits
+elsewhere, the fault is above the wire; if the numbers are already wrong there
+— implausibly large is what pixel-resolution reporting (`?1016h`) looks like —
+it is the terminal, and no app-side arithmetic will fix it.
+
 `DEXTUI_MOUSE_DEBUG=1` adds a strip inside the app pairing each event with what
 the app resolved it to — pane, offset, row index and the task's name. That
 pairing is the point: every input to the decision is state the *renderer*

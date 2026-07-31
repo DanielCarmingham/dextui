@@ -43,6 +43,9 @@ use crossterm::{execute, queue};
 const HISTORY: usize = 14;
 
 fn main() -> io::Result<()> {
+    if std::env::args().any(|a| a == "--raw") {
+        return raw();
+    }
     let mut out = io::stdout();
 
     enable_raw_mode()?;
@@ -62,6 +65,64 @@ fn main() -> io::Result<()> {
     let _ = disable_raw_mode();
 
     result
+}
+
+/// `--raw`: the literal bytes the terminal sends, with no parser in between.
+///
+/// The last thing that can be wrong when a coordinate is "wildly wrong" is the
+/// parse, and everything above reads events through crossterm -- so it cannot
+/// answer whether crossterm was handed something odd or produced something odd
+/// from something ordinary. This reads stdin itself and escapes what arrives.
+///
+/// What to look for. A left press at column 60, row 6 (1-based, as the wire
+/// counts) should appear as exactly:
+///
+/// ```text
+/// ESC [ < 0 ; 60 ; 6 M
+/// ```
+///
+/// If that is what arrives and the crosshair sits elsewhere, the fault is
+/// above this line. If the numbers here are already wrong -- wildly large, say,
+/// which is what pixel-resolution reporting (`?1016h`) looks like -- then it is
+/// the terminal, and no amount of app-side arithmetic will fix it.
+fn raw() -> io::Result<()> {
+    use std::io::Read;
+
+    enable_raw_mode()?;
+    let mut out = io::stdout();
+    execute!(out, EnableMouseCapture)?;
+    write!(out, "\x1b[?1003h")?;
+    writeln!(out, "raw mouse bytes — move and click; ctrl-c or q to quit\r")?;
+    out.flush()?;
+
+    let mut buf = [0u8; 1024];
+    let mut stdin = io::stdin();
+    loop {
+        let n = stdin.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        if buf[..n].contains(&b'q') {
+            break;
+        }
+        // One line per read, so a sequence split across reads is visible as a
+        // split rather than silently rejoined -- that is itself a finding.
+        let shown: String = buf[..n]
+            .iter()
+            .map(|b| match b {
+                0x1b => "ESC ".to_string(),
+                0x20..=0x7e => format!("{} ", *b as char),
+                _ => format!("\\x{b:02x} "),
+            })
+            .collect();
+        write!(out, "{shown}\r\n")?;
+        out.flush()?;
+    }
+
+    let _ = write!(out, "\x1b[?1003l");
+    let _ = execute!(out, DisableMouseCapture);
+    let _ = disable_raw_mode();
+    Ok(())
 }
 
 fn run(out: &mut io::Stdout) -> io::Result<()> {
