@@ -28,7 +28,16 @@ use crate::dex::{self, age, local_time, Status, Task};
 use crate::tree::{self, Progress};
 
 const SHORTCUTS: &str =
-    " s start  c done  r rename  e edit  n new  a sub  d del  f filter  o sort  , config  ? help";
+    " s start  c done  r rename  e edit  n new  a sub  d del  f filter  o sort  3 repos  , config  ? help";
+
+/// What the strip says while the sidebar has focus.
+///
+/// The keys genuinely differ there: `a` registers a repo rather than creating
+/// a subtask, `D` unregisters one, and none of `s`/`c`/`e`/`d` apply to a row
+/// that is not a task. A single strip advertising `a sub` beside a focused
+/// sidebar was not a shorter truth, it was a wrong one.
+const REPO_SHORTCUTS: &str =
+    " enter switch store  a register repo  D unregister  tab tasks  ? help";
 
 /// Width of the inline progress meter, in cells.
 const METER_WIDTH: usize = 7;
@@ -435,22 +444,32 @@ fn tab_zone(content: &str) -> Option<HeaderZone> {
     match content {
         "[1]" | " 1 " => Some(HeaderZone::Pane(Focus::Tree)),
         "[2]" | " 2 " => Some(HeaderZone::Pane(Focus::Detail)),
+        "[3]" | " 3 " => Some(HeaderZone::Pane(Focus::Repos)),
         _ => None,
     }
 }
 
-/// The pane tabs, `[1] 2`, drawn only when one pane is hidden.
+/// Which pane each numbered tab is, in the order they are drawn -- and the
+/// order the `1`/`2`/`3` keys use, since a tab that did not match its key
+/// would be worse than no tab at all.
+const TABS: [(u8, Focus); 3] = [(1, Focus::Tree), (2, Focus::Detail), (3, Focus::Repos)];
+
+/// The pane tabs, `[1] 2 3`, drawn only when one pane is hidden.
 ///
 /// LazyGit and gitui both number their panels so you can jump straight to one.
-/// The same idea earns its place here only in zoom mode: with both panes on
+/// The same idea earns its place here only in zoom mode: with every pane on
 /// screen there is nothing to navigate *to*, and the numbers would be
 /// decoration competing for a row that already sheds elements to fit.
+///
+/// Three tabs, not two: the repo sidebar is a pane you can be looking at
+/// alone, and leaving it out meant the row you were *on* had no tab -- while
+/// `3` worked anyway, unadvertised.
 ///
 /// Both states are three cells wide -- `[1]` against ` 2 ` -- so switching tabs
 /// cannot shift anything else in the header sideways.
 fn tab_spans(focus: Focus) -> Vec<Span<'static>> {
     let mut out = vec![Span::raw(" ")];
-    for (n, f) in [(1, Focus::Tree), (2, Focus::Detail)] {
+    for (n, f) in TABS {
         if f == focus {
             out.push(Span::styled(
                 format!("[{n}]"),
@@ -1312,7 +1331,11 @@ fn markdown_lines(text: &str) -> Vec<Line<'static>> {
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let (text, style) = if app.status.is_empty() {
-        (SHORTCUTS.to_string(), Style::default().fg(DIM))
+        let keys = match app.focus {
+            Focus::Repos => REPO_SHORTCUTS,
+            _ => SHORTCUTS,
+        };
+        (keys.to_string(), Style::default().fg(DIM))
     } else {
         (format!(" {}", app.status), Style::default().fg(ACTIVE))
     };
@@ -1382,8 +1405,8 @@ fn draw_message(frame: &mut Frame, title: &str, body: &str, hint: &str, accent: 
 }
 
 /// What `?` shows. Module-level rather than buried in `draw_help`, so a test can
-/// hold it against [`SHORTCUTS`] -- the two advertise the same keys to the same
-/// person and must not drift.
+/// hold it against [`SHORTCUTS`] and [`REPO_SHORTCUTS`] -- they advertise the
+/// same keys to the same person and must not drift.
 ///
 /// Left-aligned on purpose: centring would destroy the column alignment.
 const HELP: &str = "\
@@ -1398,25 +1421,37 @@ f          cycle filter      ^R  refresh now
 ,          edit config       q   quit
 - / +      collapse / expand all
 
+In the repo sidebar these keys act on repos, not on tasks:
+3          focus repos       a   register the repo dextui is running in
+enter / l  switch the tree and detail panes to the worktree under the cursor
+D          unregister the entry (the worktree and its store are untouched)
+
 Movement follows the focused pane, shown by its brighter border. Turn wrap
 off (w) to scroll a wide table sideways -- wrapping removes the overflow
 there would otherwise be to scroll to.
 
-Zoom (z) shows one pane at a time, with [1] [2] tabs in the header -- press 1
-or 2 to jump, or enter and left to cross over. Narrow terminals zoom on their
-own below single_pane_below columns, which makes this usable on a phone.
+Zoom (z) shows one pane at a time, with [1] [2] [3] tabs in the header --
+press 1, 2 or 3 to jump, or enter and left to cross over. Narrow terminals
+zoom on their own below single_pane_below columns, usable even on a phone.
 
 Mouse: drag the divider to resize, wheel scrolls the pane under the pointer,
-click selects. In the header, click a filter to switch to it, or the sort
-label to cycle it -- right-click the sort to reverse. Hold Shift to select
-text, as capture is enabled.
+click selects. In the header, click a filter, or the sort label to cycle it
+-- right-click the sort to reverse. Shift bypasses capture to select text.
 
 The view refreshes itself whenever the dex store changes, including when
 another process or agent edits it. Your selection, expansion and any open
 dialog are never disturbed.";
 
 fn draw_help(frame: &mut Frame) {
-    let area = centered(frame.area(), 74, 16);
+    // Sized to the text rather than to a constant that was quietly two thirds
+    // of it: at 74x16 the dialog cut off mid-sentence, so most of what `?`
+    // documents -- the mouse, the refresh guarantee, and now the sidebar keys
+    // this fix exists to advertise -- could not be read at any terminal size.
+    // `centered` clamps to the frame, so a terminal too small still gets as
+    // much as fits, exactly as before.
+    let lines = HELP.lines().count() as u16;
+    let widest = HELP.lines().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+    let area = centered(frame.area(), widest + 2, lines + 3);
     frame.render_widget(Clear, area);
 
     let block = Block::bordered()
@@ -1757,6 +1792,69 @@ mod tests {
         assert!(HELP.contains("r   rename"), "help: r renames");
         assert!(HELP.contains("e   edit description"), "help: e edits");
         assert!(HELP.contains("^R  refresh now"), "help: Ctrl-R refreshes");
+    }
+
+    /// The sidebar's keys were on neither surface: the strip still read
+    /// `a sub` where `a` registers a repo, and the help mentioned none of
+    /// `3`, `a` or `D`. An app that does not document its own keys is the
+    /// same defect as one that documents them wrongly.
+    #[test]
+    fn both_surfaces_advertise_the_repo_sidebar_keys() {
+        assert!(SHORTCUTS.contains("3 repos"), "the strip hides the sidebar: {SHORTCUTS}");
+
+        // The strip swaps while the sidebar has focus, because `a` means
+        // something else there.
+        for key in ["enter switch", "a register", "D unregister"] {
+            assert!(
+                REPO_SHORTCUTS.contains(key),
+                "the sidebar strip does not advertise {key}: {REPO_SHORTCUTS}"
+            );
+        }
+        assert!(
+            !REPO_SHORTCUTS.contains("a sub"),
+            "the sidebar strip still claims `a` makes a subtask: {REPO_SHORTCUTS}"
+        );
+
+        // And the help names each of them too.
+        assert!(HELP.contains("3          focus repos"), "help: 3 focuses the sidebar");
+        assert!(HELP.contains("a   register the repo"), "help: a registers");
+        assert!(HELP.contains("D          unregister"), "help: D unregisters");
+        assert!(HELP.contains("enter / l  switch"), "help: enter switches store");
+        assert!(HELP.contains("[1] [2] [3]"), "help: the third pane has a tab");
+    }
+
+    /// The dialog used to be a fixed 16 rows against ~28 lines of text, so
+    /// two thirds of what `?` documented -- the mouse, the refresh guarantee,
+    /// the sidebar keys -- was unreachable at every terminal size. Adding a
+    /// line to `HELP` that nobody can read is not documenting a key.
+    #[test]
+    fn the_help_dialog_shows_all_of_the_help() {
+        let mut app = App::new(vec![], "demo".into(), crate::config::Config::default());
+        app.mode = crate::app::Mode::Help;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let screen = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // The first and last lines of the text, and one from the section that
+        // used to be cut off entirely.
+        for line in [
+            "tab        switch pane",
+            "D          unregister",
+            "dialog are never disturbed.",
+        ] {
+            assert!(screen.contains(line), "help clipped -- missing {line:?}:\n{screen}");
+        }
     }
 
     /// The tabs are the only thing on screen saying the other pane exists, so
