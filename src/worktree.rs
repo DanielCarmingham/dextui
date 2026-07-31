@@ -2,7 +2,6 @@
 
 use std::process::Command;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worktree {
     pub path: String,
@@ -22,7 +21,6 @@ pub struct Worktree {
 /// absent -- `branch` is missing entirely when detached, and `locked` appears
 /// only when set. Silently ignores `bare` and `prunable` attributes, which do
 /// not map to fields in this task.
-#[allow(dead_code)]
 pub fn parse(porcelain: &str) -> Vec<Worktree> {
     let mut out: Vec<Worktree> = Vec::new();
     let mut current: Option<Worktree> = None;
@@ -66,7 +64,6 @@ pub fn parse(porcelain: &str) -> Vec<Worktree> {
 }
 
 /// Every worktree of `repo_path`, main checkout first.
-#[allow(dead_code)]
 pub fn list(repo_path: &str) -> Result<Vec<Worktree>, String> {
     let out = Command::new("git")
         .args(["-C", repo_path, "worktree", "list", "--porcelain"])

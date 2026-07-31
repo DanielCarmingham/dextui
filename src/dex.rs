@@ -344,12 +344,10 @@ impl Dex {
     /// Rejects a path ending in `.jsonl` because dex accepts it, finds no tasks,
     /// and returns an empty list rather than an error -- a wrong store would
     /// look like an empty project.
-    #[allow(dead_code)]
     pub fn for_store(store_dir: &str) -> Result<Self, String> {
         Self::for_store_with(store_dir, Box::new(ProcessRunner))
     }
 
-    #[allow(dead_code)]
     pub fn for_store_with(store_dir: &str, runner: Box<dyn Runner>) -> Result<Self, String> {
         if store_dir.ends_with(".jsonl") {
             return Err(format!(
