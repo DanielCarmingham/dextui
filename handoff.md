@@ -136,7 +136,14 @@ which is what made the narrow cases checkable at all.
 
 ## Still open
 
-In rough order of how much anyone would notice:
+All of these are now dex tasks in this worktree's own store, under the epic
+*Repo sidebar: follow-ups from the add-repo-support branch* — `dex list` for the
+current state, which is the copy to trust. The tickets carry the implementation
+notes; what follows is the summary, in rough order of how much anyone would
+notice.
+
+Note the store is per-worktree and `.dex/` is gitignored, so these tasks travel
+with the branch and not with the push.
 
 - **`app.worktree_counts` is write-only.** Counts are loaded concurrently at
   startup and kept current by per-store watchers, but nothing renders them, so

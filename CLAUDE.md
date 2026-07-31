@@ -133,6 +133,44 @@ now costs nothing until something really changes. This applies to every store
 the app watches, not just the one currently selected — `watch::spawn_many`
 gives each one its own copy of the same stat-gated net.
 
+### A store that does not exist yet
+
+You can watch a directory; you cannot watch one that is not there. dex creates
+`.dex` on the first `dex create`, so a fresh project starts with nothing to
+attach to, and `watch::attach` returns `None`. Three rules follow, each bought
+by a real failure:
+
+- **Whether a watcher can exist is asked every tick, not once at startup.**
+  It used to be decided in `spawn` and never revisited, so a store created after
+  launch was found by the poll — correctly, which is exactly what made this hard
+  to see — and then stayed on the poll's interval for the whole life of the
+  process, with nothing ever attaching to it. The timeout branch now re-attaches
+  when it finds itself without a watcher, and drops one whose directory has gone,
+  so a store deleted and recreated is watched again. `is_attached` exists
+  purely so a test can assert this: nothing on screen distinguishes watched from
+  polled, both keep the view *correct*, and only the latency differs — which is
+  why being stuck on the poll went unnoticed in the first place.
+- **While there is no watcher the tick is `DISCONNECTED_POLL` (1s), not
+  `SAFETY` (10s).** A tick with no watcher does two stats and no subprocess, so
+  the frequency is nearly free; and this is the interval a brand-new store's
+  first tasks wait behind. Ten seconds of an empty pane reads as "it never loads
+  anything" rather than as "it has not looked yet" — which is how this was
+  reported.
+- **The watcher *and* the stat baseline are both established before `spawn`
+  returns**, not on the thread. The thread owns them afterwards, but taking
+  either one there means it happens at some unknowable moment after the caller
+  is already running. For the watcher that loses an immediate write to the poll;
+  for the baseline it loses it altogether — the write lands *in* the baseline,
+  and every later tick then correctly reports it as unchanged. With no watcher
+  attached, nothing else will ever report it. This raced about one run in three
+  under a loaded test suite before it was moved.
+
+`StoreWatcher` therefore signals rather than owns: it holds a stop flag and a
+sender used only to wake the thread out of `recv_timeout`, so a dropped guard
+stops the thread *now*. Dropping it used to drop the notify watcher and leave
+the thread polling forever, still able to trigger a refresh — and `switch_store`
+drops one on every worktree change.
+
 **Writes** always shell out to the dex CLI — never to `tasks.jsonl` directly — so
 dex's validation and its GitHub/Shortcut sync hooks always run.
 
@@ -181,7 +219,11 @@ resolves the path into a process-wide `OnceLock` that every later `log::line`
 call reads. Areas are `watch`, `dex`, `store`, `registry` — padded to a fixed
 column so the file reads straight. What lands in each: `watch` gets every
 watcher registration, FS event, and safety tick outcome (including
-`unchanged`, the branch this exists for); `dex` gets every `list` call once
+`unchanged`, the branch this exists for). A registration logged `(late)` is
+one the tick made after the store appeared, which is the only visible sign the
+re-attach above ever ran — a run of 1s `unchanged` ticks followed by
+`registered … (late)` and then 10s ticks is what a store created after launch
+looks like, and is how that fix was checked. `dex` gets every `list` call once
 the terminal is up — `refresh()` (the function every watcher-triggered,
 Ctrl-R-triggered and post-write reload goes through), the startup
 worktree-counts join, the background per-worktree watcher thread, and a
