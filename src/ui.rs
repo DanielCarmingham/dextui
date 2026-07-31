@@ -898,24 +898,33 @@ fn draw_repos(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
             } else {
                 Span::raw("  ")
             };
-            let body = match row {
+            let mut spans = vec![gutter];
+            match row {
                 crate::repos::Row::Repo { index } => {
                     let r = &app.repos[*index];
-                    Span::styled(
+                    spans.push(Span::styled(
                         format!("{} {}", ic.marker(true, r.open), r.name),
                         Style::default().fg(PLAIN).add_modifier(Modifier::BOLD),
-                    )
+                    ));
+                    // A repo on screen only because it is the one being read,
+                    // rather than because anyone saved it. Marked, not hidden
+                    // and not coloured: the four colours all mean task states,
+                    // and a fifth meaning here would break that language.
+                    if !r.registered {
+                        spans.push(Span::styled(" ·", Style::default().fg(DIM)));
+                    }
                 }
                 crate::repos::Row::Worktree { repo, index } => {
-                    let w = &app.repos[*repo].worktrees[*index];
+                    let r = &app.repos[*repo];
+                    let w = &r.worktrees[*index];
                     let has = crate::repos::has_store(&w.path);
-                    Span::styled(
+                    spans.push(Span::styled(
                         format!("   {}", w.branch),
                         Style::default().fg(if has { PLAIN } else { DIM }),
-                    )
+                    ));
                 }
-            };
-            ListItem::new(Line::from(vec![gutter, body]))
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
@@ -1804,6 +1813,8 @@ mod tests {
                 name: format!("REPO-{i}"),
                 path: format!("/tmp/r{i}"),
                 open: true,
+                registered: true,
+                is_global: false,
                 worktrees: vec![crate::worktree::Worktree {
                     path: format!("/tmp/r{i}"),
                     branch: format!("BR-{i}"),
@@ -3787,6 +3798,8 @@ mod tests {
                 is_detached: false,
             }],
             open: true,
+            registered: true,
+            is_global: false,
         }];
         app.rebuild();
 
@@ -3830,6 +3843,8 @@ mod tests {
                 path: format!("/x/repo{i}"),
                 worktrees: vec![],
                 open: false,
+                registered: true,
+                is_global: false,
             })
             .collect();
         app.rebuild();

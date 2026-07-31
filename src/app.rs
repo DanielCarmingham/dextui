@@ -1073,6 +1073,53 @@ impl App {
         }
     }
 
+    /// The dex store behind a sidebar path.
+    ///
+    /// Not always `<path>/.dex`: the global row's path *is* its store, since
+    /// dex's out-of-repo fallback is a bare directory rather than a checkout
+    /// with a `.dex` in it. Everything that turns a sidebar selection into a
+    /// store goes through here so that exception lives in one place --
+    /// getting it wrong is silent, per the `--storage-path` rule.
+    pub fn store_for_path(&self, path: &str) -> String {
+        for r in &self.repos {
+            let wt = r.worktrees.iter().find(|w| w.path == path);
+            if wt.is_some() || r.path == path {
+                return r.store(wt);
+            }
+        }
+        crate::repos::store_dir(path)
+    }
+
+    /// Puts the sidebar cursor on whichever row is the store being read, so
+    /// the pane opens pointing at what the other two panes are showing.
+    pub fn select_current_store_row(&mut self) {
+        let rows = self.repo_rows();
+        let found = rows.iter().position(|row| match row {
+            crate::repos::Row::Repo { index } => self.repos[*index].store(None) == self.store_dir,
+            crate::repos::Row::Worktree { repo, index } => {
+                let r = &self.repos[*repo];
+                r.store(Some(&r.worktrees[*index])) == self.store_dir
+            }
+        });
+        if let Some(i) = found {
+            self.selected_repo_row = i;
+        }
+    }
+
+    /// Whether any row of `repo` is the store this run is currently reading.
+    ///
+    /// Compared by store directory rather than by path, because that is the
+    /// one identity the global row also has -- it is not a checkout, so it has
+    /// no worktree path to match on.
+    pub fn is_current_store(&self, repo: &crate::repos::Repo) -> bool {
+        if repo.store(None) == self.store_dir {
+            return true;
+        }
+        repo.worktrees
+            .iter()
+            .any(|w| repo.store(Some(w)) == self.store_dir)
+    }
+
     /// Registers a repo. Returns whether the registry changed, so a duplicate
     /// can be reported rather than looking inert.
     ///
@@ -1097,10 +1144,28 @@ impl App {
     pub fn unregister_repo_path(&mut self, repo_path: &str) -> Result<bool, String> {
         let changed = self.registry.remove_and_save(repo_path)?;
         if changed {
-            self.repos.retain(|r| r.path != repo_path);
-            self.selected_repo_row = self
-                .selected_repo_row
-                .min(self.repo_rows().len().saturating_sub(1));
+            // A repo holding the store this run is reading keeps its row and
+            // merely stops being registered. Dropping it would take the store
+            // you are looking at off the sidebar and leave the pane
+            // contradicting the header, which is the state the always-show
+            // rule exists to prevent -- and `D` says it unregisters an entry,
+            // not that it stops you looking at the tasks on screen.
+            let reading_it = self
+                .repos
+                .iter()
+                .find(|r| r.path == repo_path)
+                .is_some_and(|r| self.is_current_store(r));
+
+            if reading_it {
+                if let Some(row) = self.repos.iter_mut().find(|r| r.path == repo_path) {
+                    row.registered = false;
+                }
+            } else {
+                self.repos.retain(|r| r.path != repo_path);
+                self.selected_repo_row = self
+                    .selected_repo_row
+                    .min(self.repo_rows().len().saturating_sub(1));
+            }
         }
         Ok(changed)
     }
@@ -1514,6 +1579,81 @@ mod tests {
         for col in [0, 1, 44] {
             assert_eq!(app.pane_at(col), Focus::Tree, "column {col}");
         }
+    }
+
+    /// The sidebar always carries the store being read, so the cursor opens on
+    /// it rather than on whatever sorted first.
+    #[test]
+    fn the_sidebar_cursor_starts_on_the_store_being_read() {
+        let mut app = app_with_repos();
+        app.store_dir = "/x/two-feat/.dex".into();
+
+        app.select_current_store_row();
+
+        // [Repo(one), one/main, one/feat, Repo(two), two/main, two/feat]
+        assert_eq!(app.selected_repo_row, 5);
+    }
+
+    /// `store_for_path` is the single place that knows a row's store is not
+    /// always `<path>/.dex` -- the global row's path *is* its store, and
+    /// pointing dex at a directory that does not exist is silent.
+    #[test]
+    fn a_paths_store_is_resolved_through_the_row_that_owns_it() {
+        let mut app = app_with_repos();
+        assert_eq!(app.store_for_path("/x/one-feat"), "/x/one-feat/.dex");
+
+        app.repos.push(crate::repos::Repo {
+            name: "global".into(),
+            path: "/cfg/dex/local".into(),
+            worktrees: vec![],
+            open: true,
+            registered: false,
+            is_global: true,
+        });
+        assert_eq!(app.store_for_path("/cfg/dex/local"), "/cfg/dex/local");
+
+        // A path the sidebar has never heard of still gets the ordinary
+        // derivation, which is what `selftest` and the older tests rely on.
+        assert_eq!(app.store_for_path("/elsewhere"), "/elsewhere/.dex");
+    }
+
+    /// `D` unregisters an entry; it does not stop you looking at the tasks
+    /// already on screen. Dropping the row would take the store being read off
+    /// the sidebar and leave the pane contradicting the header -- the exact
+    /// state the always-show-the-current-store rule exists to prevent.
+    #[test]
+    fn unregistering_the_repo_being_read_keeps_its_row_and_only_clears_the_mark() {
+        with_isolated_registry("app-unregister-current", || {
+            let mut app = app_with_repos();
+            app.store_dir = "/x/one-feat/.dex".into();
+            app.registry = crate::registry::Registry::default();
+            app.register_repo_path("/x/one").unwrap();
+            app.register_repo_path("/x/two").unwrap();
+
+            assert!(app.unregister_repo_path("/x/one").unwrap());
+
+            assert_eq!(app.repos.len(), 2, "the row you are reading was dropped");
+            assert!(!app.repos[0].registered, "the row is still marked registered");
+            assert_eq!(app.registry.repos, vec!["/x/two".to_string()], "the entry survived");
+        });
+    }
+
+    /// The mirror case: a repo you are *not* reading loses its row entirely,
+    /// which is what `D` has always done and must keep doing.
+    #[test]
+    fn unregistering_a_repo_you_are_not_reading_drops_its_row() {
+        with_isolated_registry("app-unregister-other", || {
+            let mut app = app_with_repos();
+            app.store_dir = "/x/one/.dex".into();
+            app.registry = crate::registry::Registry::default();
+            app.register_repo_path("/x/one").unwrap();
+            app.register_repo_path("/x/two").unwrap();
+
+            assert!(app.unregister_repo_path("/x/two").unwrap());
+
+            assert_eq!(app.repos.len(), 1);
+            assert_eq!(app.repos[0].path, "/x/one");
+        });
     }
 
     /// A click in the sidebar selects the row under it, exactly as the tree
@@ -2175,6 +2315,8 @@ mod tests {
                 wt(&format!("/x/{name}-feat"), "feat", false),
             ],
             open: true,
+            registered: true,
+            is_global: false,
         }
     }
 

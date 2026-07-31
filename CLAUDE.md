@@ -325,6 +325,35 @@ collide. Cheaper than a second dialog, and the one thing to keep in mind if
 `Mode::Confirm` ever grows a third caller — the prefix trick stops being safe
 the moment something else's id could contain a colon too.
 
+**The sidebar always carries the store being read**, registered or not. Without
+that, launching anywhere unregistered showed an empty pane beside a full task
+tree — a box saying "no repos" while you are plainly looking at one — and `a`
+appeared to *create* the repo rather than to keep it. `main::current_repo`
+builds that row at startup, `Repo::registered` is what marks it (a dim `·`, not
+a colour: the four colours all mean task states and a fifth meaning here would
+break that language), and the list is sorted by path either way so registering
+moves the marker and never the row.
+
+Three consequences, each of them a thing that would otherwise be silently
+wrong:
+
+- **`D` on the repo you are reading clears the mark instead of dropping the
+  row.** Dropping it would take the store you are looking at off the sidebar
+  and leave the pane contradicting the header. `D` unregisters an entry; it
+  does not stop you looking at the tasks on screen.
+- **`a` marks the row it already has**, rather than pushing a second one for
+  the same repo.
+- **The global store gets a row too.** Outside a git repo dex silently falls
+  back to `~/.config/dex/local` — the single most confusing thing about it,
+  which is why the sidebar naming it is worth the special case. It is not a
+  repo: no worktrees, and its `path` **is** its store rather than a checkout
+  with a `.dex` inside. `Repo::store` and `App::store_for_path` are the only
+  two places that know, because `<path>/.dex` derived from it points at a
+  directory that does not exist — which dex reports as an *empty project*,
+  never as an error. `main::current_repo` decides which shape it is from the
+  `.dex` suffix on what `dex dir` already said, rather than taking a second
+  opinion from a fresh `is_dir` check that could disagree with dex itself.
+
 One residual worth knowing about: `repos::Row`/`repos::rows` already support a
 closed repo hiding its worktrees (`Repo::open`), the same way the task tree
 collapses a node, but nothing currently sets `open` to anything but `true` —

@@ -12,6 +12,31 @@ pub struct Repo {
     pub path: String,
     pub worktrees: Vec<Worktree>,
     pub open: bool,
+    /// Whether this repo is in `repos.toml`.
+    ///
+    /// The sidebar always carries the store the app is actually reading, even
+    /// when nobody has registered it -- an empty pane beside a full task tree
+    /// reads as "no repos" while you are plainly looking at one. So `a` means
+    /// "keep this one" rather than "make this appear", and this is the flag
+    /// that tells the two apart.
+    pub registered: bool,
+    /// The global store, which is what dex falls back to outside a git repo.
+    ///
+    /// It is not a repo at all: no worktrees, and `path` is the store itself
+    /// rather than a checkout with a `.dex` inside it -- hence [`Repo::store`]
+    /// rather than [`store_dir`] at every call site that resolves a row.
+    pub is_global: bool,
+}
+
+impl Repo {
+    /// The dex store behind one of this repo's rows: `worktree` for a worktree
+    /// row, `None` for the repo's own row.
+    pub fn store(&self, worktree: Option<&Worktree>) -> String {
+        if self.is_global {
+            return self.path.clone();
+        }
+        store_dir(worktree.map_or(self.path.as_str(), |w| w.path.as_str()))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +94,8 @@ mod tests {
                 wt(&format!("/x/{name}-feat"), "feat", false),
             ],
             open,
+            registered: true,
+            is_global: false,
         }
     }
 
@@ -106,5 +133,30 @@ mod tests {
     fn a_store_is_the_dex_directory_under_the_worktree() {
         assert_eq!(store_dir("/x/one"), "/x/one/.dex");
         assert_eq!(store_dir("/x/one/"), "/x/one/.dex");
+    }
+
+    #[test]
+    fn a_repos_rows_resolve_to_the_dex_directory_under_each_worktree() {
+        let r = repo("one", true);
+        assert_eq!(r.store(None), "/x/one/.dex");
+        assert_eq!(r.store(Some(&r.worktrees[1])), "/x/one-feat/.dex");
+    }
+
+    /// The global store is the exception the whole `Repo::store` indirection
+    /// exists for: dex's out-of-repo fallback is the store directory itself,
+    /// so deriving `<path>/.dex` from it points at nothing -- and dex reports
+    /// a store that does not exist as an *empty project*, never as an error.
+    #[test]
+    fn the_global_store_is_its_own_path_not_a_dex_directory_beneath_it() {
+        let g = Repo {
+            name: "global".into(),
+            path: "/home/u/.config/dex/local".into(),
+            worktrees: vec![],
+            open: true,
+            registered: false,
+            is_global: true,
+        };
+        assert_eq!(g.store(None), "/home/u/.config/dex/local");
+        assert_eq!(rows(&[g]), vec![Row::Repo { index: 0 }], "no worktree rows");
     }
 }

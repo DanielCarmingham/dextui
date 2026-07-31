@@ -342,10 +342,26 @@ fn main() -> std::io::Result<()> {
                 path: repo_path.clone(),
                 worktrees,
                 open: true,
+                registered: true,
+                is_global: false,
             }),
             Err(e) => repo_problems.push(format!("{repo_path}: {}", flatten(&e))),
         }
     }
+
+    // The store this run is actually reading always gets a row, registered or
+    // not. Without it, launching anywhere unregistered showed an empty sidebar
+    // beside a full task tree -- a pane saying "no repos" while you are plainly
+    // looking at one -- and `a` appeared to *create* the repo rather than to
+    // keep it.
+    if let Some(here) = current_repo(&store_dir, &mut repo_problems) {
+        if !repos.iter().any(|r| r.path == here.path) {
+            repos.push(here);
+        }
+    }
+    // Sorted the same way `Registry::add` keeps the file, so registering the
+    // current repo changes its marker and never its position.
+    repos.sort_by(|a, b| a.path.cmp(&b.path));
 
     let mut app = App::new(tasks, store_dir.clone(), cfg);
     app.registry = registry;
@@ -394,6 +410,11 @@ fn main() -> std::io::Result<()> {
         .flat_map(|r| r.worktrees.iter())
         .find(|w| repos::store_dir(&w.path) == store_dir)
         .map(|w| w.path.clone());
+
+    // And the cursor starts on it, so the sidebar opens pointing at what the
+    // other two panes are already showing rather than at whatever sorted
+    // first.
+    app.select_current_store_row();
 
     // Every OTHER registered worktree -- the selected one keeps the watcher
     // and stat-gated 10s safety net set up above, exactly as today.
@@ -785,7 +806,11 @@ fn switch_store(
     watch_tx: &Sender<()>,
     worktree_path: &str,
 ) {
-    let dir = repos::store_dir(worktree_path);
+    // Through the sidebar, not `repos::store_dir`: the global row's path is
+    // already its store, and deriving `<path>/.dex` from it would point dex at
+    // a directory that does not exist -- which it reports as an empty project
+    // rather than as an error.
+    let dir = app.store_for_path(worktree_path);
     let new_dex = match Dex::for_store(&dir) {
         Ok(d) => d,
         Err(e) => {
@@ -850,16 +875,27 @@ fn register_repo(app: &mut App, worktrees: Vec<worktree::Worktree>) -> String {
     match app.register_repo_path(&path) {
         Ok(true) => {
             log::line("registry", &format!("saved: added {path}"));
-            app.repos.push(repos::Repo {
-                name: repo_name(&path),
-                path: path.clone(),
-                worktrees,
-                open: true,
-            });
-            // `Registry::add` keeps the file sorted by path, so the next
-            // launch will list them in that order. Sorting here too means the
-            // row does not move the first time the app is restarted.
-            app.repos.sort_by(|a, b| a.path.cmp(&b.path));
+            // Usually already on screen, unregistered: the store this run
+            // reads always has a row. Registering it marks that row rather
+            // than adding a second one for the same repo -- and because the
+            // list is sorted by path either way, the row does not move.
+            match app.repos.iter_mut().find(|r| r.path == path) {
+                Some(row) => row.registered = true,
+                None => {
+                    app.repos.push(repos::Repo {
+                        name: repo_name(&path),
+                        path: path.clone(),
+                        worktrees,
+                        open: true,
+                        registered: true,
+                        is_global: false,
+                    });
+                    // `Registry::add` keeps the file sorted by path, so the
+                    // next launch lists them in that order. Sorting here too
+                    // means the row does not move on the first restart.
+                    app.repos.sort_by(|a, b| a.path.cmp(&b.path));
+                }
+            }
             format!("registered {path}")
         }
         Ok(false) => format!("{path} is already registered"),
@@ -874,6 +910,52 @@ fn register_repo(app: &mut App, worktrees: Vec<worktree::Worktree>) -> String {
 /// The last path component, which is what the sidebar shows for a repo.
 /// Shared by startup and `a` so a repo registered mid-run is labelled exactly
 /// the way it will be after a restart.
+/// The sidebar row for wherever the app was launched, registered or not.
+///
+/// Two shapes, because dex has two. Inside a git repo the store is
+/// `<worktree>/.dex` and the row is an ordinary repo with its real worktrees.
+/// Outside one, dex silently falls back to a global store at
+/// `~/.config/dex/local` -- the single most confusing thing about it, per
+/// CLAUDE.md -- so that gets a row named `global`, which is the only place on
+/// screen that has ever said so.
+///
+/// `store_dir` is what decides between them rather than a fresh `is_dir` check:
+/// it came from `dex dir`, so it is dex's own answer about which store this run
+/// reads, and a second opinion here could disagree with it.
+fn current_repo(store_dir: &str, problems: &mut Vec<String>) -> Option<repos::Repo> {
+    let Some(root) = store_dir.strip_suffix("/.dex") else {
+        return Some(repos::Repo {
+            name: "global".into(),
+            path: store_dir.to_string(),
+            worktrees: Vec::new(),
+            open: true,
+            registered: false,
+            is_global: true,
+        });
+    };
+
+    match worktree::list(root) {
+        Ok(worktrees) => {
+            // `git worktree list` reports the main checkout first, whatever
+            // was asked about, so the repo's identity is that path -- not the
+            // worktree this happens to be running in.
+            let path = worktrees.first().map_or(root, |w| w.path.as_str()).to_string();
+            Some(repos::Repo {
+                name: repo_name(&path),
+                path,
+                worktrees,
+                open: true,
+                registered: false,
+                is_global: false,
+            })
+        }
+        Err(e) => {
+            problems.push(format!("{root}: {}", flatten(&e)));
+            None
+        }
+    }
+}
+
 fn repo_name(repo_path: &str) -> String {
     std::path::Path::new(repo_path)
         .file_name()
@@ -1455,6 +1537,40 @@ mod tests {
         }
     }
 
+    /// Outside a git repo dex silently falls back to a global store, and the
+    /// sidebar is the only place on screen that has ever said so. It is a row,
+    /// not a repo: no worktrees, and its path *is* its store.
+    #[test]
+    fn a_store_outside_any_repo_becomes_the_global_row() {
+        let mut problems = Vec::new();
+        let r = current_repo("/home/u/.config/dex/local", &mut problems).unwrap();
+
+        assert!(r.is_global);
+        assert!(!r.registered, "nothing registers the global store");
+        assert_eq!(r.name, "global");
+        assert!(r.worktrees.is_empty());
+        assert_eq!(r.store(None), "/home/u/.config/dex/local");
+        assert!(problems.is_empty());
+    }
+
+    /// A repo-shaped store is recognised by its `.dex` suffix -- dex's own
+    /// answer, from `dex dir` -- rather than by a fresh `is_dir` check here
+    /// that could disagree with it.
+    #[test]
+    fn a_dex_directory_is_treated_as_a_repo_not_the_global_store() {
+        let mut problems = Vec::new();
+        // Not a real repo, so `git worktree list` fails and this reports
+        // rather than inventing a row -- but it must not be mistaken for the
+        // global store on the way there.
+        let r = current_repo("/nonexistent-repo-for-tests/.dex", &mut problems);
+        assert!(r.is_none());
+        assert_eq!(problems.len(), 1, "a git failure has to be reported: {problems:?}");
+        assert!(
+            problems[0].starts_with("/nonexistent-repo-for-tests"),
+            "the problem names the repo, not its store: {problems:?}"
+        );
+    }
+
     /// `?` is pressed by someone looking for a key, and resuming halfway down
     /// the dialog would hide the first ten of them.
     #[test]
@@ -1730,6 +1846,8 @@ mod tests {
                 is_detached: false,
             }],
             open: true,
+            registered: true,
+            is_global: false,
         }];
         app.focus = Focus::Repos;
         app
