@@ -361,7 +361,7 @@ Two ways to check, both used here:
 # Does the font contain it?
 python3 -c "
 from fontTools.ttLib import TTFont
-f = TTFont('/Users/daniel/Library/Fonts/NerdFonts/FiraCodeNerdFont-Regular.ttf')
+f = TTFont('~/Library/Fonts/NerdFonts/FiraCodeNerdFont-Regular.ttf')
 cm = set().union(*[t.cmap.keys() for t in f['cmap'].tables])
 print(0x25BC in cm)"
 

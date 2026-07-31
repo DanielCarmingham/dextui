@@ -17,9 +17,35 @@ import re
 import sys
 from PIL import Image, ImageDraw, ImageFont
 
-FONT_DIR = "/Users/daniel/Library/Fonts/NerdFonts"
-REGULAR = f"{FONT_DIR}/FiraCodeNerdFont-Regular.ttf"
-BOLD = f"{FONT_DIR}/FiraCodeNerdFont-Bold.ttf"
+def find_font(*names):
+    """First of `names` that exists in any of the usual font directories.
+
+    Searched rather than hardcoded so this works on someone else's machine --
+    Nerd Fonts land in different places depending on whether they came from
+    Homebrew, the installer, or a manual unzip.
+    """
+    import os
+
+    home = os.path.expanduser("~")
+    dirs = [
+        f"{home}/Library/Fonts/NerdFonts",
+        f"{home}/Library/Fonts",
+        "/Library/Fonts",
+        f"{home}/.local/share/fonts",
+        "/usr/share/fonts/truetype",
+    ]
+    for d in dirs:
+        for n in names:
+            p = os.path.join(d, n)
+            if os.path.exists(p):
+                return p
+    raise SystemExit(
+        f"screenshot.py: none of {names} found in:\n  " + "\n  ".join(dirs)
+    )
+
+
+REGULAR = find_font("FiraCodeNerdFont-Regular.ttf", "FiraCodeNerdFontMono-Regular.ttf")
+BOLD = find_font("FiraCodeNerdFont-Bold.ttf", "FiraCodeNerdFontMono-Bold.ttf")
 
 # What macOS substitutes for codepoints the main font lacks.
 #
