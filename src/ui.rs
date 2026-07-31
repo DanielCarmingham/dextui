@@ -1276,21 +1276,20 @@ tab        switch pane       s   start task
 ↑ ↓ j k    move / scroll     c   complete (prompts for result)
 → ← h l    expand / scroll   r   rename
 g / G      first / last      e   edit description in $EDITOR
-w          toggle wrap       n   new top-level task
+w / z      wrap / zoom       n   new top-level task
 o / O      sort / reverse    a   new subtask of selection
 /          search            d   delete (with confirmation)
 f          cycle filter      ^R  refresh now
 ,          edit config       q   quit
-z Z        collapse/expand all
+- / +      collapse / expand all
 
 Movement follows the focused pane, shown by its brighter border. Turn wrap
 off (w) to scroll a wide table sideways -- wrapping removes the overflow
 there would otherwise be to scroll to.
 
-On a narrow terminal it zooms: one pane at a time, with [1] [2] tabs in the
-header. Press 1 or 2 to jump, enter (or right, on a task with no subtasks) to
-open the detail, left or tab to go back. The width it switches at is
-single_pane_below in the config.
+Zoom (z) shows one pane at a time, with [1] [2] tabs in the header -- press 1
+or 2 to jump, or enter and left to cross over. Narrow terminals zoom on their
+own below single_pane_below columns, which makes this usable on a phone.
 
 Mouse: drag the divider to resize, wheel scrolls the pane under the pointer,
 click selects. In the header, click a filter to switch to it, or the sort
@@ -1619,6 +1618,11 @@ mod tests {
                 "the strip does not advertise {key} for {action}: {SHORTCUTS}"
             );
         }
+
+        // Zoom took `z`, so collapse/expand moved and both surfaces must agree.
+        assert!(HELP.contains("- / +      collapse / expand all"), "help: -/+");
+        assert!(HELP.contains("w / z"), "help: z zooms");
+        assert!(!HELP.contains("z Z"), "the old collapse keys are gone");
 
         // The pair this change exists to remove. `E` must not survive anywhere,
         // and `r` must no longer mean refresh.

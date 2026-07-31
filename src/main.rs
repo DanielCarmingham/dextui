@@ -695,8 +695,13 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
             Focus::Tree => app.select_last(),
             Focus::Detail => app.detail_to_bottom(),
         },
-        KeyCode::Char('z') => app.collapse_all(),
-        KeyCode::Char('Z') => app.expand_all(),
+        // `z` is tmux's zoom-pane, which is where the reflex comes from. That
+        // cost collapse/expand their old keys -- and `-`/`+` is the better
+        // mnemonic anyway: minus closes, plus opens. `=` is accepted for `+`
+        // because it is the same physical key without the shift.
+        KeyCode::Char('z') => app.toggle_zoom(),
+        KeyCode::Char('-') => app.collapse_all(),
+        KeyCode::Char('+') | KeyCode::Char('=') => app.expand_all(),
 
         KeyCode::Char('/') => app.mode = Mode::Search,
         KeyCode::Char('f') => {

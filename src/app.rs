@@ -185,6 +185,11 @@ pub struct App {
     /// Terminal width below which only the focused pane is drawn. From the
     /// config; 0 disables the behaviour entirely.
     pub single_pane_below: u16,
+    /// A manual answer to "zoomed?", set by `z`, which outranks the width rule.
+    /// `None` means decide by width. Pressing the key is an explicit decision,
+    /// so it holds until it is pressed again rather than being undone by a
+    /// resize -- a layout that changed on its own would read as a fault.
+    pub zoom: Option<bool>,
     /// Clickable regions of the header row, as `(first_x, last_x, what)`.
     /// Rewritten every frame; empty while the search box owns the row, so a
     /// click can never act on a menu that is not on screen.
@@ -226,6 +231,7 @@ impl App {
             animate: cfg.animate,
             spin_frame: 0,
             single_pane_below: cfg.single_pane_below,
+            zoom: None,
             header_zones: Vec::new(),
         };
 
@@ -697,7 +703,20 @@ impl App {
     /// Measured against the width the renderer last published, so it follows a
     /// terminal resized under the running app.
     pub fn single_pane(&self) -> bool {
-        self.single_pane_below > 0 && self.terminal_width < self.single_pane_below
+        match self.zoom {
+            Some(z) => z,
+            None => self.single_pane_below > 0 && self.terminal_width < self.single_pane_below,
+        }
+    }
+
+    /// Flips what you are looking at, and keeps it that way.
+    ///
+    /// Always toggles the *effective* state rather than a stored flag, so the
+    /// first press does the visible thing whether the width had zoomed you or
+    /// not -- otherwise pressing it on an already-narrow terminal would appear
+    /// to do nothing.
+    pub fn toggle_zoom(&mut self) {
+        self.zoom = Some(!self.single_pane());
     }
 
     /// Moves to the detail pane. What `Enter` does, and what `Right` falls back
@@ -862,6 +881,38 @@ mod tests {
         app.terminal_width = width;
         app.rebuild();
         app
+    }
+
+    /// The first press must do the visible thing whichever way the width had
+    /// already decided -- toggling a stored flag instead would appear to do
+    /// nothing on a terminal that was zoomed automatically.
+    #[test]
+    fn the_zoom_key_always_flips_what_you_are_looking_at() {
+        let mut wide = narrow(100);
+        assert!(!wide.single_pane());
+        wide.toggle_zoom();
+        assert!(wide.single_pane(), "z on a wide terminal must zoom");
+        wide.toggle_zoom();
+        assert!(!wide.single_pane(), "z again must split");
+
+        let mut small = narrow(60);
+        assert!(small.single_pane(), "the width already zoomed this one");
+        small.toggle_zoom();
+        assert!(!small.single_pane(), "z must be able to force the split back");
+    }
+
+    /// Pressing the key is an explicit decision, so it outranks the width until
+    /// pressed again. A layout that reverted on a resize would read as a fault.
+    #[test]
+    fn a_resize_does_not_undo_the_zoom_key() {
+        let mut app = narrow(100);
+        app.toggle_zoom();
+        assert!(app.single_pane());
+
+        for w in [40u16, 80, 120, 200] {
+            app.terminal_width = w;
+            assert!(app.single_pane(), "{w} columns undid the manual zoom");
+        }
     }
 
     #[test]

@@ -90,6 +90,40 @@ and only the marker is coloured, never the task name.
 Narrow the terminal and the header sheds what carries least first; which project
 you are in survives all of it.
 
+## Zoom: one pane at a time
+
+On a narrow terminal the split gives way to a single pane, with `[1] [2]` tabs in
+the header showing where you are. **This is what makes dextui usable on a phone**
+— over SSH from Termius or Blink, in Termux, or in any terminal on a small
+screen, where two panes would leave no room for either.
+
+<table>
+<tr>
+<td><img alt="the task tree filling a 60-column terminal" src="docs/img/dextui-narrow.png"></td>
+<td><img alt="the detail pane filling the same terminal after pressing enter" src="docs/img/dextui-narrow-detail.png"></td>
+</tr>
+<tr>
+<td align="center"><sub>60 columns — <code>2</code> or <code>enter</code> →</sub></td>
+<td align="center"><sub>← <code>1</code>, <code>tab</code> or <code>←</code> — the same terminal</sub></td>
+</tr>
+</table>
+
+Press `z` to zoom at any width — handy on a wide screen when you want a long
+description full-width. Below `single_pane_below` columns (80 by default) it
+zooms on its own; `z` still overrides that either way, and your choice sticks
+until you press it again. Set the value to `0` to always split.
+
+| key | does |
+| --- | --- |
+| `z` | zoom / unzoom |
+| `1` `2` | jump to the tree / the detail |
+| `enter`, `→` | open the detail (`→` from a task with no subtasks) |
+| `←` `tab` | back to the tree |
+
+The tabs are clickable, and the header sheds the same way the wide one does —
+but the tabs are reserved before any of that, so the way back is never the thing
+that disappears.
+
 ## Keys
 
 Press `?` in the app for this list at any time.
@@ -102,7 +136,8 @@ Press `?` in the app for this list at any time.
 | `tab` | switch pane (the focused one has the brighter border) |
 | `enter` | open the detail pane |
 | `1` `2` | jump straight to the tree / the detail |
-| `z` `Z` | collapse / expand all |
+| `z` | zoom — one pane at a time |
+| `-` `+` | collapse / expand all |
 | `/` | search names and descriptions |
 | `f` | cycle filter — pending / active / all |
 | `o` `O` | cycle sort / reverse it |
@@ -124,27 +159,7 @@ Acting on the selected task:
 | `a` | new subtask of the selection |
 | `d` | delete, with confirmation |
 
-**Narrow terminals zoom.** Below `single_pane_below` columns (80 by default) the
-split gives way to one pane at a time, with `[1] [2]` tabs in the header showing
-where you are. Press `1` or `2` to jump straight to one, `enter` — or `→` on a
-task with no subtasks — to open the detail, and `←` or `tab` to go back. The tabs
-are clickable too. Two panes much narrower than this leave no room for either;
-set it to `0` to always split.
 
-<table>
-<tr>
-<td><img alt="the task tree filling a 60-column terminal" src="docs/img/dextui-narrow.png"></td>
-<td><img alt="the detail pane filling the same terminal after pressing enter" src="docs/img/dextui-narrow-detail.png"></td>
-</tr>
-<tr>
-<td align="center"><sub>60 columns — <code>2</code> or <code>enter</code> →</sub></td>
-<td align="center"><sub>← <code>1</code>, <code>tab</code> or <code>←</code> — the same terminal</sub></td>
-</tr>
-</table>
-
-The header sheds the same way the wide one does, down to bare glyph counts — but
-the tabs are reserved before any of that, so the way back is never the thing that
-disappears.
 
 **The header is clickable.** Click a word in `[ all  pending  active ]` to switch
 filter, or the sort label to cycle it — right-click the sort label to reverse it,

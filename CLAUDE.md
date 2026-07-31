@@ -409,6 +409,22 @@ and `Tab` go back; `1` and `2` jump straight to a pane; `Right`/`l` also crosses
 over, but **only from a leaf** — where it did nothing before — so its tree
 meaning is untouched.
 
+**`z` toggles it at any width**, which is what earns the feature its name: `z`
+is tmux's zoom-pane, and that reflex is where the request came from. It cost
+collapse/expand-all their keys, which moved to `-` and `+` — the better mnemonic
+anyway, since minus closes and plus opens, where `z`/`Z` said nothing. `=` is
+accepted for `+`, being the same physical key unshifted.
+
+`App::zoom` is `Option<bool>`: `None` decides by width, `Some` is a manual
+answer that **outranks it**. `toggle_zoom` flips the *effective* state rather
+than a stored flag, so the first press always does the visible thing — toggling
+a flag would appear to do nothing on a terminal the width had already zoomed.
+The override deliberately survives a resize: pressing a key is a decision, and a
+layout that reverted on its own would read as a fault.
+
+Small screens are the point. The pair of README screenshots at 60 columns is
+there because this is what makes the app usable over SSH from a phone.
+
 The **`[1] [2]` tabs** are the LazyGit/gitui idea, and they earn their place
 only here: with both panes on screen there is nothing to navigate *to*, and the
 numbers would be decoration on a row that already sheds elements to fit. They
