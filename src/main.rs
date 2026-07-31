@@ -8,6 +8,7 @@ mod icons;
 mod markdown;
 mod pulse;
 mod registry;
+mod repos;
 mod theme;
 mod tree;
 mod ui;
