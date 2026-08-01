@@ -4,7 +4,7 @@
 //! neutral descriptions of what things *are*, and this module decides how they
 //! look.
 
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -42,12 +42,6 @@ const REPO_SHORTCUTS: &str =
 /// Width of the inline progress meter, in cells.
 const METER_WIDTH: usize = 7;
 
-/// Fixed width of the repo/worktree sidebar in the three-pane layout. Repo and
-/// branch names, not prose, so it does not need a share of the percentage
-/// split the way the tree/detail boundary does. `repos_pane_above` (110 by
-/// default) already guarantees the tree/detail remainder stays usable once
-/// this much is taken off.
-const REPOS_PANE_WIDTH: u16 = 26;
 
 /// What separates the header's parts, and the detail pane's summary fields.
 /// Named because the header's width arithmetic has to account for it, and a
@@ -113,7 +107,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, ic: &Icons) {
             // does. The tree/detail boundary keeps the same arithmetic as the
             // two-pane case, just over the narrower remainder.
             let [repos, left, right] = Layout::horizontal([
-                Constraint::Length(REPOS_PANE_WIDTH),
+                Constraint::Length(app.repos_width),
                 Constraint::Percentage(app.split_percent),
                 Constraint::Fill(1),
             ])
@@ -927,6 +921,25 @@ fn draw_header(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(right)), right_area);
 }
 
+/// A scrollbar in the pane's right border, inset past both corners.
+///
+/// Handed the pane's whole `Rect`, ratatui puts the bar on its rightmost
+/// column -- which is the border, corners included, so `┐` and `┘` were
+/// overwritten with track and thumb glyphs and the `[n]` marker lost the
+/// corner beside it. Insetting by a row keeps the bar *in* the border, which
+/// is deliberate (it costs no content width), while leaving the frame whole.
+fn draw_scrollbar(frame: &mut Frame, area: Rect, thumb: Color, state: &mut ScrollbarState) {
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_style(Style::default().fg(DIM))
+            .thumb_style(Style::default().fg(thumb)),
+        area.inner(Margin { vertical: 1, horizontal: 0 }),
+        state,
+    );
+}
+
 /// The repo pane: registered repositories with their worktrees beneath.
 ///
 /// Colour carries only what the task tree's already does -- a worktree with a
@@ -1016,15 +1029,7 @@ fn draw_repos(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
     let visible = area.height.saturating_sub(2) as usize;
     if rows.len() > visible {
         let mut sb = ScrollbarState::new(rows.len()).position(app.selected_repo_row);
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .track_style(Style::default().fg(DIM))
-                .thumb_style(Style::default().fg(DIM)),
-            area,
-            &mut sb,
-        );
+        draw_scrollbar(frame, area, DIM, &mut sb);
     }
 }
 
@@ -1158,15 +1163,7 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
     let visible = area.height.saturating_sub(2) as usize;
     if rows.len() > visible {
         let mut sb = ScrollbarState::new(rows.len()).position(app.selected_row().unwrap_or(0));
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .track_style(Style::default().fg(DIM))
-                .thumb_style(Style::default().fg(DIM)),
-            area,
-            &mut sb,
-        );
+        draw_scrollbar(frame, area, DIM, &mut sb);
     }
 }
 
@@ -1299,15 +1296,7 @@ fn draw_detail(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
     if content_h > inner_h {
         let mut sb = ScrollbarState::new(content_h.saturating_sub(inner_h) as usize)
             .position(scroll.0 as usize);
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .track_style(Style::default().fg(DIM))
-                .thumb_style(Style::default().fg(PLAIN)),
-            area,
-            &mut sb,
-        );
+        draw_scrollbar(frame, area, PLAIN, &mut sb);
     }
 }
 

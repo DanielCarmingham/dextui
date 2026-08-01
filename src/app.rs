@@ -100,6 +100,15 @@ pub enum Focus {
     Repos,
 }
 
+/// A draggable pane boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Divider {
+    /// Between the repo sidebar and the task tree.
+    Repos,
+    /// Between the task tree and the detail pane.
+    Split,
+}
+
 /// How many panes are drawn. A single ordered ladder, so first-fit can only
 /// ever shed -- see `the_pane_ladder_is_monotone`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,7 +187,11 @@ pub struct App {
     pub pending_store: Option<String>,
     /// Width of the tree pane as a percentage. Dragged with the mouse.
     pub split_percent: u16,
-    pub dragging_split: bool,
+    /// Which divider is being dragged, if any.
+    pub dragging: Option<Divider>,
+    /// The sidebar's width in cells. A `Length` in the layout rather than a
+    /// share, so it does not grow with the terminal -- see `set_repos_width`.
+    pub repos_width: u16,
     /// Geometry the renderer publishes so mouse maths can be exact rather than
     /// re-derived from assumptions about the layout.
     pub divider_x: u16,
@@ -309,7 +322,8 @@ impl App {
             pending_config_edit: false,
             pending_store: None,
             split_percent: 45,
-            dragging_split: false,
+            dragging: None,
+            repos_width: 26,
             divider_x: 0,
             repos_right: 0,
             body_top: 0,
@@ -683,14 +697,49 @@ impl App {
         if total_width == 0 {
             return;
         }
-        let pct = (column as f32 / total_width as f32 * 100.0).round() as i32;
+        // The percentage is of the whole body, but the tree does not start at
+        // the body's left edge when the sidebar is there -- the layout is
+        // `[Length(repos_width), Percentage(p), Fill(1)]`, so the divider ends
+        // up at `repos_width + p% of W`. Turning the raw column into a
+        // percentage ignored that offset and dropped the divider a full
+        // sidebar-width to the right of the pointer: a 26-cell jump the
+        // moment you grabbed it.
+        let x = column.saturating_sub(self.repos_right);
+        let pct = (x as f32 / total_width as f32 * 100.0).round() as i32;
         self.split_percent = pct.clamp(20, 80) as u16;
     }
 
-    /// True when `column` is on (or beside) the divider, so it is grabbable
-    /// without demanding single-cell precision.
-    pub fn on_divider(&self, column: u16) -> bool {
-        self.divider_x > 0 && column.abs_diff(self.divider_x) <= 1
+    /// Sets the sidebar's width from a dragged column.
+    ///
+    /// A width rather than a percentage, unlike the tree/detail split: the
+    /// sidebar holds names, not prose, so it neither wants nor needs to grow
+    /// with the terminal -- which is the same reason it is a `Length` in the
+    /// layout.
+    pub fn set_repos_width(&mut self, column: u16, total_width: u16) {
+        // Never wider than half the terminal, so the pane it exists to
+        // navigate *to* cannot be squeezed out by the pane doing the
+        // navigating.
+        let cap = (total_width / 2).max(Self::REPOS_WIDTH_MIN);
+        self.repos_width = column.clamp(Self::REPOS_WIDTH_MIN, cap);
+    }
+
+    /// Narrow enough to be useful, wide enough to still show a branch name.
+    pub const REPOS_WIDTH_MIN: u16 = 12;
+
+    /// Which divider `column` is on or beside, if any -- grabbable without
+    /// demanding single-cell precision.
+    pub fn divider_at(&self, column: u16) -> Option<Divider> {
+        // The sidebar's edge is tested first: with the sidebar collapsed to
+        // its minimum on a narrow terminal the two dividers can be within a
+        // cell of each other, and the one you cannot otherwise reach should
+        // win.
+        if self.repos_right > 0 && column.abs_diff(self.repos_right.saturating_sub(1)) <= 1 {
+            return Some(Divider::Repos);
+        }
+        if self.divider_x > 0 && column.abs_diff(self.divider_x) <= 1 {
+            return Some(Divider::Split);
+        }
+        None
     }
 
     pub fn in_body(&self, row: u16) -> bool {
@@ -1855,7 +1904,7 @@ mod tests {
         let mut app = narrow(60);
         app.divider_x = 0;
         for col in [0, 1, 30, 59] {
-            assert!(!app.on_divider(col), "column {col} looked like a divider");
+            assert!(app.divider_at(col).is_none(), "column {col} looked like a divider");
         }
     }
 
@@ -2772,16 +2821,88 @@ mod tests {
         app.body_bottom = 21;
     }
 
+    /// The reported bug: grabbing the divider jumped it a full sidebar-width
+    /// to the right before the drag had moved anywhere.
+    ///
+    /// The layout is `[Length(repos_width), Percentage(p), Fill(1)]`, so the
+    /// divider lands at `repos_width + p% of W` -- but the percentage was
+    /// computed from the raw column, which silently assumed the tree started
+    /// at the body's left edge. It does, in two panes; it does not once the
+    /// sidebar is there.
+    #[test]
+    fn dragging_the_split_puts_the_divider_where_the_pointer_is() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
+        geo(&mut app);
+        app.repos_right = 26;
+
+        app.set_split(60, 100);
+
+        // The renderer will place it at repos_right + split% of the width.
+        let landed = app.repos_right + app.split_percent;
+        assert_eq!(landed, 60, "the divider moved {} cells from the pointer", landed as i32 - 60);
+    }
+
+    /// And with no sidebar the arithmetic is unchanged, which is why this was
+    /// invisible until a third pane existed.
+    #[test]
+    fn dragging_the_split_is_unchanged_without_a_sidebar() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
+        geo(&mut app);
+        app.repos_right = 0;
+
+        app.set_split(60, 100);
+
+        assert_eq!(app.split_percent, 60);
+    }
+
+    /// The sidebar boundary is its own draggable divider.
+    #[test]
+    fn the_sidebar_edge_is_grabbable_and_resizes_it() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
+        geo(&mut app);
+        app.repos_right = 26;
+
+        for col in [24, 25, 26] {
+            assert_eq!(
+                app.divider_at(col),
+                Some(Divider::Repos),
+                "column {col} should grab the sidebar edge"
+            );
+        }
+
+        app.set_repos_width(40, 100);
+        assert_eq!(app.repos_width, 40);
+    }
+
+    /// Neither end may be dragged away: too narrow and a branch name is
+    /// unreadable, too wide and the pane the sidebar exists to navigate *to*
+    /// is squeezed out by the one doing the navigating.
+    #[test]
+    fn the_sidebar_cannot_be_dragged_to_either_extreme() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
+        geo(&mut app);
+
+        app.set_repos_width(0, 100);
+        assert_eq!(app.repos_width, App::REPOS_WIDTH_MIN);
+
+        app.set_repos_width(99, 100);
+        assert_eq!(app.repos_width, 50, "never past half the terminal");
+    }
+
     #[test]
     fn the_divider_is_grabbable_without_pixel_precision() {
         let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
         geo(&mut app);
 
         for col in [44, 45, 46] {
-            assert!(app.on_divider(col), "column {col} should grab the divider");
+            assert_eq!(
+                app.divider_at(col),
+                Some(Divider::Split),
+                "column {col} should grab the split"
+            );
         }
         for col in [10, 43, 47, 90] {
-            assert!(!app.on_divider(col), "column {col} should not");
+            assert!(app.divider_at(col).is_none(), "column {col} should not");
         }
     }
 

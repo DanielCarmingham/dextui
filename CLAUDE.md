@@ -1005,8 +1005,26 @@ Capture is enabled explicitly — `ratatui::init` only sets raw mode and the
 alternate screen, so mouse reporting is opt-in and ratatui has no mouse layer of
 its own; the events come from crossterm.
 
-- **Drag the divider** to resize the panes, clamped to 20–80% so neither can be
-  dragged away.
+- **Both dividers drag.** `App::divider_at` answers which one a column is on:
+  the sidebar's edge or the tree/detail split. The sidebar's edge is tested
+  first, because at the minimum width on a narrow terminal the two can be
+  within a cell of each other and the one you cannot otherwise reach should
+  win.
+
+  The tree/detail split is a **percentage**, clamped to 20–80% so neither pane
+  can be dragged away. The sidebar is a **width** in cells, clamped to
+  `REPOS_WIDTH_MIN`..half the terminal — it holds names, not prose, so it
+  neither wants nor needs to grow with the terminal, which is also why it is a
+  `Length` in the layout rather than a share.
+
+  **`set_split` has to subtract `repos_right` first.** The layout is
+  `[Length(repos_width), Percentage(p), Fill(1)]`, so the divider lands at
+  `repos_width + p% of W` — computing `p` from the raw column silently assumes
+  the tree starts at the body's left edge. It does in two panes, and does not
+  once the sidebar exists, so grabbing the divider jumped it a full
+  sidebar-width (26 cells) to the right before the drag had moved anywhere.
+  `dragging_the_split_puts_the_divider_where_the_pointer_is` states it as the
+  distance between pointer and divider, which is the thing that was wrong.
 - **`App::pane_at` must know about all three panes.** It answered `Focus::Tree`
   for the sidebar's own columns — they sit left of `divider_x` — so a click on
   a repo row moved the *task* selection and the wheel over the sidebar scrolled
@@ -1057,9 +1075,15 @@ Hold **Shift** to bypass it, as most terminals allow.
 
 Two things this requires:
 
-- The renderer publishes geometry (`divider_x`, `body_top/bottom`,
+- The renderer publishes geometry (`divider_x`, `repos_right`, `body_top/bottom`,
   `terminal_width`) each frame, so mouse maths is exact rather than re-derived
   from assumptions about the layout.
+- **Scrollbars are inset past the corners.** Handed a pane's whole `Rect`,
+  ratatui draws the bar on its rightmost column — which is the border, corners
+  included, so `┐` and `┘` became track and thumb glyphs and the `[n]` marker
+  lost the corner beside it. `draw_scrollbar` applies a one-row vertical
+  margin: the bar stays *in* the border, which is deliberate and costs no
+  content width, but the frame survives.
 - `tree_offset` persists the list's scroll offset across frames. Without it the
   offset restarted at zero every frame, and a click would address the top of the
   list rather than the row actually drawn.

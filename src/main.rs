@@ -650,8 +650,8 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
         }
 
         MouseEventKind::Down(MouseButton::Left) => {
-            if app.on_divider(m.column) {
-                app.dragging_split = true;
+            if let Some(d) = app.divider_at(m.column) {
+                app.dragging = Some(d);
             } else if app.in_body(m.row) {
                 // Click to focus, and in the tree also to select the row.
                 match app.pane_at(m.column) {
@@ -675,11 +675,15 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
             }
         }
 
-        MouseEventKind::Drag(MouseButton::Left) if app.dragging_split => {
-            app.set_split(m.column, app.terminal_width);
+        MouseEventKind::Drag(MouseButton::Left) if app.dragging.is_some() => {
+            match app.dragging {
+                Some(app::Divider::Repos) => app.set_repos_width(m.column, app.terminal_width),
+                Some(app::Divider::Split) => app.set_split(m.column, app.terminal_width),
+                None => {}
+            }
         }
 
-        MouseEventKind::Up(_) => app.dragging_split = false,
+        MouseEventKind::Up(_) => app.dragging = None,
 
         // The wheel acts on whichever pane is under the pointer, which is what
         // people expect regardless of where focus happens to be. Both panes slide
