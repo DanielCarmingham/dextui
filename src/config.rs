@@ -29,6 +29,8 @@ pub struct Raw {
     icons: Option<String>,
     animate: Option<bool>,
     single_pane_below: Option<u16>,
+    split_percent: Option<u16>,
+    repos_width: Option<u16>,
     repos_pane_above: Option<u16>,
 }
 
@@ -48,6 +50,19 @@ pub struct Config {
     /// leave no room for either. `0` never switches, so the split is always
     /// shown; a value above any terminal you use always switches.
     pub single_pane_below: u16,
+    /// The tree's share of the space it splits with the detail pane, as a
+    /// percentage.
+    ///
+    /// A percentage rather than a width because both panes hold content that
+    /// genuinely wants more room -- task names and prose -- unlike the
+    /// sidebar. Of the region the two *share*, so it means the same thing
+    /// whether or not the sidebar is on screen.
+    pub split_percent: u16,
+    /// The repo sidebar's width, in columns.
+    ///
+    /// Cells rather than a percentage: it holds repo and branch names, so a
+    /// share of a wide terminal would be mostly empty space.
+    pub repos_width: u16,
     /// Terminal width at or above which the repo pane is drawn as a third pane.
     ///
     /// Three panes need roughly this much before each is worth having. `0` never
@@ -65,6 +80,8 @@ impl Default for Config {
             icons: icons::UNICODE,
             animate: true,
             single_pane_below: 80,
+            split_percent: 45,
+            repos_width: 26,
             repos_pane_above: 110,
         }
     }
@@ -131,6 +148,15 @@ fn apply(cfg: &mut Config, raw: Raw, problems: &mut Vec<String>) {
     }
     if let Some(v) = raw.single_pane_below {
         cfg.single_pane_below = v;
+    }
+    // Clamped, not rejected: the same bounds a drag obeys, so a hand-edited
+    // 5 or 300 lands where dragging there would rather than failing to start
+    // over a number. `Config` is soft everywhere else for the same reason.
+    if let Some(v) = raw.split_percent {
+        cfg.split_percent = v.clamp(20, 80);
+    }
+    if let Some(v) = raw.repos_width {
+        cfg.repos_width = v.max(crate::app::App::REPOS_WIDTH_MIN);
     }
     if let Some(v) = raw.repos_pane_above {
         cfg.repos_pane_above = v;
@@ -261,6 +287,16 @@ single_pane_below = 80
 # At or above this terminal width, show the repo pane as a third pane alongside
 # the tree and detail panes.  0 never shows it.
 repos_pane_above = 110
+
+# The task tree's share of the space it splits with the detail pane, as a
+# percentage of that space -- so it means the same thing with or without the
+# repo pane. Drag the divider to change it for one run; 20-80.
+split_percent = 45
+
+# The repo pane's width in columns. Columns rather than a percentage: it holds
+# repo and branch names, so a share of a wide terminal is mostly empty space.
+# Drag its edge to change it for one run.
+repos_width = 26
 "#;
 
 /// Which file a command acts on.
@@ -333,6 +369,44 @@ pub const PROJECT_EXAMPLE: &str = r#"# .dextui.toml — settings for this reposi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Applies `text` the way `load` layers a file, so these test the real
+    /// path rather than a parallel one.
+    fn applied(text: &str) -> (Config, Vec<String>) {
+        let raw: Raw = toml::from_str(text).expect("test config should parse");
+        let mut cfg = Config::default();
+        let mut problems = Vec::new();
+        apply(&mut cfg, raw, &mut problems);
+        (cfg, problems)
+    }
+
+    /// The template is the first thing anyone edits, so a key it advertises
+    /// that does not parse -- or one it forgets to mention -- is a
+    /// documentation bug with teeth.
+    #[test]
+    fn both_templates_parse_and_mention_the_layout_keys() {
+        for text in [EXAMPLE, PROJECT_EXAMPLE] {
+            let (cfg, problems) = applied(text);
+            assert!(problems.is_empty(), "template complains: {problems:?}");
+            assert!((20..=80).contains(&cfg.split_percent));
+        }
+        assert!(EXAMPLE.contains("split_percent"), "the global template omits split_percent");
+        assert!(EXAMPLE.contains("repos_width"), "the global template omits repos_width");
+    }
+
+    /// Clamped rather than rejected, matching what a drag would have done --
+    /// `Config` is soft everywhere else, and refusing to start over a number
+    /// in a preferences file is the worse failure.
+    #[test]
+    fn out_of_range_layout_values_are_clamped_not_refused() {
+        let (cfg, problems) = applied("split_percent = 5\nrepos_width = 2\n");
+        assert!(problems.is_empty(), "a silly number must not stop the app");
+        assert_eq!(cfg.split_percent, 20);
+        assert_eq!(cfg.repos_width, crate::app::App::REPOS_WIDTH_MIN);
+
+        let (cfg, _) = applied("split_percent = 300\n");
+        assert_eq!(cfg.split_percent, 80);
+    }
 
     #[test]
     fn defaults_match_the_behaviour_before_a_config_existed() {

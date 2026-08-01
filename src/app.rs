@@ -326,9 +326,9 @@ impl App {
             pending_editor: None,
             pending_config_edit: false,
             pending_store: None,
-            split_percent: 45,
+            split_percent: cfg.split_percent,
             dragging: None,
-            repos_width: 26,
+            repos_width: cfg.repos_width,
             divider_x: 0,
             repos_right: 0,
             body_top: 0,
@@ -702,15 +702,18 @@ impl App {
         if total_width == 0 {
             return;
         }
-        // The percentage is of the whole body, but the tree does not start at
-        // the body's left edge when the sidebar is there -- the layout is
-        // `[Length(repos_width), Percentage(p), Fill(1)]`, so the divider ends
-        // up at `repos_width + p% of W`. Turning the raw column into a
-        // percentage ignored that offset and dropped the divider a full
-        // sidebar-width to the right of the pointer: a 26-cell jump the
-        // moment you grabbed it.
+        // A percentage **of the region the two panes share**, which is the
+        // body minus the sidebar -- so both ends of the fraction describe the
+        // same span. Measuring the pointer from the body's left edge while the
+        // layout measured the percentage from the sidebar's right was what
+        // threw the divider a full sidebar-width past the pointer the moment
+        // you grabbed it.
+        let span = total_width.saturating_sub(self.repos_right);
+        if span == 0 {
+            return;
+        }
         let x = column.saturating_sub(self.repos_right);
-        let pct = (x as f32 / total_width as f32 * 100.0).round() as i32;
+        let pct = (x as f32 / span as f32 * 100.0).round() as i32;
         self.split_percent = pct.clamp(20, 80) as u16;
     }
 
@@ -829,6 +832,11 @@ impl App {
         self.wrap = cfg.wrap;
         self.animate = cfg.animate;
         self.repos_pane_above = cfg.repos_pane_above;
+        // The file's values are a *starting* layout, and a reload is the one
+        // moment they are meant to replace what dragging has done -- otherwise
+        // saving an edit to either would appear to do nothing.
+        self.split_percent = cfg.split_percent;
+        self.repos_width = cfg.repos_width;
         self.rebuild();
     }
 
@@ -3185,9 +3193,39 @@ mod tests {
 
         app.set_split(60, 100);
 
-        // The renderer will place it at repos_right + split% of the width.
-        let landed = app.repos_right + app.split_percent;
+        // Where the renderer will put it: the sidebar, then that share of what
+        // is left over.
+        let span = 100 - app.repos_right;
+        let landed = app.repos_right + span * app.split_percent / 100;
         assert_eq!(landed, 60, "the divider moved {} cells from the pointer", landed as i32 - 60);
+    }
+
+    /// Widening the sidebar must cost both panes, not one. The percentage is
+    /// of the region the two share, so their *ratio* survives the sidebar
+    /// changing size -- before this the tree's width was pinned to the whole
+    /// body and the detail pane absorbed every cell the sidebar took.
+    #[test]
+    fn widening_the_sidebar_costs_both_panes_proportionally() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
+        geo(&mut app);
+        app.split_percent = 50;
+
+        let widths = |repos: u16| {
+            let span = 100 - repos;
+            let tree = span * 50 / 100;
+            (tree, span - tree)
+        };
+
+        let (tree_narrow, detail_narrow) = widths(20);
+        let (tree_wide, detail_wide) = widths(50);
+
+        assert!(tree_wide < tree_narrow, "the tree kept its width: {tree_wide}");
+        assert!(detail_wide < detail_narrow, "the detail should shrink too");
+        assert_eq!(
+            tree_narrow - tree_wide,
+            detail_narrow - detail_wide,
+            "an even split should lose evenly"
+        );
     }
 
     /// And with no sidebar the arithmetic is unchanged, which is why this was

@@ -959,6 +959,26 @@ The git root is found by walking up for a `.git` entry rather than shelling out
 to git — no process spawn, and it matches worktrees too, where `.git` is a file
 rather than a directory.
 
+**The two divider positions use different units, and that is deliberate.**
+`split_percent` is a percentage because the tree and the detail both hold
+content that genuinely wants more room; `repos_width` is columns because the
+sidebar holds repo and branch names, so a share of a wide terminal would be
+mostly empty space. What the percentage is *of* was the part that was wrong:
+`[Length, Percentage, Fill]` in one layout measures the percentage against the
+whole body, sidebar included, so the tree's width was pinned regardless and the
+detail pane silently paid for every cell the sidebar gained — widening it by 23
+took 23 from the detail and none from the tree. The layout splits in two steps
+now, and `set_split` divides by the same span it measures the pointer against.
+That mismatch is also what threw the divider a sidebar-width past the pointer
+the moment you grabbed it.
+
+**Neither position is persisted**, and neither is any other runtime toggle —
+see the read-only rule below. Dragging is per-run; `split_percent` and
+`repos_width` in the config file are how you change the default. Saving a
+dragged layout would also mean saving an absolute column count taken at one
+terminal size and restoring it at another, which is the unpredictability the
+read-only rule exists to avoid.
+
 ```toml
 sort = "priority"       # priority | updated | created | name
 sort_reversed = false
@@ -966,6 +986,8 @@ filter = "pending"      # pending | active | all
 wrap = true
 icons = "unicode"       # nerd | unicode | ascii
 animate = true          # spin the in-progress marker
+split_percent = 45      # the tree's share of what it splits with the detail
+repos_width = 26        # the sidebar's width in columns
 ```
 
 `animate` is the one setting that reaches the **event loop**, not just the

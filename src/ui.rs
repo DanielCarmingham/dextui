@@ -123,12 +123,21 @@ pub fn draw(frame: &mut Frame, app: &mut App, ic: &Icons) {
             // nor needs to grow with the terminal the way the tree/detail split
             // does. The tree/detail boundary keeps the same arithmetic as the
             // two-pane case, just over the narrower remainder.
-            let [repos, left, right] = Layout::horizontal([
-                Constraint::Length(app.repos_width),
+            // Split in two steps, not one three-way layout, because the
+            // percentage has to be *of the region it splits*. A single
+            // `[Length, Percentage, Fill]` measures the percentage against the
+            // whole body, sidebar included -- so the tree's width was pinned
+            // regardless of the sidebar and the detail pane silently paid for
+            // every cell the sidebar gained. Widening it by 23 took 23 from
+            // the detail and none from the tree.
+            let [repos, rest] =
+                Layout::horizontal([Constraint::Length(app.repos_width), Constraint::Fill(1)])
+                    .areas(body);
+            let [left, right] = Layout::horizontal([
                 Constraint::Percentage(app.split_percent),
                 Constraint::Fill(1),
             ])
-            .areas(body);
+            .areas(rest);
 
             app.divider_x = right.x;
             // Where the sidebar ends and the tree begins, so `pane_at` can
