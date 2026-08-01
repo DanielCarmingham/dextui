@@ -1151,48 +1151,6 @@ swallowed, a truncated filter label, centred help text — was invisible to the
 compiler and to the tests, and obvious the moment a pane was captured. **Use it
 after any change to `ui.rs` or the key handling.**
 
-**Two mouse probes, and they answer different questions.** A click landing on
-the wrong row has two possible causes and they need separating before anything
-else is worth trying.
-
-```bash
-cargo run --example mouse         # what the terminal reports
-DEXTUI_MOUSE_DEBUG=1 dextui       # what the app makes of it
-```
-
-`examples/mouse.rs` is deliberately **raw crossterm, not ratatui**: when the
-bug is being chased in a ratatui app, a probe built on the same layer cannot
-tell you whether the coordinates arriving are the ones you think. It draws
-rulers and a crosshair, and reports every event in **both coordinate bases** —
-crossterm is 0-based, which is what `body_top`, `divider_x` and
-`select_at_row` all speak, while the SGR escapes on the wire and anything sent
-with `tmux send-keys` are 1-based. Mixing them is a one-cell error that looks
-exactly like a layout bug. It also enables `?1003h` by hand for motion with no
-button held, which `EnableMouseCapture` does not turn on.
-
-`cargo run --example mouse -- --no-motion` asks the terminal for exactly what
-dextui asks for and nothing more. The default probe additionally enables
-`?1003h`, and that is the **only** difference between the probe's mouse setup
-and the app's — so when the two disagree about where a click landed, running
-the probe both ways says which side of that line the fault is on. Both report
-identically here, which is the point: a difference is a finding.
-
-`cargo run --example mouse -- --raw` is the third rung, for when a coordinate
-is not merely off but *wildly* wrong: it prints the literal bytes with no
-parser in between, so a left press at column 60 row 6 should read exactly
-`ESC [ < 0 ; 60 ; 6 M`. If that is what arrives and the crosshair sits
-elsewhere, the fault is above the wire; if the numbers are already wrong there
-— implausibly large is what pixel-resolution reporting (`?1016h`) looks like —
-it is the terminal, and no app-side arithmetic will fix it.
-
-`DEXTUI_MOUSE_DEBUG=1` adds a strip inside the app pairing each event with what
-the app resolved it to — pane, offset, row index and the task's name. That
-pairing is the point: every input to the decision is state the *renderer*
-published a frame earlier, so none of it can be read off the code. If the
-reported coordinates match where you clicked but the task named is wrong, the
-fault is the arithmetic (`tree_offset`, `body_top`); if the coordinates
-themselves are wrong, it is below the app entirely.
-
 **A wrong screen does not heal on its own, and `^L` is why that key exists.**
 `terminal.draw` writes only the cells that changed since the frame *ratatui*
 last drew. Corruption from outside the app — a terminal that drops output, a
@@ -1205,12 +1163,11 @@ which reads as "clicking does nothing", because the click *did* land and the
 cells that would show it were never repainted.
 
 `Ctrl-L` sets `App::force_redraw`, and the event loop calls `terminal.clear()`
-before the next draw, discarding ratatui's idea of what is on screen. Note the
-contrast with `examples/mouse.rs`, which cannot get stuck this way: it issues
-`Clear(ClearType::All)` and repaints every cell every frame. That difference is
-the reason a mouse probe can look perfect in a terminal where the app looks
-broken, and it is worth remembering before concluding that the coordinates are
-at fault.
+before the next draw, discarding ratatui's idea of what is on screen. Worth
+knowing when comparing against a program that repaints unconditionally: one
+that issues `Clear(ClearType::All)` every frame cannot get stuck this way at
+all, so it can look perfect in a terminal where this app looks broken — which
+is not evidence that the coordinates are at fault.
 
 The binding **must stay above the unguarded `KeyCode::Char('l')`** that means
 expand / cross to the detail: match arms are tried in order and that one does
