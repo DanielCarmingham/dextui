@@ -232,6 +232,10 @@ pub struct App {
     /// renderer can measure it.
     pub help_content_height: u16,
     pub help_viewport_height: u16,
+    /// Set when a repo is added mid-run, so the main loop can give its stores
+    /// a watcher and a first read. `App` owns view state, not I/O -- the same
+    /// division `pending_store` follows.
+    pub repos_changed: bool,
     /// Set when a refresh arrives while a dialog is open; applied on close.
     pub pending_refresh: bool,
     /// Whether in-progress rows spin at all. From the config, and the opt-out
@@ -343,6 +347,7 @@ impl App {
             help_scroll: 0,
             help_content_height: 0,
             help_viewport_height: 0,
+            repos_changed: false,
             pending_refresh: false,
             animate: cfg.animate,
             spin_frame: 0,
@@ -1337,6 +1342,29 @@ impl App {
             }
         }
         crate::repos::store_dir(path)
+    }
+
+    /// Every store the sidebar can reach, deduplicated.
+    ///
+    /// One definition rather than two: startup builds its watcher fleet and
+    /// its cache from this, and so does anything that adds a repo mid-run, so
+    /// the two cannot disagree about what "every store" means.
+    pub fn sidebar_stores(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for r in &self.repos {
+            let stores = r
+                .worktrees
+                .iter()
+                .map(|w| r.store(Some(w)))
+                .chain(r.worktrees.is_empty().then(|| r.store(None)))
+                .collect::<Vec<_>>();
+            for dir in stores {
+                if !out.contains(&dir) {
+                    out.push(dir);
+                }
+            }
+        }
+        out
     }
 
     /// Puts the sidebar cursor on whichever row is the store being read, so

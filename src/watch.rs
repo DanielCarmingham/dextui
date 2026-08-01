@@ -4,7 +4,6 @@
 //! `dex list --json`. That keeps us off dex's private on-disk format while
 //! costing nothing at all when the store is idle.
 
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
@@ -88,7 +87,27 @@ type Stat = (SystemTime, u64, u64);
 fn stat(store_dir: &str) -> Option<Stat> {
     let meta = std::fs::metadata(Path::new(store_dir).join("tasks.jsonl")).ok()?;
     let mtime = meta.modified().ok()?;
-    Some((mtime, meta.len(), meta.ino()))
+    Some((mtime, meta.len(), inode(&meta)))
+}
+
+/// The inode, where the platform has one.
+///
+/// It is the strongest third of the fingerprint -- an atomic rename gives the
+/// new file a different one even when the mtime resolution and the length both
+/// happen to match. `MetadataExt` is unix-only and was this crate's only
+/// unix-only import, so off unix the gate falls back to mtime and length,
+/// which is weaker but not broken: dex rewrites the whole file, so a change
+/// that moves neither is a rewrite to a byte-identical file within one clock
+/// tick.
+#[cfg(unix)]
+fn inode(meta: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    meta.ino()
+}
+
+#[cfg(not(unix))]
+fn inode(_meta: &std::fs::Metadata) -> u64 {
+    0
 }
 
 /// Attaches a `notify` watcher to `store_dir`, or reports that it could not.

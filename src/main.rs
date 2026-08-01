@@ -413,18 +413,7 @@ fn main() -> std::io::Result<()> {
     // now a cache lookup, and restarting a watcher on every cursor move would
     // have been the only thing left making it expensive. One fleet, set up
     // once, means `switch_store` touches no watcher at all.
-    let all_store_dirs: Vec<String> = app
-        .repos
-        .iter()
-        .flat_map(|r| {
-            let repo_store = r.store(None);
-            r.worktrees
-                .iter()
-                .map(|w| r.store(Some(w)))
-                .chain(r.worktrees.is_empty().then_some(repo_store))
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let all_store_dirs = app.sidebar_stores();
 
     // Read **concurrently** -- one thread per store calling `Dex::for_store`
     // then `.list()`, joined before the first draw. A `dex` call costs ~180ms
@@ -473,7 +462,11 @@ fn main() -> std::io::Result<()> {
     // out. `_store_watchers` must stay alive for the whole run; dropping it
     // stops every one of these notifications.
     let (worktree_tx, worktree_rx) = channel::<String>();
-    let _store_watchers = watch::spawn_many(&all_store_dirs, worktree_tx);
+    let mut store_watchers = watch::spawn_many(&all_store_dirs, worktree_tx.clone());
+    // What already has one, so adding a repo mid-run does not stack a second
+    // watcher on a store that is fine.
+    let mut watched: std::collections::HashSet<String> =
+        all_store_dirs.iter().cloned().collect();
     {
         let tx = tx.clone();
         thread::spawn(move || {
@@ -614,6 +607,14 @@ fn main() -> std::io::Result<()> {
         // preflight `dex list` above: a discrete action rather than something
         // that runs on every keystroke, so the ~180ms dex call is the same
         // trade the preflight and the `$EDITOR` handoff already make.
+        // A repo added mid-run has neither a watcher nor a cached task list,
+        // so switching to it would fall back to a synchronous-looking async
+        // `dex list` and its sidebar counts would stay absent. `A` made that
+        // an ordinary action rather than an edge case.
+        if std::mem::take(&mut app.repos_changed) {
+            watch_new_stores(&app, &mut store_watchers, &mut watched, &worktree_tx, &tx);
+        }
+
         if let Some(path) = app.pending_store.take() {
             switch_store(&mut app, &mut dex, &tx, &path);
             dirty = true;
@@ -939,6 +940,44 @@ fn switch_store(app: &mut App, dex: &mut Arc<Dex>, tx: &Sender<Msg>, worktree_pa
     }
 }
 
+/// Gives a watcher and a first read to any sidebar store that lacks them.
+///
+/// Idempotent by design: it is called whenever the repo list changes, and
+/// stacking a second watcher on a store that already has one would double
+/// every event it reports.
+fn watch_new_stores(
+    app: &App,
+    watchers: &mut Vec<watch::StoreWatcher>,
+    watched: &mut std::collections::HashSet<String>,
+    worktree_tx: &Sender<String>,
+    tx: &Sender<Msg>,
+) {
+    for dir in app.sidebar_stores() {
+        if !watched.insert(dir.clone()) {
+            continue;
+        }
+        watchers.extend(watch::spawn_many(
+            std::slice::from_ref(&dir),
+            worktree_tx.clone(),
+        ));
+
+        // The first read, off the UI thread. Startup joins these before the
+        // first frame because it has nothing to draw until it does; here there
+        // is a frame on screen already, so blocking it would be a stall for a
+        // store nobody has asked to look at yet.
+        if app.store_tasks.contains_key(&dir) || !std::path::Path::new(&dir).is_dir() {
+            continue;
+        }
+        let tx = tx.clone();
+        thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let result = Dex::for_store(&dir).and_then(|d| d.list());
+            log_list_outcome(&dir, &result, start.elapsed());
+            let _ = tx.send(Msg::StoreLoaded { dir, result });
+        });
+    }
+}
+
 /// Saves the repo at a typed path, so a repo you are *not* in can be added.
 ///
 /// `~` is expanded here rather than by a shell: nothing in this app goes
@@ -1031,6 +1070,7 @@ fn register_repo(app: &mut App, worktrees: Vec<worktree::Worktree>) -> String {
             // would be left addressing whatever slid up into that index, and
             // in the single-repo case that index is now a heading.
             app.select_current_store_row();
+            app.repos_changed = true;
             format!("saved {path}")
         }
         Ok(false) => format!("{path} is already saved"),
@@ -1161,12 +1201,17 @@ fn log_list_outcome(store: &str, result: &Result<Vec<Task>, String>, elapsed: st
 fn refresh(dex: &Arc<Dex>, tx: &Sender<Msg>, app: &App) {
     let dex = Arc::clone(dex);
     let tx = tx.clone();
-    let label = app.store_label.clone();
     let store = app.store_dir.clone();
+    let logged = store.clone();
     thread::spawn(move || {
         let start = std::time::Instant::now();
         let result = dex.list();
-        log_list_outcome(&label, &result, start.elapsed());
+        // The *directory*, like every other `list` site. This one logged the
+        // display label, which is friendlier to read and useless to grep:
+        // `watch`'s registered/event/tick lines all name the directory, so a
+        // store's chain could be followed end to end for every store except
+        // the one being looked at.
+        log_list_outcome(&logged, &result, start.elapsed());
         let _ = tx.send(Msg::Tasks { store, result });
     });
 }

@@ -65,8 +65,12 @@ pub struct Config {
     pub repos_width: u16,
     /// Terminal width at or above which the repo pane is drawn as a third pane.
     ///
-    /// Three panes need roughly this much before each is worth having. `0` never
-    /// shows it, matching what `single_pane_below = 0` means for the split.
+    /// Three panes need roughly this much before each is worth having.
+    ///
+    /// `0` means "never *automatically*", not "no repo pane": `1` and `b` still
+    /// reach it, and at a width with room for two panes the sidebar takes one
+    /// and the detail yields. Not the same as `single_pane_below = 0`, which
+    /// really does turn its behaviour off -- see `App::laid_out`.
     pub repos_pane_above: u16,
 }
 

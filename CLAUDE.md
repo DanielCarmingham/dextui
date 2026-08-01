@@ -262,6 +262,30 @@ feature — `load` refusing to treat an unreadable file as empty and
 one that also closes the concurrent-instance race properly rather than merely
 narrowing it.
 
+**A repo added mid-run gets a watcher and a first read, like any other.**
+`App::sidebar_stores` is the one definition of "every store the sidebar can
+reach", used by both the startup fleet and `watch_new_stores`, so the two
+cannot disagree. The latter is idempotent on purpose — it runs whenever the
+repo list changes, and a second watcher on a store that already has one would
+double every event it reports. Its first read is spawned rather than joined:
+startup blocks because it has nothing to draw until the lists arrive, but here
+a frame is already on screen and blocking it would stall the app for a store
+nobody has asked to look at.
+
+**Windows: it compiles, and that is all that is claimed.** `watch::inode` is
+`cfg`-gated, so the crate no longer fails to build off unix — the fingerprint
+falls back to mtime and length, which is weaker but not broken, since dex
+rewrites the whole file. Three things stand between that and actually working,
+none of them verifiable here (no Windows machine, no CI):
+
+- **`Command::new("dex")`.** dex is an npm-installed Node CLI, so on Windows it
+  is `dex.cmd`, and `CreateProcess` does not resolve `.cmd` the way a shell
+  does. Every dex call is the app.
+- **`config::path`/`registry`/`log` fall back to `$HOME/.config`.** `HOME` is
+  usually unset on Windows, so all three would silently resolve to nothing.
+- **`dex::store_dir` spots the global store with `contains(".config/dex")`**, a
+  hardcoded unix path fragment.
+
 **Registering writes two things: the file and the row.** `a` used to do only
 the first, so the repo it had just registered did not appear until the next
 launch, against a README that promises switching between repos without
