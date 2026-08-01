@@ -94,9 +94,8 @@ pub enum Mode {
 pub enum Focus {
     Tree,
     Detail,
-    /// The repo/worktree sidebar. `3` sets it directly; `Tab` never cycles
-    /// into it -- that key's contract is "the other of two panes," and a
-    /// third destination would make it ambiguous which one Tab returns to.
+    /// The repo/worktree sidebar. `1` goes straight there, and `Tab` includes
+    /// it in the cycle whenever it is on screen -- see `focus_cycle`.
     Repos,
 }
 
@@ -817,16 +816,40 @@ impl App {
         self.rebuild();
     }
 
-    pub fn toggle_focus(&mut self) {
-        self.focus = match self.focus {
-            Focus::Tree => Focus::Detail,
-            Focus::Detail => Focus::Tree,
-            // Tab has never been the way into the repo pane -- that is a
-            // dedicated key, wired in a later task -- so leaving it lands back
-            // on the tree rather than bouncing between two panes that are not
-            // the one Tab is documented to cross.
-            Focus::Repos => Focus::Tree,
+    /// The panes `Tab` walks, left to right as they are drawn.
+    ///
+    /// The sidebar joins the cycle exactly when it is shown -- the same
+    /// predicate that decides whether it is drawn as a third pane, so the key
+    /// can never land on a pane that is not there, and the two cannot drift.
+    fn focus_cycle(&self) -> &'static [Focus] {
+        if self.repos_pane_fits() {
+            &[Focus::Repos, Focus::Tree, Focus::Detail]
+        } else {
+            &[Focus::Tree, Focus::Detail]
+        }
+    }
+
+    /// Moves focus one pane along the cycle; `Tab` forward, `Shift-Tab` back.
+    ///
+    /// This used to alternate the tree and the detail only, on the grounds
+    /// that `Tab`'s contract was "the other of two panes" and a third
+    /// destination would make it ambiguous which one it returned to. That was
+    /// true when the sidebar was a place you visited with `3` and left again;
+    /// it stopped being true once the sidebar drove the other two panes and
+    /// earned a number of its own. An ordered cycle answers the ambiguity the
+    /// old reasoning worried about -- with a direction, "back" is never in
+    /// doubt.
+    pub fn cycle_focus(&mut self, forward: bool) {
+        let cycle = self.focus_cycle();
+        let Some(i) = cycle.iter().position(|f| *f == self.focus) else {
+            // Focused on a pane no longer in the cycle -- the sidebar, hidden
+            // from under you. Land on the first rather than computing an
+            // offset from a position that does not exist.
+            self.focus = cycle[0];
+            return;
         };
+        let n = cycle.len();
+        self.focus = cycle[if forward { (i + 1) % n } else { (i + n - 1) % n }];
     }
 
     /// Whether only one pane is drawn, the focused one filling the width.
@@ -2716,13 +2739,73 @@ mod tests {
         assert_eq!(input.value, "hélXl");
     }
 
+    /// With no sidebar on screen the cycle is the two panes it always was.
     #[test]
     fn tab_moves_focus_between_the_panes() {
         let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
+        app.repos_pane_above = 0;
         assert_eq!(app.focus, Focus::Tree);
-        app.toggle_focus();
+        app.cycle_focus(true);
         assert_eq!(app.focus, Focus::Detail);
-        app.toggle_focus();
+        app.cycle_focus(true);
+        assert_eq!(app.focus, Focus::Tree);
+    }
+
+    /// Left to right, and wrapping -- the same order as the `[1] [2] [3]`
+    /// keys, because two ways of reaching the same three panes disagreeing
+    /// about their order would be worse than either alone.
+    #[test]
+    fn tab_walks_all_three_panes_when_the_sidebar_is_shown() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
+        app.repos_pane_above = 110;
+        app.terminal_width = 140;
+
+        let mut seen = vec![app.focus];
+        for _ in 0..3 {
+            app.cycle_focus(true);
+            seen.push(app.focus);
+        }
+        assert_eq!(
+            seen,
+            vec![Focus::Tree, Focus::Detail, Focus::Repos, Focus::Tree],
+            "tab should wrap through all three, in drawn order"
+        );
+
+        // And shift-tab is exactly the inverse.
+        let mut back = vec![app.focus];
+        for _ in 0..3 {
+            app.cycle_focus(false);
+            back.push(app.focus);
+        }
+        assert_eq!(back, vec![Focus::Tree, Focus::Repos, Focus::Detail, Focus::Tree]);
+    }
+
+    /// The cycle follows what is drawn, so hiding the sidebar with `b` takes
+    /// it out -- tab must never land on a pane that is not there.
+    #[test]
+    fn tab_skips_the_sidebar_once_it_is_hidden() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
+        app.repos_pane_above = 110;
+        app.terminal_width = 140;
+        app.toggle_repos();
+
+        for _ in 0..4 {
+            app.cycle_focus(true);
+            assert_ne!(app.focus, Focus::Repos, "tab landed on a hidden sidebar");
+        }
+    }
+
+    /// Focused on the sidebar when it leaves the cycle, tab has no position to
+    /// step from. It must still go somewhere sensible rather than computing an
+    /// offset from an index that does not exist.
+    #[test]
+    fn tab_from_a_pane_that_has_left_the_cycle_lands_on_the_first() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
+        app.repos_pane_above = 0;
+        app.focus = Focus::Repos;
+
+        app.cycle_focus(true);
+
         assert_eq!(app.focus, Focus::Tree);
     }
 

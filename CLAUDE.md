@@ -765,18 +765,29 @@ both panes visible, `Right` on a leaf moving focus would silently redirect
 `j`/`k` to the other pane mid-walk through the tree — a surprise there, and the
 entire point here.
 
-## Two panes, one set of movement keys
+## Three panes, one set of movement keys
 
-`Tab` moves focus between the tree and the detail pane; the focused one has the
-brighter border. `j/k/h/l`, `g/G` and page keys drive whichever has focus, while
-the action keys (`s c e n a d f / r ?`) stay global because they always operate
-on the selected task.
+`Tab` moves focus to the next pane and `Shift-Tab` to the previous, left to
+right as they are drawn; the focused one has the brighter border. `j/k/h/l`,
+`g/G` and page keys drive whichever has focus, while the action keys
+(`s c e n a d f / r ?`) stay global because they always operate on the
+selected task.
 
-The repo sidebar is a third pane, reached only by `3` — `Tab` deliberately
-never lands on it or leaves it. `App::toggle_focus` only ever alternates tree
-and detail, so pressing `Tab` from the sidebar always returns to the tree
-rather than bouncing between two panes it was never documented to cross. See
-"Repos, worktrees and the registry" below for its own key model.
+**The sidebar is in the cycle exactly when it is on screen.**
+`App::focus_cycle` keys off `repos_pane_fits()` — the same predicate that
+decides whether the sidebar is drawn as a third pane — so `Tab` can never land
+on a pane that is not there, and the two cannot drift apart. `b` hiding the
+sidebar therefore removes it from the cycle for free. The order matches
+`[1] [2] [3]`, because two ways of reaching the same three panes disagreeing
+about their order would be worse than either alone.
+
+`Tab` used to alternate the tree and the detail only, deliberately, on the
+grounds that its contract was "the other of two panes" and a third destination
+would make it ambiguous which one it returned to. That held while the sidebar
+was somewhere you visited with a dedicated key and left again; it stopped
+holding once the sidebar drove the other two panes and earned a number of its
+own. An ordered cycle answers the old objection rather than ignoring it — with
+a direction, "back" is never in doubt.
 
 **Both surfaces that advertise keys have to be kept honest, and a test does
 it.** `SHORTCUTS` (the status strip) and `HELP` (the `?` dialog) name the same

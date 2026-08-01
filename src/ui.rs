@@ -37,7 +37,7 @@ const SHORTCUTS: &str =
 /// that is not a task. A single strip advertising `a sub` beside a focused
 /// sidebar was not a shorter truth, it was a wrong one.
 const REPO_SHORTCUTS: &str =
-    " enter tasks  a register repo  D unregister  b hide  tab tasks  ? help";
+    " enter tasks  a register repo  D unregister  b hide  tab next pane  ? help";
 
 /// Width of the inline progress meter, in cells.
 const METER_WIDTH: usize = 7;
@@ -1536,7 +1536,7 @@ fn draw_message(frame: &mut Frame, title: &str, body: &str, hint: &str, accent: 
 ///
 /// Left-aligned on purpose: centring would destroy the column alignment.
 const HELP: &str = "\
-tab        switch pane       s   start task
+tab / ⇧tab next / prev pane  s   start task
 ↑ ↓ j k    move / scroll     c   complete (prompts for result)
 → ← h l    expand / scroll   r   rename
 g / G      first / last      e   edit description in $EDITOR
@@ -2176,7 +2176,7 @@ mod tests {
 
         // The first line, the last, and one from each block in between.
         for line in [
-            "tab        switch pane",
+            "tab / ⇧tab next / prev pane",
             "D          unregister",
             "b   show / hide the sidebar",
             "follow it over to the tasks.",
@@ -2233,7 +2233,7 @@ mod tests {
             !top.contains(LAST),
             "80x24 is not short enough to test scrolling:\n{top}"
         );
-        assert!(top.contains("tab        switch pane"), "help starts at the top:\n{top}");
+        assert!(top.contains("tab / ⇧tab next / prev pane"), "help starts at the top:\n{top}");
 
         let end = help_screen(80, 24, true);
         assert!(end.contains(LAST), "the last line stayed out of reach:\n{end}");
@@ -3335,7 +3335,7 @@ mod tests {
             .map(|(x, y)| buf[(x, y)].symbol())
             .collect();
 
-        assert!(text.contains("switch pane"), "the help dialog is missing");
+        assert!(text.contains("next / prev pane"), "the help dialog is missing");
     }
 
     /// The glyph changes every frame now, so the assertion that matters is that

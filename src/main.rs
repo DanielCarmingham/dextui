@@ -1256,7 +1256,10 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         }
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
 
-        KeyCode::Tab | KeyCode::BackTab => app.toggle_focus(),
+        // Tab walks the panes left to right, Shift-Tab back. The sidebar is
+        // in the cycle exactly when it is on screen -- see `focus_cycle`.
+        KeyCode::Tab => app.cycle_focus(true),
+        KeyCode::BackTab => app.cycle_focus(false),
         // Wrapping and horizontal scrolling are mutually exclusive, so this is
         // the switch between reading prose and reading a wide table.
         KeyCode::Char('w') => app.toggle_wrap(),
