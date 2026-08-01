@@ -822,7 +822,7 @@ impl App {
     /// predicate that decides whether it is drawn as a third pane, so the key
     /// can never land on a pane that is not there, and the two cannot drift.
     fn focus_cycle(&self) -> &'static [Focus] {
-        if self.repos_pane_fits() {
+        if self.repos_shown() {
             &[Focus::Repos, Focus::Tree, Focus::Detail]
         } else {
             &[Focus::Tree, Focus::Detail]
@@ -882,32 +882,64 @@ impl App {
         if self.single_pane_below > 0 && self.terminal_width < self.single_pane_below {
             return true;
         }
-        self.focus == Focus::Repos && !self.repos_pane_fits()
+        // Focused on a pane the layout has no slot for. Previously this asked
+        // specifically about the sidebar; asking whether the *focused* pane is
+        // drawn at all is the same rule stated generally, and it now also
+        // covers the detail pane being the one displaced.
+        !self.laid_out().contains(&self.focus)
     }
 
-    /// Whether the sidebar is drawn as its own pane. Shared between
-    /// `single_pane` and `panes` so the two conditions that decide "is there
-    /// room for a third pane" cannot drift apart.
+    /// Whether the sidebar is shown at all -- by width, or because `b`/`1`
+    /// asked for it.
     ///
-    /// `b` outranks the width rule, the same way `z` outranks it for zoom and
-    /// for the same reason: pressing a key is an explicit decision, and a
-    /// layout that undid it on a resize would read as a fault.
-    fn repos_pane_fits(&self) -> bool {
+    /// A separate question from whether there is room for *three* panes, which
+    /// is what it used to be conflated with. Showing the sidebar at a width
+    /// that fits two used to add a third anyway, cramming three panes into
+    /// room the app had already decided was enough for two.
+    fn repos_shown(&self) -> bool {
         if let Some(shown) = self.repos_visible {
             return shown;
         }
         self.repos_pane_above > 0 && self.terminal_width >= self.repos_pane_above
     }
 
-    /// See [`Panes`].
-    pub fn panes(&self) -> Panes {
+    /// Whether the width reserves room for three panes side by side.
+    fn room_for_three(&self) -> bool {
+        self.repos_pane_above > 0 && self.terminal_width >= self.repos_pane_above
+    }
+
+    /// The panes the width would lay out, left to right, before zoom or a
+    /// focus that none of them holds is taken into account.
+    fn laid_out(&self) -> Vec<Focus> {
+        if !self.repos_shown() {
+            return vec![Focus::Tree, Focus::Detail];
+        }
+        if self.room_for_three() {
+            return vec![Focus::Repos, Focus::Tree, Focus::Detail];
+        }
+        // Room for two, and the sidebar is one of them. **The detail yields**,
+        // not the tree: the sidebar's whole job is choosing which store the
+        // *tree* shows, so those two side by side is the pairing that makes
+        // asking for the sidebar worth anything. The detail is a keypress away
+        // and the pane most often being read rather than acted on.
+        vec![Focus::Repos, Focus::Tree]
+    }
+
+    /// The panes actually drawn, left to right.
+    pub fn drawn_panes(&self) -> Vec<Focus> {
         if self.single_pane() {
-            return Panes::One;
+            return vec![self.focus];
         }
-        if self.repos_pane_fits() {
-            return Panes::Three;
+        self.laid_out()
+    }
+
+    /// See [`Panes`]. How *many* panes are drawn -- the shape of the layout.
+    pub fn panes(&self) -> Panes {
+        match self.drawn_panes().len() {
+            1 => Panes::One,
+            2 => Panes::Two,
+            _ => Panes::Three,
         }
-        Panes::Two
     }
 
     /// Flips what you are looking at, and keeps it that way.
@@ -931,7 +963,7 @@ impl App {
     /// deliberately never lands on the sidebar, so the tree is the only place
     /// to go back to.
     pub fn toggle_repos(&mut self) {
-        let showing = self.repos_pane_fits();
+        let showing = self.repos_shown();
         self.repos_visible = Some(!showing);
         if showing && self.focus == Focus::Repos {
             self.focus = Focus::Tree;
@@ -973,14 +1005,19 @@ impl App {
     /// selection-disturbing behaviour this app exists to avoid.
     pub fn pane_at(&self, column: u16) -> Focus {
         if self.single_pane() {
-            self.focus
-        } else if self.repos_right > 0 && column < self.repos_right {
-            Focus::Repos
-        } else if column < self.divider_x {
-            Focus::Tree
-        } else {
-            Focus::Detail
+            return self.focus;
         }
+        if self.repos_right > 0 && column < self.repos_right {
+            return Focus::Repos;
+        }
+        // `divider_x == 0` means no tree/detail boundary was drawn -- the
+        // sidebar-plus-tree layout. Testing it explicitly rather than letting
+        // `column < 0` fall through is what stops every click there being
+        // answered as the detail pane, which is not on screen at all.
+        if self.divider_x > 0 && column >= self.divider_x {
+            return Focus::Detail;
+        }
+        Focus::Tree
     }
 
     /// Wrapping on makes horizontal offset meaningless, so it is also reset.
@@ -1571,6 +1608,14 @@ mod tests {
     /// there left `j`/`k`/`G`/`enter` driving a cursor nothing on screen
     /// showed. Framed as "one pane, chosen by focus" rather than a forced
     /// `zoom`, so there is nothing to undo when focus or width changes back.
+    ///
+    /// Note what this does *not* cover, and why the distinction is real:
+    /// focus arriving on the sidebar without anyone having asked for the
+    /// sidebar -- a resize stranding it -- zooms it. Pressing `1` goes through
+    /// `show_repos`, which records the request in `repos_visible`, and that
+    /// gets you the sidebar beside the tree instead. Same width, different
+    /// outcome, because "I want this pane" and "focus ended up here" are
+    /// different things.
     #[test]
     fn repos_focus_becomes_a_single_pane_when_the_ladder_has_no_room_for_it() {
         let mut app = ladder(90);
@@ -1581,6 +1626,11 @@ mod tests {
 
         assert_eq!(app.panes(), Panes::One, "must actually become visible");
         assert_eq!(app.zoom, None, "must not reach for zoom to get there");
+
+        // Asked for rather than stranded: now it shares the width with the
+        // tree instead of taking all of it.
+        app.show_repos();
+        assert_eq!(app.drawn_panes(), vec![Focus::Repos, Focus::Tree]);
     }
 
     /// This is the specific gap a key-handler-only fix cannot close: no key
@@ -1807,11 +1857,64 @@ mod tests {
         assert_eq!(app.panes(), Panes::Three, "b did not bring it back");
 
         // And the other direction, from a width that had already hidden it.
+        // Still two panes -- that is all this width fits -- but the sidebar is
+        // now one of them, which is what asking for it has to mean.
         app.repos_visible = None;
         app.terminal_width = 90;
-        assert_eq!(app.panes(), Panes::Two);
+        assert_eq!(app.drawn_panes(), vec![Focus::Tree, Focus::Detail]);
         app.toggle_repos();
-        assert_eq!(app.panes(), Panes::Three, "the first press must do something");
+        assert_eq!(
+            app.drawn_panes(),
+            vec![Focus::Repos, Focus::Tree],
+            "the first press must do something, without cramming in a third pane"
+        );
+    }
+
+    /// The reported behaviour: at a width the app has already judged fits two
+    /// panes, asking for the sidebar added a third rather than displacing one.
+    #[test]
+    fn showing_the_sidebar_where_only_two_fit_displaces_the_detail() {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.repos_pane_above = 110;
+        app.single_pane_below = 80;
+        app.terminal_width = 100; // wide enough to split, not for three
+
+        assert_eq!(app.drawn_panes(), vec![Focus::Tree, Focus::Detail]);
+
+        app.show_repos();
+
+        assert_eq!(app.drawn_panes(), vec![Focus::Repos, Focus::Tree]);
+        assert_eq!(app.panes(), Panes::Two, "still only two panes wide");
+    }
+
+    /// The detail yields rather than the tree, and is still reachable: focusing
+    /// a pane the layout has no slot for zooms it, which is the same rule that
+    /// already covered the sidebar in this width band.
+    #[test]
+    fn the_displaced_detail_pane_is_still_reachable() {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.repos_pane_above = 110;
+        app.single_pane_below = 80;
+        app.terminal_width = 100;
+        app.show_repos();
+
+        app.show_detail();
+
+        assert_eq!(app.drawn_panes(), vec![Focus::Detail]);
+        assert!(app.single_pane());
+    }
+
+    /// With room for three, asking for the sidebar still gets all three.
+    #[test]
+    fn a_wide_terminal_still_shows_every_pane() {
+        let mut app = counted(vec![task("a", None, &[])]);
+        app.repos_pane_above = 110;
+        app.terminal_width = 140;
+        app.show_repos();
+        assert_eq!(
+            app.drawn_panes(),
+            vec![Focus::Repos, Focus::Tree, Focus::Detail]
+        );
     }
 
     /// Hiding the pane you are standing in has to move you somewhere, or the

@@ -310,14 +310,25 @@ from it rather than accepting a label, so the tag and the header cannot be set
 to two different stores; and `refresh` takes the whole `&App` for the same
 reason.
 
-**`repos_pane_above = 0` does not mean "no repo pane" — it means "never as a
-*third* pane."** `src/config.rs`'s own doc comment says only that it "matches
-what `single_pane_below = 0` means for the split," which reads as "the
-sidebar is unreachable" and is not what happens: `App::single_pane` treats
-`Focus::Repos` at a width with no room for a third pane as one more
-single-pane condition, alongside zoom and the width threshold, so `3` still
-gets you the sidebar full-width even with the rung disabled — see
-`repos_focus_becomes_a_single_pane_when_the_ladder_has_no_room_for_it`.
+**How many panes fit and *which* panes they are, are two questions.** They
+used to be one: `repos_pane_fits()` answered both, so asking for the sidebar at
+a width the app had already judged fits two panes added a *third* anyway,
+cramming three into that room. `App::laid_out` now decides the set —
+
+- sidebar not shown → tree, detail
+- shown, and `repos_pane_above` columns available → all three
+- shown, with room for two → **repos and tree; the detail yields**
+
+The detail is what gives way, not the tree, because the sidebar's whole job is
+choosing which store the *tree* shows: those two side by side is the pairing
+that makes asking for the sidebar worth anything, and the detail is a keypress
+away and the pane most often read rather than acted on.
+
+`single_pane()` is stated generally as a consequence: focusing a pane the
+layout has no slot for zooms it. That was previously written as a special case
+about the sidebar; it now covers a displaced detail pane too, with no new rule.
+`repos_pane_above = 0` therefore means "never as a *third* pane" rather than
+"no repo pane" — `1` still reaches it, now as one of two.
 
 `D`'s confirmation dialog reuses `Mode::Confirm` rather than adding a second
 one: its `id` field carries a `repo:`-prefixed path instead of a task id, and

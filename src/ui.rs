@@ -85,6 +85,23 @@ pub fn draw(frame: &mut Frame, app: &mut App, ic: &Icons) {
                 Focus::Repos => draw_repos(frame, app, ic, body),
             }
         }
+        // Two panes, but *which* two depends on whether the sidebar is up:
+        // asking for it at a width that fits two used to add a third anyway,
+        // cramming three into room the app had already judged enough for two.
+        Panes::Two if app.drawn_panes()[0] == Focus::Repos => {
+            let [repos, left] =
+                Layout::horizontal([Constraint::Length(app.repos_width), Constraint::Fill(1)])
+                    .areas(body);
+
+            // No tree/detail boundary exists here, so there is nothing to drag
+            // and `divider_x` must say so -- a stale one would be an invisible
+            // drag target down the middle.
+            app.divider_x = 0;
+            app.repos_right = left.x;
+
+            draw_repos(frame, app, ic, repos);
+            draw_tree(frame, app, ic, left);
+        }
         Panes::Two => {
             let [left, right] = Layout::horizontal([
                 Constraint::Percentage(app.split_percent),
@@ -926,10 +943,20 @@ fn repo_stat_spans(c: Counts, room: usize, ic: &Icons) -> Vec<Span<'static>> {
         vec![Span::styled(c.pending.to_string(), Style::default().fg(TODO))]
     };
 
+    // Numbers first, bar last. The block is right-aligned, so whatever sits at
+    // its end is the only part pinned to a fixed column -- and the numbers are
+    // the part whose width changes as tasks move between states. With the bar
+    // leading, every count that gained or lost a digit slid the bar sideways;
+    // this way the bar holds still and the numbers grow leftwards into the
+    // padding, which is empty anyway.
+    //
+    // It also makes each rung a genuine *prefix* of the one above rather than
+    // a suffix, which is what the ladder's shed-only guarantee is stated in
+    // terms of.
     let mut ladder: Vec<Vec<Span<'static>>> = Vec::new();
     if c.total > 0 {
-        ladder.push([bar(METER_WIDTH), vec![sep()], numbers.clone()].concat());
-        ladder.push([bar(4), vec![sep()], numbers.clone()].concat());
+        ladder.push([numbers.clone(), vec![sep()], bar(METER_WIDTH)].concat());
+        ladder.push([numbers.clone(), vec![sep()], bar(4)].concat());
     }
     ladder.push(numbers);
     ladder.push(pending_only());
@@ -2385,10 +2412,16 @@ mod tests {
         assert_eq!(at(0), "", "no room means nothing");
         assert_eq!(at(1), "9", "the narrowest rung is the unfinished count");
         assert_eq!(at(6), "1 8 4", "then every state, colour-coded");
+        let widest = at(30);
         assert!(
             span_width(&repo_stat_spans(c, 30, ic)) > 6,
-            "the widest rung should add the bar: {:?}",
-            at(30)
+            "the widest rung should add the bar: {widest:?}"
+        );
+        // Numbers lead, bar trails: the block is right-aligned, so the bar is
+        // the part that must not move as counts change width.
+        assert!(
+            widest.starts_with("1 8 4 "),
+            "the numbers should lead so the bar stays pinned: {widest:?}"
         );
     }
 
