@@ -405,7 +405,8 @@ Naming the sections costs a row each and removes the concept. `here` never
 claims to be saved, so nothing on the row has to say so; `a` saves the current
 repo, `D` forgets a saved one. `repos::rows` takes the current repo's index and
 splits on it, and `Repo::registered` now decides which *section* a repo is in
-rather than whether it appears at all.
+rather than whether it appears at all — which is also what makes `a` and `D`
+visible, since each one moves the row across the boundary.
 
 **`here` is the repo you launched in, not the store you are reading.** Keying
 it off the current store meant switching into a saved repo moved `here` onto
@@ -429,11 +430,35 @@ reports the main checkout first whatever you point it at.
 
 Three rules fall out:
 
-- **Both sections, or no headings.** With one section there is nothing to
-  distinguish, and a lone `here` over a single entry is a label explaining
-  itself.
-- **Current *and* saved appears once, under `here`** — it is where you are,
-  which is the more useful thing to say about it.
+- **`here` holds the launch repo only while it is unsaved**, and saving moves
+  it down into `saved`. That move is the entire visible answer to "did `a`
+  work?", and it is why the rule is this way round.
+
+  It used to be the other way — a repo that was both current and saved appeared
+  once, under `here`, on the grounds that where you are is the more useful thing
+  to say about it. The cost was not obvious until someone pressed the key:
+  **`a` changed nothing at all on screen.** The row it marked was already drawn,
+  in the same place, with no marker on it by deliberate policy. The registry was
+  written and the status bar said so for exactly one keystroke, while the pane
+  that exists to show the saved set looked identical before and after. Reported
+  as "I'm not sure the `a` button is working", which is precisely what an action
+  with no feedback looks like.
+
+  So `here` now means "you are in this, and it is not in your list yet" — the
+  one state worth a section of its own.
+- **The `saved` heading is drawn even when the section is empty**, with a dim
+  `nothing saved yet` under it. The destination has to be on screen *before* the
+  press for the move to read as a move afterwards; a section that materialises
+  along with its first arrival is a layout change, not a confirmation. `here`
+  gets no such treatment — an empty `here` while you are plainly somewhere reads
+  as the app having lost you.
+- **The cursor follows the row.** `selected_repo_row` is an index, not an
+  identity, so a row that moves past it leaves it addressing whatever slid into
+  that slot — and since the sidebar cursor chooses the store, that swaps the
+  other two panes to a different project. `register_repo` ends with
+  `App::select_current_store_row`. A one-repo store cannot catch this: the
+  `here` heading leaves as the `saved` heading arrives, so every index below is
+  unchanged and a broken cursor still looks right. The test uses two.
 - **Headings are not places.** `Row::Heading` is unselectable, so the cursor
   steps over it (`App::nearest_selectable`, searching in the direction of
   travel and then back), a click on one does nothing, and

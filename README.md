@@ -107,8 +107,8 @@ screen, where two panes would leave no room for either.
 <td><img alt="the detail pane filling the same terminal after pressing enter" src="docs/img/dextui-narrow-detail.png"></td>
 </tr>
 <tr>
-<td align="center"><sub>60 columns — <code>2</code> or <code>enter</code> →</sub></td>
-<td align="center"><sub>← <code>1</code>, <code>tab</code> or <code>←</code> — the same terminal</sub></td>
+<td align="center"><sub>60 columns — <code>3</code> or <code>enter</code> →</sub></td>
+<td align="center"><sub>← <code>2</code>, <code>tab</code> or <code>←</code> — the same terminal</sub></td>
 </tr>
 </table>
 
@@ -120,7 +120,7 @@ until you press it again. Set the value to `0` to always split.
 | key | does |
 | --- | --- |
 | `z` | zoom / unzoom |
-| `1` `2` | jump to the tree / the detail |
+| `1` `2` `3` | jump to the repo sidebar / the tree / the detail |
 | `enter`, `→` | open the detail (`→` from a task with no subtasks) |
 | `←` `tab` | back to the tree |
 
@@ -131,31 +131,39 @@ that disappears.
 ## Multiple repos
 
 dextui can watch more than one repo at once — other projects, or other
-worktrees of the one you are in. Press `3` to focus the sidebar, `a` to
-register the repo dextui is currently running in (not necessarily whichever
-row the cursor is on), and `enter` or `l` on any worktree to switch the tree
-and detail panes to its store. `D` unregisters an entry, with confirmation —
-that only removes the sidebar row; nothing on disk, in the worktree, or in
-the store itself is touched.
+worktrees of the one you are in. Press `1` to focus the sidebar, and moving
+the cursor switches the tree and detail panes to whatever worktree it lands
+on, the same way moving the tree cursor changes the detail.
+
+The sidebar has two sections. **`here`** is the repo you launched in, and it
+sits there while it is still unsaved. **`saved`** is the list you can reach
+from anywhere. `a` saves the repo dextui is running in — not whichever row
+the cursor is on — which moves its row down from `here` into `saved`; `D`
+unregisters an entry, with confirmation, and moves it back. Unregistering
+only removes the sidebar row: nothing on disk, in the worktree, or in the
+store itself is touched. `A` saves a repo you are *not* in, by path.
 
 Wide enough — `repos_pane_above` columns, 110 by default — and the sidebar
-gets a third pane alongside the tree and detail. Narrower than that, `3`
+gets a third pane alongside the tree and detail. Narrower than that, `1`
 still gets you there: focusing it zooms the app down to just the sidebar, the
 same way the whole app zooms below `single_pane_below`.
 
 Every registered repo is watched, not only the one on screen, so a change in
-any of them is noticed as promptly as a change in the one you are looking at.
-That is currently groundwork rather than something you can see: nothing on
-screen shows another repo's counts yet, and switching stores still pays one
-`dex list` — around 180ms — before the new worktree's tasks appear.
+any of them is noticed as promptly as a change in the one you are looking at —
+and each row carries its own outstanding count, read from that cache rather
+than from a fresh `dex` call. Moving the cursor onto a store already read is
+therefore instant; a store this run has not touched yet pays one `dex list`,
+around 180ms, the first time.
 
 | key | does |
 | --- | --- |
-| `3` | focus the repo sidebar |
-| `j` `k` `g` `G` | move the cursor |
-| `enter`, `l` | switch to the worktree under the cursor |
-| `a` | register the repo dextui is running in |
-| `D` | unregister the entry under the cursor, with confirmation |
+| `1` | focus the repo sidebar |
+| `b` | show / hide it |
+| `j` `k` `g` `G` | move the cursor — and the store the other panes read |
+| `enter`, `l` | follow it over to the tasks |
+| `a` | save the repo dextui is running in, moving it into `saved` |
+| `A` | save a repo by path, for one you are not in (`~` works) |
+| `D` | forget a saved repo, with confirmation |
 
 ## Keys
 
@@ -168,7 +176,7 @@ Press `?` in the app for this list at any time.
 | `g` `G` | first / last |
 | `tab` | switch pane (the focused one has the brighter border) |
 | `enter` | open the detail pane |
-| `1` `2` `3` | jump straight to the tree / the detail / the repo sidebar |
+| `1` `2` `3` | jump straight to the repo sidebar / the tree / the detail |
 | `z` | zoom — one pane at a time |
 | `-` `+` | collapse / expand all |
 | `/` | search names and descriptions |

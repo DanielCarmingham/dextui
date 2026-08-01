@@ -1302,7 +1302,7 @@ impl App {
         let index = match self.repo_rows().get(self.selected_repo_row)? {
             crate::repos::Row::Repo { index } => *index,
             crate::repos::Row::Worktree { repo, .. } => *repo,
-            crate::repos::Row::Heading(_) => return None,
+            crate::repos::Row::Heading(_) | crate::repos::Row::Hint(_) => return None,
         };
         self.repos.get(index)
     }
@@ -1312,7 +1312,7 @@ impl App {
     /// reports first and which shares the repo's own registered path.
     pub fn selected_worktree_path(&self) -> Option<String> {
         match self.repo_rows().get(self.selected_repo_row)? {
-            crate::repos::Row::Heading(_) => None,
+            crate::repos::Row::Heading(_) | crate::repos::Row::Hint(_) => None,
             crate::repos::Row::Repo { index } => self.repos.get(*index).map(|r| r.path.clone()),
             crate::repos::Row::Worktree { repo, index } => self
                 .repos
@@ -1344,7 +1344,7 @@ impl App {
     pub fn select_current_store_row(&mut self) {
         let rows = self.repo_rows();
         let found = rows.iter().position(|row| match row {
-            crate::repos::Row::Heading(_) => false,
+            crate::repos::Row::Heading(_) | crate::repos::Row::Hint(_) => false,
             crate::repos::Row::Repo { index } => self.repos[*index].store(None) == self.store_dir,
             crate::repos::Row::Worktree { repo, index } => {
                 let r = &self.repos[*repo];
@@ -1388,11 +1388,12 @@ impl App {
     pub fn unregister_repo_path(&mut self, repo_path: &str) -> Result<bool, String> {
         let changed = self.registry.remove_and_save(repo_path)?;
         if changed {
-            // No special case for "the repo you are reading" any more. The
-            // launch repo renders under `here` whether or not it is saved, so
-            // unsaving it moves it out of `saved` and changes nothing else --
-            // which is what made the old guard, and the row-that-is-neither
-            // state it produced, unnecessary.
+            // No special case for "the repo you are reading" any more.
+            // Unsaving the launch repo moves it back up into `here` -- the
+            // exact reverse of what `a` does -- rather than taking its row
+            // away, so the old guard and the row-that-is-neither state it
+            // produced are both unnecessary. Any *other* repo does lose its
+            // row, which is what the `retain` below is for.
             if let Some(row) = self.repos.iter_mut().find(|r| r.path == repo_path) {
                 row.registered = false;
             }
@@ -2044,7 +2045,6 @@ mod tests {
     #[test]
     fn here_is_hidden_when_there_is_no_store_where_you_launched() {
         let mut app = app_with_repos();
-        app.repos[1].registered = false; // launched somewhere unsaved
         app.here_store = "/nonexistent-store-for-tests/.dex".into();
 
         let rows = app.repo_rows();
@@ -2791,6 +2791,12 @@ mod tests {
         // `here` is the repo the run launched in. `here_store` has to be a
         // directory that really exists, since the section is hidden when there
         // is no store where you are -- a temp dir is the cheapest real one.
+        //
+        // Unsaved, because that is now what puts a repo under `here` at all:
+        // saving one moves it into `saved`. This fixture exists to give the
+        // sidebar two populated sections, so it has to be the state that
+        // produces them.
+        app.repos[1].registered = false;
         app.here_path = Some("/x/two".into());
         app.here_store = std::env::temp_dir().to_string_lossy().into_owned();
         app

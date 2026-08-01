@@ -1017,16 +1017,31 @@ fn draw_repos(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
             };
             // A section label, not a place: no gutter, no numbers, and dim so
             // it reads as structure rather than as another row you could be on.
-            if let crate::repos::Row::Heading(label) = row {
-                return ListItem::new(Line::from(Span::styled(
-                    format!(" {label}"),
-                    Style::default().fg(DIM),
-                )));
+            //
+            // A hint is the same thing one level in -- it stands where a repo
+            // would, so it is indented to the depth of the rows it is standing
+            // in for rather than to the heading's.
+            match row {
+                crate::repos::Row::Heading(label) => {
+                    return ListItem::new(Line::from(Span::styled(
+                        format!(" {label}"),
+                        Style::default().fg(DIM),
+                    )));
+                }
+                crate::repos::Row::Hint(text) => {
+                    return ListItem::new(Line::from(Span::styled(
+                        format!("   {text}"),
+                        Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
+                    )));
+                }
+                _ => {}
             }
 
             let mut spans = vec![gutter];
             match row {
-                crate::repos::Row::Heading(_) => unreachable!("handled above"),
+                crate::repos::Row::Heading(_) | crate::repos::Row::Hint(_) => {
+                    unreachable!("handled above")
+                }
                 crate::repos::Row::Repo { index } => {
                     let r = &app.repos[*index];
                     spans.push(Span::styled(
@@ -1051,7 +1066,9 @@ fn draw_repos(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
             // that has not been read yet gets nothing rather than `0`: absent
             // and empty are different answers and must stay tellable apart.
             let store = match row {
-                crate::repos::Row::Heading(_) => unreachable!("handled above"),
+                crate::repos::Row::Heading(_) | crate::repos::Row::Hint(_) => {
+                    unreachable!("handled above")
+                }
                 crate::repos::Row::Repo { index } => app.repos[*index].store(None),
                 crate::repos::Row::Worktree { repo, index } => {
                     let r = &app.repos[*repo];
@@ -1661,12 +1678,12 @@ f          cycle filter      ^R  refresh now
 
 In the repo sidebar these keys act on repos, not on tasks:
 1          focus repos       b   show / hide the sidebar
-a          save the repo you are in, so it is here next time
+a          save the repo you are in, moving its row into `saved`
 A          save a repo by path, for one you are not in (~ works)
 D          forget a saved repo (the worktree and its store are untouched)
 
-`here` is the repo you launched in -- always listed, saved or not. `saved`
-is what a has kept, so you can switch to it from anywhere.
+`here` is the repo you launched in, while it is still unsaved; a moves it
+down into `saved`, the list you can switch to from anywhere. D moves it back.
 
 Moving the cursor switches the tree and detail panes to that worktree at
 once, just as moving the tree cursor changes the detail; enter and l just
@@ -1979,7 +1996,9 @@ mod tests {
             match shown {
                 Some(label) => {
                     let picked = match &rows[after] {
-                        crate::repos::Row::Heading(h) => (*h).to_string(),
+                        crate::repos::Row::Heading(h) | crate::repos::Row::Hint(h) => {
+                            (*h).to_string()
+                        }
                         crate::repos::Row::Repo { index } => app.repos[*index].name.clone(),
                         crate::repos::Row::Worktree { repo, index } => {
                             app.repos[*repo].worktrees[*index].branch.clone()

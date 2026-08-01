@@ -911,14 +911,18 @@ fn switch_store(app: &mut App, dex: &mut Arc<Dex>, tx: &Sender<Msg>, worktree_pa
     // records: every old expanded id would fail to match the new tree and
     // `expand_all` would never run, so the new store would open fully
     // collapsed.
+    // No status message either way. The header already names the store, in the
+    // one element the degradation ladder promises always survives -- so
+    // "switched to X" restated, one line lower and in a slot with no history,
+    // what the screen was already saying. It was noise when a switch was a
+    // deliberate `enter`; now that moving the sidebar cursor switches on every
+    // keystroke it would fire on every `j`. The same goes for "reading X…":
+    // nothing clears it, so an uncached store left a stale progress message
+    // sitting there until the next keypress, long after the ~180ms read.
     match app.store_tasks.get(&dir) {
-        Some(cached) => {
-            app.load_store(cached.clone(), dir.clone());
-            app.status = format!("switched to {}", app.store_label);
-        }
+        Some(cached) => app.load_store(cached.clone(), dir.clone()),
         None => {
             app.load_store(Vec::new(), dir.clone());
-            app.status = format!("reading {}…", app.store_label);
             // Tagged with its store, so if the cursor has moved on again by
             // the time this lands, `handle_msg` drops it rather than painting
             // one store's tasks under another's name.
@@ -1022,6 +1026,11 @@ fn register_repo(app: &mut App, worktrees: Vec<worktree::Worktree>) -> String {
                     app.repos.sort_by(|a, b| a.path.cmp(&b.path));
                 }
             }
+            // The row *does* move now -- out of `here` and down into `saved`,
+            // which is the whole point -- so the cursor has to follow it or it
+            // would be left addressing whatever slid up into that index, and
+            // in the single-repo case that index is now a heading.
+            app.select_current_store_row();
             format!("saved {path}")
         }
         Ok(false) => format!("{path} is already saved"),
@@ -2076,8 +2085,62 @@ mod tests {
                 2,
                 "the row must carry every worktree, not just the main one"
             );
-            // Three rows, so the sidebar really does draw the worktrees too.
-            assert_eq!(app.repo_rows().len(), 3);
+            // The `saved` heading and three rows under it, so the sidebar
+            // really does draw the worktrees too.
+            assert_eq!(app.repo_rows().len(), 4);
+        });
+    }
+
+    /// Saving moves the row out of `here` and into `saved`, which is what
+    /// makes `a` visible -- and the cursor has to travel with it. It does not
+    /// address a repo, it addresses an *index*, so a row that moves past it
+    /// leaves it pointing at whichever repo slid into that slot. Since the
+    /// sidebar cursor is what chooses the store, that is not a cosmetic
+    /// slip: pressing `a` would swap the other two panes to a different
+    /// project.
+    ///
+    /// Needs a second saved repo to catch. With one repo the `here` heading
+    /// leaves as the `saved` heading arrives, so every index below is
+    /// unchanged and a broken cursor still looks right.
+    #[test]
+    fn saving_carries_the_sidebar_cursor_along_with_the_row_it_moves() {
+        crate::test_support::with_isolated_registry("main-register-cursor", || {
+            let mut app = App::new(vec![], "/x/two/.dex".into(), config::Config::default());
+            app.here_path = Some("/x/two".into());
+            // Any real directory: `here` is hidden when the store behind it
+            // does not exist.
+            app.here_store = std::env::temp_dir().to_string_lossy().into_owned();
+            app.repos = ["one", "two"]
+                .iter()
+                .map(|n| repos::Repo {
+                    name: (*n).to_string(),
+                    path: format!("/x/{n}"),
+                    worktrees: worktrees_of(n),
+                    open: true,
+                    // "two" is where we are, and not saved yet.
+                    registered: *n == "one",
+                    is_global: false,
+                })
+                .collect();
+            app.select_current_store_row();
+            assert_eq!(
+                app.repo_rows()[app.selected_repo_row],
+                repos::Row::Repo { index: 1 },
+                "the cursor should start on the repo we are in"
+            );
+
+            register_repo(&mut app, worktrees_of("two"));
+
+            let rows = app.repo_rows();
+            assert_eq!(
+                rows[app.selected_repo_row],
+                repos::Row::Repo { index: 1 },
+                "the cursor stayed at its old index instead of following: {rows:?}"
+            );
+            assert!(
+                !rows.contains(&repos::Row::Heading("here")),
+                "the saved repo should have left `here`: {rows:?}"
+            );
         });
     }
 
@@ -2128,7 +2191,8 @@ mod tests {
     #[test]
     fn select_worktree_under_cursor_queues_the_switch_and_returns_focus_to_the_tree() {
         let mut app = repo_app();
-        app.selected_repo_row = 0;
+        // Row 0 is the `saved` heading; row 1 is the repo itself.
+        app.selected_repo_row = 1;
 
         select_worktree_under_cursor(&mut app);
 

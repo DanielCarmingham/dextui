@@ -15,9 +15,9 @@ pub struct Repo {
     /// Whether this repo is saved in `repos.toml`.
     ///
     /// Decides which *section* it appears under rather than whether it appears
-    /// at all: the repo you are in is always on screen, under `here`, saved or
-    /// not. Nothing marks the distinction on the row itself -- the heading
-    /// above it already does, which is the whole point of having headings.
+    /// at all: the repo you are in is always on screen, saved or not. Nothing
+    /// marks the distinction on the row itself -- the heading above it already
+    /// does, which is the whole point of having headings.
     pub registered: bool,
     /// The global store, which is what dex falls back to outside a git repo.
     ///
@@ -42,14 +42,20 @@ impl Repo {
 pub enum Row {
     /// A section label. Not selectable, and carries no store.
     Heading(&'static str),
+    /// What an empty section says instead of nothing. Not selectable either.
+    Hint(&'static str),
     Repo { index: usize },
     Worktree { repo: usize, index: usize },
 }
 
 impl Row {
-    /// Whether the cursor can rest here. Headings are labels, not places.
+    /// Whether the cursor can rest here. Labels are not places.
+    ///
+    /// Written as a positive match rather than `!matches!(Heading)`, so a
+    /// fourth kind of label defaults to *not* selectable -- the safe way
+    /// round, since a cursor that can land on a label resolves to no store.
     pub fn selectable(&self) -> bool {
-        !matches!(self, Row::Heading(_))
+        matches!(self, Row::Repo { .. } | Row::Worktree { .. })
     }
 }
 
@@ -63,19 +69,41 @@ impl Row {
 /// implicit registration or a cryptic marker. Naming the two sections costs a
 /// row each and removes the concept entirely.
 ///
-/// A repo that is both current *and* saved appears once, under `here`: it is
-/// where you are, which is the more useful thing to say about it.
+/// **`here` holds the launch repo only while it is unsaved**, and saving moves
+/// it down into `saved`. That move is the entire visible answer to "did `a`
+/// work?", and it is why the rule is this way round rather than the other.
+/// Keeping a saved repo under `here` -- on the grounds that where you are is
+/// the more useful thing to say about it -- made `a` change *nothing at all*
+/// on screen: the row it marked was already drawn, in the same place, with no
+/// marker on it by deliberate policy. The registry was written, the status bar
+/// said so for one keystroke, and the pane that exists to show the saved set
+/// looked identical before and after. So `here` now means "you are in this,
+/// and it is not in your list yet", which is the one state worth a section of
+/// its own.
 ///
-/// Headings appear only when both sections have something in them. With one
-/// repo there is nothing to distinguish, and a lone `here` over a single entry
-/// is a label explaining itself.
+/// The **`saved` heading is drawn even when the section is empty**, with a
+/// hint under it. It is where `a` puts things, so it has to be visible
+/// *before* the press for the move to read as a move afterwards -- a
+/// destination that materialises along with its first arrival is a layout
+/// change, not a confirmation.
+///
+/// The `here` heading, by contrast, appears only when that section exists:
+/// there is nothing useful to say under an empty one, and an empty `here`
+/// while you are plainly somewhere reads as the app having lost you.
 pub fn rows(repos: &[Repo], here: Option<usize>) -> Vec<Row> {
-    let saved: Vec<usize> = (0..repos.len())
-        .filter(|i| Some(*i) != here && repos[*i].registered)
-        .collect();
-    let label = here.is_some() && !saved.is_empty();
+    let here = here.filter(|i| !repos[*i].registered);
+    // Every saved repo, including the one you are in -- which is exactly what
+    // `here` above has just stopped claiming.
+    let saved: Vec<usize> = (0..repos.len()).filter(|i| repos[*i].registered).collect();
 
     let mut out = Vec::new();
+    // Nothing at all: no headings over an empty pane, and in particular no
+    // "nothing saved yet" hint in a run that has no sidebar content to hint
+    // about.
+    if here.is_none() && saved.is_empty() {
+        return out;
+    }
+
     let push_repo = |out: &mut Vec<Row>, i: usize| {
         out.push(Row::Repo { index: i });
         if repos[i].open {
@@ -86,13 +114,12 @@ pub fn rows(repos: &[Repo], here: Option<usize>) -> Vec<Row> {
     };
 
     if let Some(i) = here {
-        if label {
-            out.push(Row::Heading("here"));
-        }
+        out.push(Row::Heading("here"));
         push_repo(&mut out, i);
     }
-    if label {
-        out.push(Row::Heading("saved"));
+    out.push(Row::Heading("saved"));
+    if saved.is_empty() {
+        out.push(Row::Hint("nothing saved yet"));
     }
     for i in saved {
         push_repo(&mut out, i);
@@ -140,10 +167,12 @@ mod tests {
         }
     }
 
-    /// Both sections present, so both are labelled.
+    /// Both sections present, so both are labelled. `b` is where we are and
+    /// is not saved yet, so it leads under `here`.
     #[test]
     fn here_and_saved_are_labelled_when_both_have_something_in_them() {
-        let rs = vec![repo("a", true), repo("b", true)];
+        let mut rs = vec![repo("a", true), repo("b", true)];
+        rs[1].registered = false;
         let r = rows(&rs, Some(1));
         assert_eq!(r[0], Row::Heading("here"));
         assert_eq!(r[1], Row::Repo { index: 1 }, "the current repo leads");
@@ -151,23 +180,56 @@ mod tests {
         assert_eq!(r[5], Row::Repo { index: 0 });
     }
 
-    /// One section is no distinction, and a lone `here` over a single entry is
-    /// a label explaining itself.
+    /// The whole point of the rule: `a` has to move the row, because moving it
+    /// is the only thing on screen that says the press did anything. Before,
+    /// the current repo stayed under `here` and the pane was byte-identical
+    /// either side of a successful registration.
     #[test]
-    fn a_single_section_gets_no_heading() {
-        let rs = vec![repo("a", true)];
+    fn saving_the_repo_you_are_in_moves_it_from_here_to_saved() {
+        let mut rs = vec![repo("a", true)];
+        rs[0].registered = false;
+
+        let before = rows(&rs, Some(0));
+        assert_eq!(before[0], Row::Heading("here"));
+        assert_eq!(before[1], Row::Repo { index: 0 });
         assert!(
-            rows(&rs, Some(0)).iter().all(|r| r.selectable()),
-            "a lone section should not be labelled"
+            before.contains(&Row::Hint("nothing saved yet")),
+            "the destination has to be on screen before the press: {before:?}"
         );
+
+        rs[0].registered = true;
+        let after = rows(&rs, Some(0));
         assert!(
-            rows(&rs, None).iter().all(|r| r.selectable()),
-            "saved-only with nothing current should not be labelled either"
+            !after.contains(&Row::Heading("here")),
+            "`here` should have emptied and gone: {after:?}"
         );
+        assert_eq!(after[0], Row::Heading("saved"));
+        assert_eq!(after[1], Row::Repo { index: 0 });
+        assert_ne!(before, after, "registering must change what is drawn");
     }
 
-    /// Current *and* saved appears once, under `here` -- it is where you are,
-    /// which is the more useful thing to say about it.
+    /// A lone `saved` section keeps its heading, so the repo that has just
+    /// arrived under it is visibly *under something*. `here` gets no such
+    /// treatment -- see `rows`.
+    #[test]
+    fn saved_keeps_its_heading_alone_but_here_does_not_appear_empty() {
+        let rs = vec![repo("a", true)];
+        let r = rows(&rs, Some(0));
+        assert_eq!(r[0], Row::Heading("saved"));
+        assert!(!r.contains(&Row::Heading("here")));
+    }
+
+    /// Nothing registered and nowhere to be: an empty pane, not a pair of
+    /// headings over a hint about a feature there is no repo to use it on.
+    #[test]
+    fn an_empty_sidebar_draws_nothing_at_all() {
+        assert_eq!(rows(&[], None), vec![]);
+        let mut rs = vec![repo("a", true)];
+        rs[0].registered = false;
+        assert_eq!(rows(&rs, None), vec![], "an unsaved repo you are not in");
+    }
+
+    /// Current *and* saved appears once, under `saved`.
     #[test]
     fn a_repo_that_is_both_current_and_saved_is_not_listed_twice() {
         let rs = vec![repo("a", true), repo("b", true)];
@@ -196,6 +258,7 @@ mod tests {
         assert_eq!(
             rows(&rs, None),
             vec![
+                Row::Heading("saved"),
                 Row::Repo { index: 0 },
                 Row::Worktree { repo: 0, index: 0 },
                 Row::Worktree { repo: 0, index: 1 },
@@ -206,16 +269,19 @@ mod tests {
     #[test]
     fn a_closed_repo_hides_its_worktrees() {
         let rs = vec![repo("one", false)];
-        assert_eq!(rows(&rs, None), vec![Row::Repo { index: 0 }]);
+        assert_eq!(
+            rows(&rs, None),
+            vec![Row::Heading("saved"), Row::Repo { index: 0 }]
+        );
     }
 
     #[test]
     fn repos_keep_their_order_and_do_not_interleave() {
         let rs = vec![repo("a", true), repo("b", false), repo("c", true)];
         let r = rows(&rs, None);
-        assert_eq!(r[0], Row::Repo { index: 0 });
-        assert_eq!(r[3], Row::Repo { index: 1 });
-        assert_eq!(r[4], Row::Repo { index: 2 });
+        assert_eq!(r[1], Row::Repo { index: 0 });
+        assert_eq!(r[4], Row::Repo { index: 1 });
+        assert_eq!(r[5], Row::Repo { index: 2 });
     }
 
     /// dex stores live in `.dex` under the worktree, and this is the one place
@@ -248,6 +314,10 @@ mod tests {
             is_global: true,
         };
         assert_eq!(g.store(None), "/home/u/.config/dex/local");
-        assert_eq!(rows(&[g], Some(0)), vec![Row::Repo { index: 0 }], "no worktree rows");
+        let r = rows(&[g], Some(0));
+        assert!(
+            !r.iter().any(|x| matches!(x, Row::Worktree { .. })),
+            "the global store has no worktrees: {r:?}"
+        );
     }
 }
