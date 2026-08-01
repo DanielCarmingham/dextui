@@ -393,14 +393,31 @@ A caution learned drawing it: in the nerd tier the meter is U+EE00–EE05, which
 `tmux capture-pane -p` dumps as blanks. A text capture will tell you the bar is
 missing when it is on screen. Check the codepoints, not the transcript.
 
-**The sidebar always carries the store being read**, registered or not. Without
-that, launching anywhere unregistered showed an empty pane beside a full task
-tree — a box saying "no repos" while you are plainly looking at one — and `a`
-appeared to *create* the repo rather than to keep it. `main::current_repo`
-builds that row at startup, `Repo::registered` is what marks it (a dim `·`, not
-a colour: the four colours all mean task states and a fifth meaning here would
-break that language), and the list is sorted by path either way so registering
-moves the marker and never the row.
+**The sidebar is two sections, `here` and `saved`, because it answers two
+questions.** "Where am I" is told by the working directory and needs no memory
+at all; "where else can I go" is precisely a remembered set. Showing the first
+*inside* the second forced the repo you are in to be either a member of a list
+it had never joined — an implicit registration — or a member with an asterisk,
+which is what the dim `·` was. Both read as odd, because both were describing a
+thing that did not need describing.
+
+Naming the sections costs a row each and removes the concept. `here` never
+claims to be saved, so nothing on the row has to say so; `a` saves the current
+repo, `D` forgets a saved one. `repos::rows` takes the current repo's index and
+splits on it, and `Repo::registered` now decides which *section* a repo is in
+rather than whether it appears at all.
+
+Three rules fall out:
+
+- **Both sections, or no headings.** With one section there is nothing to
+  distinguish, and a lone `here` over a single entry is a label explaining
+  itself.
+- **Current *and* saved appears once, under `here`** — it is where you are,
+  which is the more useful thing to say about it.
+- **Headings are not places.** `Row::Heading` is unselectable, so the cursor
+  steps over it (`App::nearest_selectable`, searching in the direction of
+  travel and then back), a click on one does nothing, and
+  `selected_worktree_path` returns `None` rather than a store.
 
 Three consequences, each of them a thing that would otherwise be silently
 wrong:

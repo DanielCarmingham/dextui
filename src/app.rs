@@ -1156,7 +1156,45 @@ impl App {
     /// rebuilt every frame -- a cached `Vec<Row>` would go stale the moment the
     /// repo list changed underneath it, since `Row` carries bare indices.
     pub fn repo_rows(&self) -> Vec<crate::repos::Row> {
-        crate::repos::rows(&self.repos)
+        crate::repos::rows(&self.repos, self.here_repo())
+    }
+
+    /// Which repo the app is currently reading, if any -- the one that goes
+    /// under `here`.
+    fn here_repo(&self) -> Option<usize> {
+        self.repos.iter().position(|r| self.is_current_store(r))
+    }
+
+    /// The nearest row the cursor may rest on, searching in the direction of
+    /// travel and then back the other way.
+    ///
+    /// Headings are labels, so the cursor has to pass over them rather than
+    /// land on them -- and `j` at the bottom of a section must not stick.
+    /// Searching outward in both directions also means a cursor left on a
+    /// heading by a list that changed under it recovers instead of freezing.
+    fn nearest_selectable(&self, from: usize, forward: bool) -> Option<usize> {
+        let rows = self.repo_rows();
+        if rows.is_empty() {
+            return None;
+        }
+        let n = rows.len();
+        let ahead: Box<dyn Iterator<Item = usize>> = if forward {
+            Box::new(from..n)
+        } else {
+            Box::new((0..=from.min(n - 1)).rev())
+        };
+        for i in ahead {
+            if rows[i].selectable() {
+                return Some(i);
+            }
+        }
+        // Nothing that way -- a heading at the very end. Turn round.
+        let back: Box<dyn Iterator<Item = usize>> = if forward {
+            Box::new((0..from.min(n)).rev())
+        } else {
+            Box::new(from.min(n - 1)..n)
+        };
+        back.into_iter().find(|i| rows[*i].selectable())
     }
 
     /// Moves the sidebar cursor, clamped the same way `move_selection` clamps
@@ -1166,8 +1204,10 @@ impl App {
         if len == 0 {
             return;
         }
-        let current = self.selected_repo_row as isize;
-        self.selected_repo_row = (current + delta).clamp(0, len as isize - 1) as usize;
+        let target = (self.selected_repo_row as isize + delta).clamp(0, len as isize - 1) as usize;
+        if let Some(i) = self.nearest_selectable(target, delta >= 0) {
+            self.selected_repo_row = i;
+        }
     }
 
     /// Selects the sidebar row drawn on `row`, if any -- the mouse half of
@@ -1183,8 +1223,10 @@ impl App {
             return;
         };
         // Past the last row is dead space: it must not move the cursor to the
-        // end, which is what clamping would do.
-        if index < self.repo_rows().len() {
+        // end, which is what clamping would do. A heading is dead space too --
+        // clicking a label should no more move the cursor than clicking below
+        // the list does.
+        if self.repo_rows().get(index).is_some_and(|r| r.selectable()) {
             self.selected_repo_row = index;
         }
     }
@@ -1203,11 +1245,16 @@ impl App {
     }
 
     pub fn select_first_repo_row(&mut self) {
-        self.selected_repo_row = 0;
+        if let Some(i) = self.nearest_selectable(0, true) {
+            self.selected_repo_row = i;
+        }
     }
 
     pub fn select_last_repo_row(&mut self) {
-        self.selected_repo_row = self.repo_rows().len().saturating_sub(1);
+        let last = self.repo_rows().len().saturating_sub(1);
+        if let Some(i) = self.nearest_selectable(last, false) {
+            self.selected_repo_row = i;
+        }
     }
 
     /// The repo owning the row under the sidebar cursor -- a worktree row
@@ -1217,6 +1264,7 @@ impl App {
         let index = match self.repo_rows().get(self.selected_repo_row)? {
             crate::repos::Row::Repo { index } => *index,
             crate::repos::Row::Worktree { repo, .. } => *repo,
+            crate::repos::Row::Heading(_) => return None,
         };
         self.repos.get(index)
     }
@@ -1226,6 +1274,7 @@ impl App {
     /// reports first and which shares the repo's own registered path.
     pub fn selected_worktree_path(&self) -> Option<String> {
         match self.repo_rows().get(self.selected_repo_row)? {
+            crate::repos::Row::Heading(_) => None,
             crate::repos::Row::Repo { index } => self.repos.get(*index).map(|r| r.path.clone()),
             crate::repos::Row::Worktree { repo, index } => self
                 .repos
@@ -1257,6 +1306,7 @@ impl App {
     pub fn select_current_store_row(&mut self) {
         let rows = self.repo_rows();
         let found = rows.iter().position(|row| match row {
+            crate::repos::Row::Heading(_) => false,
             crate::repos::Row::Repo { index } => self.repos[*index].store(None) == self.store_dir,
             crate::repos::Row::Worktree { repo, index } => {
                 let r = &self.repos[*repo];
@@ -1773,8 +1823,10 @@ mod tests {
 
         app.select_current_store_row();
 
-        // [Repo(one), one/main, one/feat, Repo(two), two/main, two/feat]
-        assert_eq!(app.selected_repo_row, 5);
+        // By what it resolves to, not by index: the row's *position* moves
+        // when the current repo is lifted into `here`, and an index would
+        // pin the layout rather than the behaviour.
+        assert_eq!(app.selected_worktree_path().as_deref(), Some("/x/two-feat"));
     }
 
     /// `store_for_path` is the single place that knows a row's store is not
@@ -1948,6 +2000,55 @@ mod tests {
 
         assert_eq!(app.focus, Focus::Repos);
         assert_eq!(app.panes(), Panes::Three, "1 could not bring the sidebar back");
+    }
+
+    /// Headings are labels, so the cursor passes over them rather than landing
+    /// on one -- `j` at the end of a section must not stick.
+    #[test]
+    fn the_sidebar_cursor_steps_over_section_headings() {
+        let mut app = app_with_repos();
+        app.store_dir = "/x/two/.dex".into();
+        app.select_current_store_row();
+
+        let rows = app.repo_rows();
+        assert!(
+            rows.iter().any(|r| !r.selectable()),
+            "fixture should have headings: {rows:?}"
+        );
+
+        // Walk the whole list in both directions; never rest on a label.
+        for _ in 0..rows.len() + 2 {
+            app.move_repo_row(1);
+            assert!(app.repo_rows()[app.selected_repo_row].selectable());
+        }
+        for _ in 0..rows.len() + 2 {
+            app.move_repo_row(-1);
+            assert!(app.repo_rows()[app.selected_repo_row].selectable());
+        }
+
+        app.select_first_repo_row();
+        assert!(app.repo_rows()[app.selected_repo_row].selectable(), "g landed on a label");
+        app.select_last_repo_row();
+        assert!(app.repo_rows()[app.selected_repo_row].selectable(), "G landed on a label");
+    }
+
+    /// Clicking a label should no more move the cursor than clicking below the
+    /// list does.
+    #[test]
+    fn clicking_a_section_heading_does_nothing() {
+        let mut app = app_with_repos();
+        app.store_dir = "/x/two/.dex".into();
+        app.select_current_store_row();
+        let heading = app
+            .repo_rows()
+            .iter()
+            .position(|r| !r.selectable())
+            .expect("fixture should have a heading");
+
+        let before = app.selected_repo_row;
+        app.select_repo_at_row(app.body_top + 1 + heading as u16);
+
+        assert_eq!(app.selected_repo_row, before);
     }
 
     /// A click in the sidebar selects the row under it, exactly as the tree

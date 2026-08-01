@@ -985,13 +985,13 @@ fn register_repo(app: &mut App, worktrees: Vec<worktree::Worktree>) -> String {
                     app.repos.sort_by(|a, b| a.path.cmp(&b.path));
                 }
             }
-            format!("registered {path}")
+            format!("saved {path}")
         }
-        Ok(false) => format!("{path} is already registered"),
+        Ok(false) => format!("{path} is already saved"),
         Err(e) => {
             let e = flatten(&e);
             log::line("registry", &format!("save failed: {e}"));
-            format!("could not register: {e}")
+            format!("could not save: {e}")
         }
     }
 }
@@ -1171,13 +1171,13 @@ fn handle_key(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>) {
                     app.status = match app.unregister_repo_path(path) {
                         Ok(true) => {
                             log::line("registry", &format!("saved: removed {path}"));
-                            format!("unregistered {path}")
+                            format!("forgot {path}")
                         }
-                        Ok(false) => format!("{path} was not registered"),
+                        Ok(false) => format!("{path} was not saved"),
                         Err(e) => {
                             let e = flatten(&e);
                             log::line("registry", &format!("save failed: {e}"));
-                            format!("could not unregister {path}: {e}")
+                            format!("could not forget {path}: {e}")
                         }
                     };
                 } else {
@@ -1977,7 +1977,7 @@ mod tests {
 
             let status = register_repo(&mut app, worktrees_of("one"));
 
-            assert!(status.contains("registered"), "status: {status}");
+            assert!(status.contains("saved"), "status: {status}");
             assert_eq!(app.repos.len(), 1, "the sidebar row was not added");
             assert_eq!(app.repos[0].path, "/x/one");
             assert_eq!(app.repos[0].name, "one");
@@ -2006,7 +2006,7 @@ mod tests {
             assert_eq!(paths, vec!["/x/one", "/x/two"], "rows are not in registry order");
 
             let status = register_repo(&mut app, worktrees_of("one"));
-            assert!(status.contains("already registered"), "status: {status}");
+            assert!(status.contains("already saved"), "status: {status}");
             assert_eq!(app.repos.len(), 2, "a duplicate row was added");
         });
     }

@@ -37,7 +37,7 @@ const SHORTCUTS: &str =
 /// that is not a task. A single strip advertising `a sub` beside a focused
 /// sidebar was not a shorter truth, it was a wrong one.
 const REPO_SHORTCUTS: &str =
-    " enter tasks  a register repo  D unregister  b hide  tab next pane  ? help";
+    " enter tasks  a save repo  D unsave  b hide  tab next pane  ? help";
 
 /// Width of the inline progress meter, in cells.
 const METER_WIDTH: usize = 7;
@@ -1006,21 +1006,24 @@ fn draw_repos(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
             } else {
                 Span::raw("  ")
             };
+            // A section label, not a place: no gutter, no numbers, and dim so
+            // it reads as structure rather than as another row you could be on.
+            if let crate::repos::Row::Heading(label) = row {
+                return ListItem::new(Line::from(Span::styled(
+                    format!(" {label}"),
+                    Style::default().fg(DIM),
+                )));
+            }
+
             let mut spans = vec![gutter];
             match row {
+                crate::repos::Row::Heading(_) => unreachable!("handled above"),
                 crate::repos::Row::Repo { index } => {
                     let r = &app.repos[*index];
                     spans.push(Span::styled(
                         format!("{} {}", ic.marker(true, r.open), r.name),
                         Style::default().fg(PLAIN).add_modifier(Modifier::BOLD),
                     ));
-                    // A repo on screen only because it is the one being read,
-                    // rather than because anyone saved it. Marked, not hidden
-                    // and not coloured: the four colours all mean task states,
-                    // and a fifth meaning here would break that language.
-                    if !r.registered {
-                        spans.push(Span::styled(" ·", Style::default().fg(DIM)));
-                    }
                 }
                 crate::repos::Row::Worktree { repo, index } => {
                     let r = &app.repos[*repo];
@@ -1039,6 +1042,7 @@ fn draw_repos(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
             // that has not been read yet gets nothing rather than `0`: absent
             // and empty are different answers and must stay tellable apart.
             let store = match row {
+                crate::repos::Row::Heading(_) => unreachable!("handled above"),
                 crate::repos::Row::Repo { index } => app.repos[*index].store(None),
                 crate::repos::Row::Worktree { repo, index } => {
                     let r = &app.repos[*repo];
@@ -1648,8 +1652,11 @@ f          cycle filter      ^R  refresh now
 
 In the repo sidebar these keys act on repos, not on tasks:
 1          focus repos       b   show / hide the sidebar
-a          register the repo dextui is running in
-D          unregister the entry (the worktree and its store are untouched)
+a          save the repo you are in, so it is here next time
+D          forget a saved repo (the worktree and its store are untouched)
+
+`here` is the repo you launched in -- always listed, saved or not. `saved`
+is what a has kept, so you can switch to it from anywhere.
 
 Moving the cursor switches the tree and detail panes to that worktree at
 once, just as moving the tree cursor changes the detail; enter and l just
@@ -1962,6 +1969,7 @@ mod tests {
             match shown {
                 Some(label) => {
                     let picked = match &rows[after] {
+                        crate::repos::Row::Heading(h) => (*h).to_string(),
                         crate::repos::Row::Repo { index } => app.repos[*index].name.clone(),
                         crate::repos::Row::Worktree { repo, index } => {
                             app.repos[*repo].worktrees[*index].branch.clone()
@@ -2210,7 +2218,7 @@ mod tests {
 
         // The strip swaps while the sidebar has focus, because `a` means
         // something else there.
-        for key in ["a register", "D unregister", "b hide"] {
+        for key in ["a save", "D unsave", "b hide"] {
             assert!(
                 REPO_SHORTCUTS.contains(key),
                 "the sidebar strip does not advertise {key}: {REPO_SHORTCUTS}"
@@ -2223,7 +2231,7 @@ mod tests {
 
         // And the help names each of them too.
         assert!(HELP.contains("1          focus repos"), "help: 1 focuses the sidebar");
-        assert!(HELP.contains("a          register the repo"), "help: a registers");
+        assert!(HELP.contains("a          save the repo you are in"), "help: a saves");
         assert!(
             HELP.contains("b   show / hide the sidebar"),
             "help: b hides the sidebar"
@@ -2232,7 +2240,7 @@ mod tests {
             HELP.contains("switches the tree and detail panes to that worktree"),
             "the help still implies the sidebar needs a commit key"
         );
-        assert!(HELP.contains("D          unregister"), "help: D unregisters");
+        assert!(HELP.contains("D          forget a saved repo"), "help: D forgets");
         assert!(
             HELP.contains("follow it over to the tasks"),
             "help: enter follows the cursor to the tasks"
@@ -2275,7 +2283,7 @@ mod tests {
         // The first line, the last, and one from each block in between.
         for line in [
             "tab / ⇧tab next / prev pane",
-            "D          unregister",
+            "D          forget a saved repo",
             "b   show / hide the sidebar",
             "follow it over to the tasks.",
             "dialog are never disturbed.",
