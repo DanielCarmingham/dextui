@@ -873,6 +873,74 @@ fn draw_header(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(right)), right_area);
 }
 
+/// One sidebar row's statistics, in the richest form that fits `room`.
+///
+/// Escalates with the sidebar's width rather than committing to one shape: at
+/// twelve columns there is room for a single number, at forty for the whole
+/// picture, and which you get should follow the pane you dragged.
+///
+/// The ladder is ordered richest-first and every rung is a **prefix** of the
+/// one above it, so widening can only ever add. That is the rule `header_sides`
+/// had to learn the hard way -- an element that came *back* as the pane got
+/// smaller made the layout look broken -- and it is cheaper to obey here from
+/// the start than to discover again.
+///
+/// Colour is the only key, which is why it can afford to be: yellow, blue,
+/// green and red already mean todo, in progress, done and blocked everywhere
+/// else in this app, so bare numbers in those colours need no labels. Zeros
+/// are omitted rather than drawn, the same way the header omits them.
+fn repo_stat_spans(c: Counts, room: usize, ic: &Icons) -> Vec<Span<'static>> {
+    let sep = || Span::raw(" ");
+
+    let mut numbers: Vec<Span<'static>> = Vec::new();
+    let mut push = |n: usize, fg: Color| {
+        if n > 0 {
+            if !numbers.is_empty() {
+                numbers.push(sep());
+            }
+            numbers.push(Span::styled(n.to_string(), Style::default().fg(fg)));
+        }
+    };
+    // Same order as the header's split, so the two never disagree about what
+    // comes first; `done` trails it because the bar above already says so and
+    // this is the one number that only grows.
+    push(c.active, ACTIVE);
+    push(c.ready, TODO);
+    push(c.blocked, BLOCKED);
+    push(c.completed, DONE);
+
+    // The bar is the task tree's own rollup meter, not a second thing that
+    // looks like one -- same arithmetic, same glyph tiers, same three colours.
+    let bar = |width: usize| {
+        bar_spans(
+            Progress { done: c.completed, active: c.active, total: c.total },
+            ic,
+            width,
+        )
+    };
+
+    let pending_only = || -> Vec<Span<'static>> {
+        if c.pending == 0 {
+            return Vec::new();
+        }
+        vec![Span::styled(c.pending.to_string(), Style::default().fg(TODO))]
+    };
+
+    let mut ladder: Vec<Vec<Span<'static>>> = Vec::new();
+    if c.total > 0 {
+        ladder.push([bar(METER_WIDTH), vec![sep()], numbers.clone()].concat());
+        ladder.push([bar(4), vec![sep()], numbers.clone()].concat());
+    }
+    ladder.push(numbers);
+    ladder.push(pending_only());
+    ladder.push(Vec::new());
+
+    ladder
+        .into_iter()
+        .find(|spans| span_width(spans) <= room)
+        .unwrap_or_default()
+}
+
 /// A scrollbar in the pane's right border, inset past both corners.
 ///
 /// Handed the pane's whole `Rect`, ratatui puts the bar on its rightmost
@@ -950,13 +1018,16 @@ fn draw_repos(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
                     r.store(Some(&r.worktrees[*index]))
                 }
             };
-            if let Some(c) = app.counts_for_store(&store).filter(|c| c.pending > 0) {
-                let tail = c.pending.to_string();
-                let used = span_width(&spans) + tail.chars().count();
+            if let Some(c) = app.counts_for_store(&store) {
                 let inner = area.width.saturating_sub(2) as usize;
-                if used < inner {
-                    spans.push(Span::raw(" ".repeat(inner - used)));
-                    spans.push(Span::styled(tail, Style::default().fg(TODO)));
+                // At least a space between the name and the numbers, so a long
+                // branch name cannot run straight into them.
+                let room = inner.saturating_sub(span_width(&spans) + 1);
+                let stats = repo_stat_spans(c, room, ic);
+                if !stats.is_empty() {
+                    let pad = inner - span_width(&spans) - span_width(&stats);
+                    spans.push(Span::raw(" ".repeat(pad)));
+                    spans.extend(stats);
                 }
             }
             ListItem::new(Line::from(spans))
@@ -2268,6 +2339,57 @@ mod tests {
         assert_eq!(fold("a\n\nb", 10), ["a", "", "b"]);
         // Width 0 has no wrap to do, and must not loop forever trying.
         assert_eq!(fold("anything at all", 0), ["anything at all"]);
+    }
+
+    /// The ladder must escalate with room and never bring something back as
+    /// room shrinks -- the rule `header_sides` learned the hard way.
+    #[test]
+    fn the_sidebar_stats_escalate_with_the_room_and_only_ever_shed() {
+        let c = Counts {
+            total: 13,
+            completed: 4,
+            pending: 9,
+            active: 1,
+            blocked: 0,
+            ready: 8,
+            percent: 30,
+        };
+        let ic = &crate::icons::UNICODE;
+
+        let mut widths: Vec<(usize, usize)> = Vec::new();
+        for room in 0..40 {
+            let w = span_width(&repo_stat_spans(c, room, ic));
+            assert!(w <= room, "room {room} overrun by {w}");
+            widths.push((room, w));
+        }
+
+        // Monotone: more room never shows less.
+        for pair in widths.windows(2) {
+            assert!(
+                pair[1].1 >= pair[0].1,
+                "room {} showed {} cells, room {} showed {} -- it went backwards",
+                pair[0].0,
+                pair[0].1,
+                pair[1].0,
+                pair[1].1
+            );
+        }
+
+        // And all three rungs are actually reachable.
+        let at = |room| {
+            repo_stat_spans(c, room, ic)
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<String>()
+        };
+        assert_eq!(at(0), "", "no room means nothing");
+        assert_eq!(at(1), "9", "the narrowest rung is the unfinished count");
+        assert_eq!(at(6), "1 8 4", "then every state, colour-coded");
+        assert!(
+            span_width(&repo_stat_spans(c, 30, ic)) > 6,
+            "the widest rung should add the bar: {:?}",
+            at(30)
+        );
     }
 
     /// The markers must be read off the hint row alone: `HELP` documents the

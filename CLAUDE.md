@@ -359,6 +359,29 @@ state so the first press always does the visible thing. Hiding it while it has
 focus returns you to the tree, since `Tab` never lands there; and `1` reveals
 it, so `b` cannot be a way to lose the pane with no way to ask for it back.
 
+**Each sidebar row's numbers escalate with the pane's width.** One rung is not
+enough for a pane that now drags from twelve columns to half the terminal, so
+`repo_stat_spans` walks a ladder: the outstanding count alone, then every state
+as colour-coded numbers, then the task tree's own rollup meter alongside them.
+Three rules it inherits rather than invents:
+
+- **Richest first, and every rung a prefix of the one above**, so widening can
+  only ever add. `header_sides` learned that the hard way — an element that
+  came *back* as the pane narrowed made the layout look broken — and
+  `the_sidebar_stats_escalate_with_the_room_and_only_ever_shed` checks every
+  width from 0 to 40 rather than a few chosen ones.
+- **Colour is the only key**, which it can afford to be because yellow, blue,
+  green and red already mean todo, in progress, done and blocked everywhere
+  else here. Bare numbers in those colours need no labels; zeros are omitted
+  rather than drawn, as in the header.
+- **The bar is `bar_spans`**, the same meter the task tree rolls up with — same
+  arithmetic, same glyph tiers, same three colours — not a second thing that
+  looks like one.
+
+A caution learned drawing it: in the nerd tier the meter is U+EE00–EE05, which
+`tmux capture-pane -p` dumps as blanks. A text capture will tell you the bar is
+missing when it is on screen. Check the codepoints, not the transcript.
+
 **The sidebar always carries the store being read**, registered or not. Without
 that, launching anywhere unregistered showed an empty pane beside a full task
 tree — a box saying "no repos" while you are plainly looking at one — and `a`
