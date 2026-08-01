@@ -355,7 +355,9 @@ fn main() -> std::io::Result<()> {
     // beside a full task tree -- a pane saying "no repos" while you are plainly
     // looking at one -- and `a` appeared to *create* the repo rather than to
     // keep it.
+    let mut here_path = None;
     if let Some(here) = current_repo(&store_dir, &mut repo_problems) {
+        here_path = Some(here.path.clone());
         if !repos.iter().any(|r| r.path == here.path) {
             repos.push(here);
         }
@@ -367,6 +369,9 @@ fn main() -> std::io::Result<()> {
     let mut app = App::new(tasks, store_dir.clone(), cfg);
     app.registry = registry;
     app.repos = repos;
+    // Fixed for the run: `here` is where dextui was launched, which switching
+    // stores does not change. `App::new` already recorded the store.
+    app.here_path = here_path;
     app.status = [
         config_problem.map(|c| format!("config: {c}")),
         registry_problem.map(|r| format!("repos: {r}")),
@@ -930,6 +935,38 @@ fn switch_store(app: &mut App, dex: &mut Arc<Dex>, tx: &Sender<Msg>, worktree_pa
     }
 }
 
+/// Saves the repo at a typed path, so a repo you are *not* in can be added.
+///
+/// `~` is expanded here rather than by a shell: nothing in this app goes
+/// through one, so a pasted `~/Developer/thing` would otherwise be taken
+/// literally and fail on a directory that does not exist.
+///
+/// Any path *inside* a repo works, not just its root: `git worktree list`
+/// reports the main checkout first whatever you point it at, so pasting a
+/// worktree or a subdirectory saves the repo that owns it. Forgiving in the
+/// direction that costs nothing.
+fn save_repo_at(app: &mut App, typed: &str) -> String {
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return String::new();
+    }
+    let expanded = match typed.strip_prefix("~") {
+        Some(rest) => match std::env::var_os("HOME") {
+            Some(home) => format!("{}{rest}", home.to_string_lossy()),
+            None => return "cannot expand ~: HOME is not set".to_string(),
+        },
+        None => typed.to_string(),
+    };
+
+    if !std::path::Path::new(&expanded).is_dir() {
+        return format!("{expanded} is not a directory");
+    }
+    match worktree::list(&expanded) {
+        Ok(worktrees) => register_repo(app, worktrees),
+        Err(e) => format!("{expanded} is not a git repo: {}", flatten(&e)),
+    }
+}
+
 /// Registers the repo dextui is currently running against -- not whatever row
 /// the cursor happens to be on in the sidebar. `git worktree list` always
 /// reports the main checkout first, so that entry is "the repo that has the
@@ -1388,6 +1425,17 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
             refresh(dex, tx, app)
         }
 
+        // `A` saves a repo you are *not* in, by path. `a` still saves the one
+        // you are, which is the common case and worth the unshifted key.
+        KeyCode::Char('A') => {
+            app.mode = Mode::Prompt(Prompt {
+                title: "Save a repo".into(),
+                label: "Path".into(),
+                input: app::TextInput::default(),
+                pending: Pending::SaveRepo,
+            });
+        }
+
         KeyCode::Char('?') => app.open_help(),
         // Reuses the $EDITOR machinery rather than building a settings form.
         KeyCode::Char(',') => app.pending_config_edit = true,
@@ -1540,6 +1588,16 @@ fn submit(app: &mut App, p: Prompt, dex: &Arc<Dex>, tx: &Sender<Msg>) {
 
     match p.pending {
         // Two-step flows chain into a second prompt rather than acting yet.
+        // The one prompt that is not about a task. Validated here rather than
+        // saved on faith: a path that is not a git repo would go into
+        // `repos.toml` and come back as a row that could never resolve a
+        // store, and dex reports a missing store as an *empty project* rather
+        // than an error -- so an unchecked typo becomes a repo that silently
+        // shows no tasks.
+        Pending::SaveRepo => {
+            app.status = save_repo_at(app, &value);
+        }
+
         Pending::CreateName { parent } => {
             if value.trim().is_empty() {
                 close_modal(app, dex, tx);
@@ -1677,6 +1735,38 @@ mod tests {
         ] {
             assert_eq!(help_key(key).0, None, "{key:?} should have dismissed the help");
         }
+    }
+
+    /// `A` saves a repo you are not in, so the path is typed rather than
+    /// discovered -- and an unchecked one is worse than a rejected one. dex
+    /// reports a store that does not exist as an *empty project* rather than
+    /// an error, so a typo saved on faith becomes a permanent row that shows
+    /// no tasks and never explains why.
+    #[test]
+    fn saving_a_repo_by_path_rejects_what_is_not_a_git_repo() {
+        let mut app = App::new(vec![], "demo".into(), crate::config::Config::default());
+
+        assert!(save_repo_at(&mut app, "  ").is_empty(), "blank is a no-op, not an error");
+
+        let missing = save_repo_at(&mut app, "/nonexistent-path-for-tests");
+        assert!(missing.contains("not a directory"), "{missing}");
+
+        // A real directory that is not a repo: reported, and nothing saved.
+        let not_a_repo = save_repo_at(&mut app, "/tmp");
+        assert!(not_a_repo.contains("not a git repo"), "{not_a_repo}");
+        assert!(app.repos.is_empty(), "a rejected path must not leave a row");
+    }
+
+    /// `~` is expanded here because nothing in this app goes through a shell,
+    /// so a pasted `~/thing` would otherwise be taken literally.
+    #[test]
+    fn saving_a_repo_by_path_expands_a_leading_tilde() {
+        let mut app = App::new(vec![], "demo".into(), crate::config::Config::default());
+        let home = std::env::var("HOME").expect("HOME is set in tests");
+
+        let msg = save_repo_at(&mut app, "~/definitely-not-here-xyz");
+
+        assert!(msg.starts_with(&home), "the tilde was not expanded: {msg}");
     }
 
     /// Outside a git repo dex silently falls back to a global store, and the

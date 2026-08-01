@@ -66,6 +66,11 @@ pub enum Pending {
     CreateName { parent: Option<String> },
     CreateDescription { parent: Option<String>, name: String },
     EditName { id: String },
+    /// A path typed into the sidebar's "save a repo" prompt.
+    ///
+    /// The only prompt that is not about a task, which is why it carries
+    /// nothing: everything it needs is what was typed.
+    SaveRepo,
 }
 
 #[derive(Debug, Clone)]
@@ -274,6 +279,12 @@ pub struct App {
     /// app also only draws when something *it* knows about has changed.
     pub force_redraw: bool,
     pub registry: crate::registry::Registry,
+    /// The repo dextui was launched in, and the store it resolved there.
+    ///
+    /// Both fixed for the run: `here` means where you are, which switching
+    /// stores does not change. Empty on a launch that resolved no repo.
+    pub here_path: Option<String>,
+    pub here_store: String,
     /// Every sidebar store's task list, keyed by store directory.
     ///
     /// This is what lets moving the sidebar cursor change the panes as
@@ -293,6 +304,9 @@ impl App {
     /// label is derived from it here, the same way `load_store` does it, so
     /// the two can never be set to different stores. See `App::store_dir`.
     pub fn new(tasks: Vec<Task>, store_dir: String, cfg: Config) -> Self {
+        // Captured before the field takes ownership: `here_store` is the store
+        // this run *launched* with, and never changes with `load_store`.
+        let here_store = store_dir.clone();
         let mut app = Self {
             by_id: index(&tasks),
             tasks,
@@ -344,6 +358,8 @@ impl App {
             repos_offset: 0,
             force_redraw: false,
             registry: crate::registry::Registry::default(),
+            here_path: None,
+            here_store,
             store_tasks: HashMap::new(),
         };
 
@@ -1159,10 +1175,24 @@ impl App {
         crate::repos::rows(&self.repos, self.here_repo())
     }
 
-    /// Which repo the app is currently reading, if any -- the one that goes
-    /// under `here`.
+    /// The repo that goes under `here`: the one dextui was **launched in**.
+    ///
+    /// Deliberately not "the store being read". Keying it off the current
+    /// store meant switching into a saved repo moved `here` onto it and the
+    /// repo you actually came from vanished -- abrupt, and wrong about what
+    /// the word means. Where you are in the filesystem does not change because
+    /// you looked at another project's tasks, so this is fixed for the run.
+    ///
+    /// Shown only when there is a store to show. Launched somewhere with no
+    /// `.dex`, `here` would be a heading over a repo with nothing in it.
+    /// Checked live rather than at startup, so creating the first task makes
+    /// the section appear without a relaunch.
     fn here_repo(&self) -> Option<usize> {
-        self.repos.iter().position(|r| self.is_current_store(r))
+        let path = self.here_path.as_deref()?;
+        if !std::path::Path::new(&self.here_store).is_dir() {
+            return None;
+        }
+        self.repos.iter().position(|r| r.path == path)
     }
 
     /// The nearest row the cursor may rest on, searching in the direction of
@@ -1326,20 +1356,6 @@ impl App {
         self.store_tasks.get(store_dir).map(|t| counts_for(t))
     }
 
-    /// Whether any row of `repo` is the store this run is currently reading.
-    ///
-    /// Compared by store directory rather than by path, because that is the
-    /// one identity the global row also has -- it is not a checkout, so it has
-    /// no worktree path to match on.
-    pub fn is_current_store(&self, repo: &crate::repos::Repo) -> bool {
-        if repo.store(None) == self.store_dir {
-            return true;
-        }
-        repo.worktrees
-            .iter()
-            .any(|w| repo.store(Some(w)) == self.store_dir)
-    }
-
     /// Registers a repo. Returns whether the registry changed, so a duplicate
     /// can be reported rather than looking inert.
     ///
@@ -1364,28 +1380,18 @@ impl App {
     pub fn unregister_repo_path(&mut self, repo_path: &str) -> Result<bool, String> {
         let changed = self.registry.remove_and_save(repo_path)?;
         if changed {
-            // A repo holding the store this run is reading keeps its row and
-            // merely stops being registered. Dropping it would take the store
-            // you are looking at off the sidebar and leave the pane
-            // contradicting the header, which is the state the always-show
-            // rule exists to prevent -- and `D` says it unregisters an entry,
-            // not that it stops you looking at the tasks on screen.
-            let reading_it = self
-                .repos
-                .iter()
-                .find(|r| r.path == repo_path)
-                .is_some_and(|r| self.is_current_store(r));
-
-            if reading_it {
-                if let Some(row) = self.repos.iter_mut().find(|r| r.path == repo_path) {
-                    row.registered = false;
-                }
-            } else {
-                self.repos.retain(|r| r.path != repo_path);
-                self.selected_repo_row = self
-                    .selected_repo_row
-                    .min(self.repo_rows().len().saturating_sub(1));
+            // No special case for "the repo you are reading" any more. The
+            // launch repo renders under `here` whether or not it is saved, so
+            // unsaving it moves it out of `saved` and changes nothing else --
+            // which is what made the old guard, and the row-that-is-neither
+            // state it produced, unnecessary.
+            if let Some(row) = self.repos.iter_mut().find(|r| r.path == repo_path) {
+                row.registered = false;
             }
+            self.repos.retain(|r| r.registered || Some(&r.path) == self.here_path.as_ref());
+            self.selected_repo_row = self
+                .selected_repo_row
+                .min(self.repo_rows().len().saturating_sub(1));
         }
         Ok(changed)
     }
@@ -1852,42 +1858,41 @@ mod tests {
         assert_eq!(app.store_for_path("/elsewhere"), "/elsewhere/.dex");
     }
 
-    /// `D` unregisters an entry; it does not stop you looking at the tasks
-    /// already on screen. Dropping the row would take the store being read off
-    /// the sidebar and leave the pane contradicting the header -- the exact
-    /// state the always-show-the-current-store rule exists to prevent.
+    /// Unsaving the repo you launched in keeps its row: `here` renders it
+    /// whether or not it is saved, so `D` only moves it out of `saved`. That
+    /// is what made the old "keep the row you are reading" guard unnecessary.
     #[test]
-    fn unregistering_the_repo_being_read_keeps_its_row_and_only_clears_the_mark() {
-        with_isolated_registry("app-unregister-current", || {
+    fn unsaving_the_here_repo_keeps_its_row() {
+        with_isolated_registry("app-unsave-here", || {
             let mut app = app_with_repos();
-            app.store_dir = "/x/one-feat/.dex".into();
-            app.registry = crate::registry::Registry::default();
-            app.register_repo_path("/x/one").unwrap();
-            app.register_repo_path("/x/two").unwrap();
-
-            assert!(app.unregister_repo_path("/x/one").unwrap());
-
-            assert_eq!(app.repos.len(), 2, "the row you are reading was dropped");
-            assert!(!app.repos[0].registered, "the row is still marked registered");
-            assert_eq!(app.registry.repos, vec!["/x/two".to_string()], "the entry survived");
-        });
-    }
-
-    /// The mirror case: a repo you are *not* reading loses its row entirely,
-    /// which is what `D` has always done and must keep doing.
-    #[test]
-    fn unregistering_a_repo_you_are_not_reading_drops_its_row() {
-        with_isolated_registry("app-unregister-other", || {
-            let mut app = app_with_repos();
-            app.store_dir = "/x/one/.dex".into();
             app.registry = crate::registry::Registry::default();
             app.register_repo_path("/x/one").unwrap();
             app.register_repo_path("/x/two").unwrap();
 
             assert!(app.unregister_repo_path("/x/two").unwrap());
 
-            assert_eq!(app.repos.len(), 1);
-            assert_eq!(app.repos[0].path, "/x/one");
+            assert!(
+                app.repos.iter().any(|r| r.path == "/x/two"),
+                "the repo you are in was dropped"
+            );
+            assert!(app.repo_rows().contains(&crate::repos::Row::Repo { index: 1 }));
+            assert_eq!(app.registry.repos, vec!["/x/one".to_string()]);
+        });
+    }
+
+    /// A saved repo you are *not* in loses its row entirely, since neither
+    /// section has anywhere to put it.
+    #[test]
+    fn unsaving_another_repo_drops_its_row() {
+        with_isolated_registry("app-unsave-other", || {
+            let mut app = app_with_repos();
+            app.registry = crate::registry::Registry::default();
+            app.register_repo_path("/x/one").unwrap();
+            app.register_repo_path("/x/two").unwrap();
+
+            assert!(app.unregister_repo_path("/x/one").unwrap());
+
+            assert!(!app.repos.iter().any(|r| r.path == "/x/one"));
         });
     }
 
@@ -2002,14 +2007,59 @@ mod tests {
         assert_eq!(app.panes(), Panes::Three, "1 could not bring the sidebar back");
     }
 
+    /// The reported bug: switching into a saved repo made the repo you came
+    /// from disappear, because `here` tracked the store being read. Where you
+    /// are in the filesystem does not change because you looked at another
+    /// project's tasks.
+    #[test]
+    fn here_stays_on_the_launch_repo_after_switching_stores() {
+        let mut app = app_with_repos();
+        let before = app.repo_rows();
+        assert_eq!(before[0], crate::repos::Row::Heading("here"));
+        assert_eq!(before[1], crate::repos::Row::Repo { index: 1 }, "launched in two");
+
+        // Switch to the other repo's store, as `enter` on a saved row does.
+        app.load_store(Vec::new(), "/x/one/.dex".into());
+
+        let after = app.repo_rows();
+        assert_eq!(after[0], crate::repos::Row::Heading("here"));
+        assert_eq!(
+            after[1],
+            crate::repos::Row::Repo { index: 1 },
+            "`here` followed the store instead of staying put: {after:?}"
+        );
+    }
+
+    /// Launched somewhere with no `.dex`, `here` would be a heading over a
+    /// repo with nothing in it. Checked live rather than at startup, so
+    /// creating the first task makes the section appear without a relaunch.
+    #[test]
+    fn here_is_hidden_when_there_is_no_store_where_you_launched() {
+        let mut app = app_with_repos();
+        app.repos[1].registered = false; // launched somewhere unsaved
+        app.here_store = "/nonexistent-store-for-tests/.dex".into();
+
+        let rows = app.repo_rows();
+
+        assert!(
+            !rows.contains(&crate::repos::Row::Heading("here")),
+            "`here` shown with no store behind it: {rows:?}"
+        );
+        assert!(
+            !rows.contains(&crate::repos::Row::Repo { index: 1 }),
+            "unsaved and no store: it has no section at all: {rows:?}"
+        );
+
+        // The store appearing is enough to bring it back -- no relaunch.
+        app.here_store = std::env::temp_dir().to_string_lossy().into_owned();
+        assert!(app.repo_rows().contains(&crate::repos::Row::Repo { index: 1 }));
+    }
+
     /// Headings are labels, so the cursor passes over them rather than landing
     /// on one -- `j` at the end of a section must not stick.
     #[test]
     fn the_sidebar_cursor_steps_over_section_headings() {
         let mut app = app_with_repos();
-        app.store_dir = "/x/two/.dex".into();
-        app.select_current_store_row();
-
         let rows = app.repo_rows();
         assert!(
             rows.iter().any(|r| !r.selectable()),
@@ -2037,8 +2087,6 @@ mod tests {
     #[test]
     fn clicking_a_section_heading_does_nothing() {
         let mut app = app_with_repos();
-        app.store_dir = "/x/two/.dex".into();
-        app.select_current_store_row();
         let heading = app
             .repo_rows()
             .iter()
@@ -2096,13 +2144,19 @@ mod tests {
     fn the_sidebar_wheel_moves_the_content_and_the_cursor_together() {
         let mut app = app_with_repos();
 
+        let start = app.selected_repo_row;
+
         app.scroll_repos(2);
         assert_eq!(app.repos_offset, 2);
-        assert_eq!(app.selected_repo_row, 2);
+        assert!(
+            app.selected_repo_row > start,
+            "the cursor should travel with the content"
+        );
+        assert!(app.repo_rows()[app.selected_repo_row].selectable());
 
         app.scroll_repos(-2);
         assert_eq!(app.repos_offset, 0);
-        assert_eq!(app.selected_repo_row, 0);
+        assert!(app.repo_rows()[app.selected_repo_row].selectable());
     }
 
     /// An empty sidebar has nothing to slide, and must not underflow trying.
@@ -2726,15 +2780,29 @@ mod tests {
         // frame rather than against numbers picked here.
         app.body_top = 1;
         app.body_bottom = 21;
+        // `here` is the repo the run launched in. `here_store` has to be a
+        // directory that really exists, since the section is hidden when there
+        // is no store where you are -- a temp dir is the cheapest real one.
+        app.here_path = Some("/x/two".into());
+        app.here_store = std::env::temp_dir().to_string_lossy().into_owned();
         app
     }
 
-    /// The rows are [Repo(one), Worktree(one,main), Worktree(one,feat),
-    /// Repo(two), Worktree(two,main), Worktree(two,feat)].
+    /// Puts the cursor on the first row matching `want`, so these say what
+    /// they mean rather than pinning a layout: sections move rows about, and
+    /// an index would be asserting the arrangement instead of the resolution.
+    fn cursor_on(app: &mut App, want: crate::repos::Row) {
+        app.selected_repo_row = app
+            .repo_rows()
+            .iter()
+            .position(|r| *r == want)
+            .unwrap_or_else(|| panic!("no such row {want:?} in {:?}", app.repo_rows()));
+    }
+
     #[test]
     fn a_repo_row_resolves_to_its_own_main_worktree() {
         let mut app = app_with_repos();
-        app.selected_repo_row = 0;
+        cursor_on(&mut app, crate::repos::Row::Repo { index: 0 });
         assert_eq!(app.selected_worktree_path().as_deref(), Some("/x/one"));
         assert_eq!(app.selected_repo().unwrap().name, "one");
     }
@@ -2742,17 +2810,17 @@ mod tests {
     #[test]
     fn a_worktree_row_resolves_to_that_exact_worktree() {
         let mut app = app_with_repos();
-        app.selected_repo_row = 2; // Worktree(one, feat)
+        cursor_on(&mut app, crate::repos::Row::Worktree { repo: 0, index: 1 });
         assert_eq!(app.selected_worktree_path().as_deref(), Some("/x/one-feat"));
         // But the *repo* it belongs to is still "one", not a worktree-shaped
-        // thing -- D unregisters the entry, not one worktree inside it.
+        // thing -- D forgets the entry, not one worktree inside it.
         assert_eq!(app.selected_repo().unwrap().name, "one");
     }
 
     #[test]
     fn a_worktree_row_deep_in_the_second_repo_resolves_to_the_second_repo() {
         let mut app = app_with_repos();
-        app.selected_repo_row = 4; // Worktree(two, main)
+        cursor_on(&mut app, crate::repos::Row::Worktree { repo: 1, index: 0 });
         assert_eq!(app.selected_repo().unwrap().name, "two");
     }
 
@@ -2765,15 +2833,15 @@ mod tests {
 
     #[test]
     fn repo_row_movement_clamps_at_both_ends() {
-        let mut app = app_with_repos(); // 6 rows: indices 0..=5
-        app.move_repo_row(-1);
-        assert_eq!(app.selected_repo_row, 0, "must not go negative");
+        let mut app = app_with_repos();
+        let last = app.repo_rows().len() - 1;
+
+        app.move_repo_row(-100);
+        assert!(app.selected_repo_row <= last, "must not go negative");
+        assert!(app.repo_rows()[app.selected_repo_row].selectable());
 
         app.move_repo_row(100);
-        assert_eq!(app.selected_repo_row, 5, "must not run past the last row");
-
-        app.move_repo_row(-2);
-        assert_eq!(app.selected_repo_row, 3);
+        assert_eq!(app.selected_repo_row, last, "must not run past the last row");
     }
 
     #[test]
@@ -2787,13 +2855,15 @@ mod tests {
     #[test]
     fn g_and_shift_g_jump_to_the_first_and_last_repo_row() {
         let mut app = app_with_repos();
-        app.selected_repo_row = 2;
+        let rows = app.repo_rows();
+        let first = rows.iter().position(|r| r.selectable()).unwrap();
+        let last = rows.iter().rposition(|r| r.selectable()).unwrap();
 
         app.select_last_repo_row();
-        assert_eq!(app.selected_repo_row, 5);
+        assert_eq!(app.selected_repo_row, last);
 
         app.select_first_repo_row();
-        assert_eq!(app.selected_repo_row, 0);
+        assert_eq!(app.selected_repo_row, first, "g must clear the `here` label");
     }
 
     /// `crate::test_support::with_isolated_registry`, not a copy of its own:
@@ -2857,12 +2927,13 @@ mod tests {
             // so anything this test wants it to find has to actually be saved.
             app.register_repo_path("/x/one").unwrap();
             app.register_repo_path("/x/two").unwrap();
-            app.selected_repo_row = 5; // last row, inside "two"
+            app.selected_repo_row = app.repo_rows().len() - 1;
 
-            assert!(app.unregister_repo_path("/x/two").unwrap());
+            // "one" is not the repo this run launched in, so nothing keeps it.
+            assert!(app.unregister_repo_path("/x/one").unwrap());
 
             assert_eq!(app.repos.len(), 1, "the repo's own row must be gone too");
-            assert_eq!(app.repos[0].name, "one");
+            assert_eq!(app.repos[0].name, "two");
             assert!(
                 app.selected_repo_row < app.repo_rows().len(),
                 "cursor left pointing past the end: {} vs {} rows",

@@ -37,7 +37,7 @@ const SHORTCUTS: &str =
 /// that is not a task. A single strip advertising `a sub` beside a focused
 /// sidebar was not a shorter truth, it was a wrong one.
 const REPO_SHORTCUTS: &str =
-    " enter tasks  a save repo  D unsave  b hide  tab next pane  ? help";
+    " enter tasks  a save this repo  A save by path  D unsave  b hide  ? help";
 
 /// Width of the inline progress meter, in cells.
 const METER_WIDTH: usize = 7;
@@ -1653,6 +1653,7 @@ f          cycle filter      ^R  refresh now
 In the repo sidebar these keys act on repos, not on tasks:
 1          focus repos       b   show / hide the sidebar
 a          save the repo you are in, so it is here next time
+A          save a repo by path, for one you are not in (~ works)
 D          forget a saved repo (the worktree and its store are untouched)
 
 `here` is the repo you launched in -- always listed, saved or not. `saved`
@@ -2218,7 +2219,7 @@ mod tests {
 
         // The strip swaps while the sidebar has focus, because `a` means
         // something else there.
-        for key in ["a save", "D unsave", "b hide"] {
+        for key in ["a save", "A save by path", "D unsave", "b hide"] {
             assert!(
                 REPO_SHORTCUTS.contains(key),
                 "the sidebar strip does not advertise {key}: {REPO_SHORTCUTS}"
@@ -2232,6 +2233,7 @@ mod tests {
         // And the help names each of them too.
         assert!(HELP.contains("1          focus repos"), "help: 1 focuses the sidebar");
         assert!(HELP.contains("a          save the repo you are in"), "help: a saves");
+        assert!(HELP.contains("A          save a repo by path"), "help: A saves by path");
         assert!(
             HELP.contains("b   show / hide the sidebar"),
             "help: b hides the sidebar"

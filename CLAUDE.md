@@ -407,6 +407,26 @@ repo, `D` forgets a saved one. `repos::rows` takes the current repo's index and
 splits on it, and `Repo::registered` now decides which *section* a repo is in
 rather than whether it appears at all.
 
+**`here` is the repo you launched in, not the store you are reading.** Keying
+it off the current store meant switching into a saved repo moved `here` onto
+it and the repo you came from vanished — abrupt, and wrong about what the word
+means: where you are in the filesystem does not change because you looked at
+another project's tasks. `App::here_path` and `here_store` are fixed for the
+run (`App::new` captures the store before the field takes ownership of it).
+
+It is hidden when there is no store where you launched, since `here` would
+otherwise be a heading over a repo with nothing in it — checked live rather
+than at startup, so creating the first task makes the section appear without a
+relaunch.
+
+**`A` saves a repo you are not in**, by typed or pasted path. `~` is expanded
+in `save_repo_at` rather than by a shell, since nothing here goes through one,
+and the path is validated with `git worktree list` rather than saved on faith:
+dex reports a store that does not exist as an *empty project* rather than an
+error, so an unchecked typo becomes a permanent row that shows no tasks and
+never says why. Any path *inside* a repo works, not just its root — porcelain
+reports the main checkout first whatever you point it at.
+
 Three rules fall out:
 
 - **Both sections, or no headings.** With one section there is nothing to
