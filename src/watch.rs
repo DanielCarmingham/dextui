@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -27,6 +27,54 @@ pub const SAFETY: Duration = Duration::from_secs(10);
 /// empty pane is long enough to read as "it never loads anything" rather than
 /// as "it has not looked yet".
 pub const DISCONNECTED_POLL: Duration = Duration::from_secs(1);
+
+/// How often a store with nothing happening to it may repeat itself in the log.
+///
+/// The unchanged tick has to be logged at all, because "decided *not* to
+/// refresh" is invisible by design -- a quiet tick does nothing, which is
+/// correct and indistinguishable from a dead watcher without a line saying so.
+/// `log`'s module docs name that branch as the reason the log exists.
+///
+/// But it has to be logged *once*, not sixty times a minute. A worktree with no
+/// `.dex` polls every second (`DISCONNECTED_POLL`) and every one of those ticks
+/// found nothing and said so. On a real registry -- four such worktrees under
+/// one repo -- that was over four lines a second, which reached the 1 MB cap in
+/// about three quarters of an hour and truncated the file at the next launch.
+/// The log flooded away the history it exists to keep, and what it lost is
+/// exactly the kind this is for: what happened *before* the fault you are now
+/// trying to reproduce.
+///
+/// So repeats collapse to one line per minute per store, carrying the count of
+/// ticks it stands for. Nothing is hidden: an unbroken run of
+/// `unchanged (x60)` still proves the loop is alive and still deciding, and the
+/// first quiet tick after any activity is always logged in full -- the counter
+/// resets on a change, so the return to quiet is never what gets swallowed.
+const QUIET_LOG: Duration = Duration::from_secs(60);
+
+/// The message for a quiet tick, or `None` if this one should stay silent.
+///
+/// Kept separate from the wall clock and from `log::line`'s file I/O, both of
+/// which are awkward to unit test -- `Instant` needs a real sleep to advance,
+/// and the log path is a `OnceLock` a test cannot re-resolve. Everything this
+/// function needs to decide is a `u32` and an `Option<Duration>`, so it is
+/// tested directly with fabricated values instead.
+///
+/// `run` is the number of consecutive unchanged ticks since a quiet tick was
+/// last logged, including this one. `since_last_log` is `None` on the first
+/// quiet tick after real activity -- an event, or a tick that found a change
+/// -- which is the one that must never be swallowed, so it always logs, in
+/// full and uncollapsed. Later ticks stay silent until `QUIET_LOG` has passed,
+/// at which point one line reports `run`.
+fn quiet_tick_message(dir: &str, run: u32, since_last_log: Option<Duration>) -> Option<String> {
+    if since_last_log.is_some_and(|d| d < QUIET_LOG) {
+        return None;
+    }
+    Some(if run <= 1 {
+        format!("tick {dir} unchanged")
+    } else {
+        format!("tick {dir} unchanged (x{run})")
+    })
+}
 
 /// Stops the watcher when dropped.
 ///
@@ -174,6 +222,14 @@ fn spawn_inner(store_dir: &str, out: Sender<()>, safety: Duration) -> StoreWatch
     // empty. Read before `spawn` returns, the window does not exist.
     let mut last = stat(store_dir);
 
+    // Drives `quiet_tick_message`. `quiet_run` counts consecutive unchanged
+    // ticks since a quiet tick was last logged; `quiet_logged_at` is `None`
+    // exactly when the next one must log in full -- start and stay-quiet both
+    // reset it as if activity had just happened, so the very first tick after
+    // `spawn` is never itself the one that gets collapsed.
+    let mut quiet_run: u32 = 0;
+    let mut quiet_logged_at: Option<Instant> = None;
+
     let stop = Arc::new(AtomicBool::new(false));
     let stopped = Arc::clone(&stop);
     let attached = Arc::new(AtomicBool::new(watcher.is_some()));
@@ -222,6 +278,10 @@ fn spawn_inner(store_dir: &str, out: Sender<()>, safety: Duration) -> StoreWatch
                     // what this event already reported, not a stale baseline
                     // from before it.
                     last = stat(&dir);
+                    // Real activity, so the next quiet tick must log in full --
+                    // see `quiet_tick_message`.
+                    quiet_run = 0;
+                    quiet_logged_at = None;
                     if out.send(()).is_err() {
                         return;
                     }
@@ -258,11 +318,20 @@ fn spawn_inner(store_dir: &str, out: Sender<()>, safety: Duration) -> StoreWatch
                     if now != last {
                         log::line("watch", &format!("tick {dir} changed"));
                         last = now;
+                        // Real activity, same as the `Ok(())` branch above.
+                        quiet_run = 0;
+                        quiet_logged_at = None;
                         if out.send(()).is_err() {
                             return;
                         }
                     } else {
-                        log::line("watch", &format!("tick {dir} unchanged"));
+                        quiet_run += 1;
+                        let since = quiet_logged_at.map(|t| t.elapsed());
+                        if let Some(msg) = quiet_tick_message(&dir, quiet_run, since) {
+                            log::line("watch", &msg);
+                            quiet_logged_at = Some(Instant::now());
+                            quiet_run = 0;
+                        }
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -607,6 +676,57 @@ mod tests {
             "a dropped watcher is still reporting changes"
         );
     }
+
+    // --- `quiet_tick_message`, driven directly with fabricated durations
+    // rather than through a real clock ---
+
+    #[test]
+    fn the_first_quiet_tick_after_activity_always_logs_in_full() {
+        assert_eq!(
+            quiet_tick_message("/x", 1, None),
+            Some("tick /x unchanged".to_string())
+        );
+    }
+
+    #[test]
+    fn a_quiet_tick_stays_silent_before_the_window_elapses() {
+        assert_eq!(
+            quiet_tick_message("/x", 5, Some(Duration::from_secs(30))),
+            None,
+            "logged again before a minute of quiet had passed"
+        );
+    }
+
+    #[test]
+    fn a_quiet_tick_logs_once_the_window_elapses_and_reports_the_run() {
+        assert_eq!(
+            quiet_tick_message("/x", 60, Some(QUIET_LOG)),
+            Some("tick /x unchanged (x60)".to_string()),
+            "the run should be reported once the window is up"
+        );
+    }
+
+    /// The one-tick-in-a-slow-window case: enough time passed to warrant
+    /// logging, but only a single quiet tick happened in it. It reads exactly
+    /// like the first-ever quiet tick, not `(x1)`, which would just be noise.
+    #[test]
+    fn a_lone_quiet_tick_after_a_long_gap_has_no_count_suffix() {
+        assert_eq!(
+            quiet_tick_message("/x", 1, Some(QUIET_LOG)),
+            Some("tick /x unchanged".to_string())
+        );
+    }
+
+    // No test drives this through the real loop and reads the log file back,
+    // the way the other sections here drive `spawn_inner` and read `rx` back.
+    // `log::LOG_PATH` is a process-wide `OnceLock`: once one test resolves it,
+    // it is resolved for the rest of the binary, including every other test
+    // that logs anything at all -- there is no way to give this one test its
+    // own log file without corrupting whichever other test happens to run
+    // concurrently and share it. `log.rs`'s own tests avoid this the same
+    // way, by calling `write_line` directly rather than going through `init`.
+    // The wiring that reads `quiet_run`/`quiet_logged_at` and calls this
+    // function is small enough to verify by inspection instead.
 
     #[test]
     fn a_missing_tasks_file_emits_nothing_until_it_appears() {
