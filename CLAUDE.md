@@ -1362,3 +1362,44 @@ Out (run these from the shell): `sync`, `import`, `export`, `plan`, `archive`.
 Registering a repo only teaches the sidebar about it — nothing about sync
 configuration, importing or the rest becomes a dextui concern just because
 there is now more than one store on screen.
+
+## Releasing
+
+`dextui` has been on crates.io since 2026-07-31. **Every release from here on
+is a version bump, not a first publish** — cargo will not let a version number
+be reused, even one that is later yanked, so getting the number right is the
+one step in this list that cannot be undone.
+
+```bash
+# 1. Bump the version in Cargo.toml, then commit it. Cargo enforces this
+#    ordering itself -- even `--dry-run` refuses outright on a dirty tree
+#    ("N files ... not yet committed into git"), so the bump has to be
+#    committed before anything below will so much as dry-run.
+git commit -am "chore: bump version to <version>"
+
+# 2. Verify, in this order -- each is cheap and catches a different failure:
+cargo test
+cargo clippy --all-targets
+cargo publish --dry-run     # packages, compiles the package in isolation, uploads nothing
+
+# 3. The real thing.
+cargo publish
+
+# 4. Tag the commit that was just published, and push the tag -- see below
+#    for why this has to be the same commit rather than "somewhere around here".
+git tag v<version>
+git push origin main v<version>
+```
+
+**Picking the number** follows ordinary semver, applied the normal way even
+though the crate is still 0.x: a feature bump (the repo sidebar, say) is a
+minor version, a fix-only release is a patch. `cargo owner --list dextui`
+confirms the logged-in account can actually publish before you get to step 3.
+
+**Tag every release, on the exact commit `cargo publish` ran from.** A tag
+one commit off would make `v<version>` on GitHub disagree with what crates.io
+actually served for that version — worse than no tag, since it looks
+authoritative while being wrong. `0.1.0` itself has no git tag at all — it went
+out during an earlier session's "push and install" work, before this
+convention existed — so there is today no way to check out exactly what that
+version's source was. Don't repeat the gap.
