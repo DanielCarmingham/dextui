@@ -210,6 +210,23 @@ pub struct App {
     /// The list's scroll offset, kept across frames so a click maps to the row
     /// actually under the cursor.
     pub tree_offset: usize,
+    /// Set by `select` whenever `self.selected` actually changes; consumed by
+    /// the very next `draw_tree` frame, which is the one and only frame that
+    /// tells `ratatui::List` to scroll the real selection into view.
+    ///
+    /// This exists because that scroll-into-view is not something `draw_tree`
+    /// can safely do unconditionally. `ratatui::List` re-derives `tree_offset`
+    /// from whatever `ListState` calls selected every single time it renders,
+    /// snapping the offset back the moment that row would fall outside the
+    /// window -- and a running task's spinner redraws many times a second
+    /// with no selection change at all, so "unconditionally" means "on every
+    /// one of those frames too." A wheel scroll that moved `tree_offset` away
+    /// from the selected row would survive exactly one frame before the very
+    /// next animation tick pulled it straight back -- indistinguishable from
+    /// the scroll never having worked. Limiting the reveal to the frame where
+    /// the selection actually moved is what makes a scroll that carries the
+    /// cursor off-screen stick.
+    pub needs_tree_reveal: bool,
     pub focus: Focus,
     /// (vertical, horizontal) offset into the detail pane.
     pub detail_scroll: (u16, u16),
@@ -339,6 +356,11 @@ impl App {
             body_bottom: 0,
             terminal_width: 0,
             tree_offset: 0,
+            // `true` so the first frame reveals the initial selection -- moot
+            // in practice, since `App::new` always starts it at row 0 with the
+            // offset already there too, but there is no earlier "selection
+            // changed" edge to have set this from.
+            needs_tree_reveal: true,
             focus: Focus::Tree,
             detail_scroll: (0, 0),
             wrap: cfg.wrap,
@@ -461,19 +483,24 @@ impl App {
     }
 
     /// A wheel or trackpad drag over the tree. The *content* slides with the
-    /// gesture and the cursor holds its place on screen, which is exactly what
-    /// the detail pane does.
+    /// gesture; the selected task does not change, exactly as the detail pane's
+    /// own text scrolls under a stationary reading position.
     ///
-    /// Moving only the selection is the obvious implementation and reads as
-    /// backwards. Mid-list the view does not move at all, so the only thing the
-    /// eye can track is the cursor -- and the cursor travels *against* the
-    /// fingers, while the detail pane's text travels with them. One drag, two
-    /// directions, in panes an inch apart.
+    /// This used to move the selection by the same delta as the offset, so the
+    /// cursor held its *screen row* while the task underneath it changed --
+    /// which reads as "the wheel keeps picking a different task." A person
+    /// scrolling a list wants to look further down it, not to have their
+    /// selection wander off to whatever task the gesture happened to land the
+    /// view on. The selected task now stays selected, on or off screen, until
+    /// something that is actually a selection gesture -- a keypress, a click --
+    /// changes it.
     ///
     /// The offset clamps against the row count, not the viewport height, which
-    /// this type does not know. Overshooting is harmless: the list widget pulls
-    /// the offset back far enough to keep the selection visible and the renderer
-    /// writes the corrected value into `tree_offset`.
+    /// this type does not know. Overshooting is harmless: it does not touch
+    /// `self.selected`, so `needs_tree_reveal` stays however the last real
+    /// selection change left it -- see that field's doc for why leaving it
+    /// alone here (rather than setting it) is what makes the scroll stick
+    /// instead of snapping back on the next animation frame.
     pub fn scroll_tree(&mut self, delta: isize) {
         let rows = self.row_ids();
         if rows.is_empty() {
@@ -481,7 +508,6 @@ impl App {
         }
         let last = rows.len() as isize - 1;
         self.tree_offset = (self.tree_offset as isize + delta).clamp(0, last) as usize;
-        self.move_selection(delta);
     }
 
     pub fn select_first(&mut self) {
@@ -1109,9 +1135,16 @@ impl App {
     }
 
     /// Selecting a different task must not leave you halfway down the old one.
+    ///
+    /// The single choke point every selection change goes through, which is
+    /// what lets `needs_tree_reveal` cover all of them -- a keypress, a click,
+    /// a worktree switch's remembered cursor -- for free, by being set exactly
+    /// where the thing it needs to know about (`self.selected` actually
+    /// changing) is already being decided.
     fn select(&mut self, id: Option<String>) {
         if id != self.selected {
             self.detail_scroll = (0, 0);
+            self.needs_tree_reveal = true;
         }
         self.selected = id;
     }
@@ -3405,11 +3438,9 @@ mod tests {
         assert_eq!(app.selected.as_deref(), Some("c"));
     }
 
-    /// The same gesture has to do the same thing in both panes. Moving only the
-    /// selection left the tree's *content* stationary while the cursor travelled
-    /// against the direction of the fingers -- so with the detail pane sliding
-    /// with them, one drag read forwards on the right and backwards on the left.
-    /// Now both slide their content, and the tree's cursor keeps its screen row.
+    /// The same gesture has to do the same thing in both panes: content slides,
+    /// nothing about *what is selected* changes. `scroll_detail` never touched
+    /// a selection to begin with; this pins that `scroll_tree` doesn't either.
     #[test]
     fn a_drag_slides_both_panes_the_same_way() {
         let tasks: Vec<Task> = ('a'..='j')
@@ -3423,9 +3454,6 @@ mod tests {
         app.select(Some("f".into()));
         app.detail_scroll = (3, 0);
 
-        let screen_row = |a: &App| a.selected_row().unwrap() - a.tree_offset;
-        let before = screen_row(&app);
-
         // The detail pane is measured on its own: moving the tree's selection
         // deliberately resets it, so driving both from one state would prove
         // nothing about direction.
@@ -3438,20 +3466,17 @@ mod tests {
         // view from the bottom, exactly as later lines do on the right.
         app.scroll_tree(2);
         assert_eq!(app.tree_offset, 5, "the tree's content did not move");
-        assert_eq!(
-            screen_row(&app),
-            before,
-            "the cursor should hold its place on screen while the list slides"
-        );
+        assert_eq!(app.selected.as_deref(), Some("f"), "the wheel must not reselect");
 
         app.scroll_tree(-2);
         assert_eq!(app.tree_offset, 3, "the tree did not come back");
-        assert_eq!(screen_row(&app), before);
+        assert_eq!(app.selected.as_deref(), Some("f"));
     }
 
-    /// Scrolling past the end must not run the offset off into blank space: the
-    /// selection clamps, and the offset has to clamp with it or the cursor would
-    /// be scrolled out of the list it is selecting from.
+    /// The offset clamps at the ends of the list -- it has nothing to scroll
+    /// into past the first or last row -- but the selection set before
+    /// scrolling began is untouched throughout, including while the offset
+    /// has run past where that task is drawn.
     #[test]
     fn scrolling_past_the_ends_of_the_tree_stops() {
         let tasks: Vec<Task> = ('a'..='e')
@@ -3459,14 +3484,39 @@ mod tests {
             .collect();
         let mut app = App::new(tasks, "t".into(), Config::default());
         geo(&mut app);
+        app.select(Some("a".into()));
 
         app.scroll_tree(50);
-        assert_eq!(app.selected.as_deref(), Some("e"), "should rest on the last row");
+        assert_eq!(app.selected.as_deref(), Some("a"), "the wheel must not reselect");
         assert!(app.tree_offset <= 4, "offset ran past the list: {}", app.tree_offset);
 
         app.scroll_tree(-50);
         assert_eq!(app.selected.as_deref(), Some("a"));
         assert_eq!(app.tree_offset, 0);
+    }
+
+    /// `scroll_tree` must never ask `draw_tree` to reveal the selection --
+    /// doing so even once would hand `ratatui::List` the real (unmoved)
+    /// selected index and let it pull `tree_offset` straight back, which is
+    /// the bug this field exists to prevent. See `App::needs_tree_reveal`.
+    #[test]
+    fn scroll_tree_does_not_ask_for_a_reveal() {
+        let mut app = App::new(vec![task("a", None, &[]), task("b", None, &[])], "t".into(), Config::default());
+        app.needs_tree_reveal = false; // as it would be on every frame after the first
+        app.scroll_tree(1);
+        assert!(!app.needs_tree_reveal, "a wheel scroll must not ask for a reveal");
+    }
+
+    /// A real selection change is the one thing that must ask for a reveal --
+    /// otherwise pressing `j` onto a row currently below the fold would leave
+    /// the cursor drawn nowhere, since nothing else scrolls `tree_offset` to
+    /// follow it.
+    #[test]
+    fn a_real_selection_change_asks_for_a_reveal() {
+        let mut app = App::new(vec![task("a", None, &[]), task("b", None, &[])], "t".into(), Config::default());
+        app.needs_tree_reveal = false;
+        app.move_selection(1);
+        assert!(app.needs_tree_reveal, "a moved selection must ask for a reveal");
     }
 
     #[test]

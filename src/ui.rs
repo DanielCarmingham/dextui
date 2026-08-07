@@ -1225,8 +1225,31 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
     let mut state = ListState::default().with_offset(app.tree_offset);
     // Still selected even though the highlight draws nothing: this is what
     // scrolls the selection into view, and what keeps `tree_offset` truthful so
-    // a click lands on the row actually drawn.
-    state.select(selected);
+    // a click lands on the row actually drawn -- but only on the frame after
+    // the selection actually changed. `ratatui::List` forces the offset to
+    // include whatever `ListState` calls selected the instant it would fall
+    // outside the render window; feeding it the real selection on *every*
+    // frame -- including the animation-driven ones a running task causes many
+    // times a second -- would drag the view back to the cursor's row after
+    // every wheel scroll that carried it out of sight, which is exactly the
+    // "selection changed" appearance the wheel must not have. `needs_tree_reveal`
+    // is `true` only for the one frame right after `App::select` last changed
+    // `self.selected` -- see its doc.
+    //
+    // The frames in between select the row *already at the offset* rather
+    // than `None`: `ListState::select(None)` unconditionally resets the
+    // offset to 0 (its own doc says so), which would undo any scrolling
+    // immediately rather than merely decline to correct it. A row at the
+    // offset is by construction already inside the render window, so the
+    // force-reveal this avoids has nothing to correct. The manual highlight
+    // above is unaffected either way, since it never reads this `ListState`
+    // at all.
+    state.select(if app.needs_tree_reveal {
+        selected
+    } else {
+        Some(app.tree_offset.min(rows.len().saturating_sub(1)))
+    });
+    app.needs_tree_reveal = false;
 
     // No `highlight_style`, and no `highlight_symbol`. The row builds its own
     // cursor above, for two reasons. `highlight_style` is stamped across the

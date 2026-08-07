@@ -1188,21 +1188,48 @@ its own; the events come from crossterm.
   there **selects only** — switching store stays on `enter`/`l`, because a
   stray click must not spend a ~180ms dex call and replace both other panes.
 - **Wheel** acts on the pane under the pointer regardless of focus, which is
-  what people expect. Both panes slide their **content** with the gesture.
+  what people expect. Both panes slide their **content** with the gesture, and
+  in neither pane does the gesture change what is *selected* — the detail pane
+  never had a selection to disturb, and the tree's used to, which read as a
+  bug: scrolling the mouse would silently hand the cursor to whatever task the
+  gesture happened to land the view on. `App::scroll_tree` moves only
+  `tree_offset`; the selected task is untouched, on screen or off, until
+  something that is actually a selection gesture — a keypress, a click — moves
+  it.
 
-  Having the tree move its *selection* instead is the obvious implementation and
-  reads as backwards. Mid-list the view does not move at all, so the only thing
-  the eye can track is the cursor — and the cursor travels *against* the fingers
-  while the detail pane's text travels with them. One drag, two directions, in
-  panes an inch apart. `App::scroll_tree` moves the offset and the selection by
-  the same delta, so the list slides and the cursor holds its screen row.
+  This is one of the few places in the app where the obvious ratatui usage is
+  wrong. `ListState::select(Some(i))` is also what makes `List` scroll a
+  keyboard-driven selection into view, by pulling `tree_offset` back the
+  instant `i` would render outside the window — exactly the correction a wheel
+  scroll must *not* get, since the whole point is to carry the cursor out of
+  view on purpose. Passing `None` instead does not merely skip that
+  correction: `ListState::select` resets the offset to 0 whenever the index is
+  `None` (undocumented anywhere but ratatui's own doc comment on the method),
+  so a naive "suppress the reveal for one frame" still lost the scroll
+  immediately. And "for one frame" is not even long enough on its own — a
+  running task's spinner redraws several times a second with no selection
+  change at all, so any frame that goes back to feeding `List` the real
+  selection, for any reason, drags the view back to the cursor's row before
+  the next input arrives.
 
-  The offset is clamped against the row count rather than the viewport height,
-  which `App` does not know. Overshooting is harmless — the list widget pulls the
-  offset back far enough to keep the selection visible, and the renderer writes
-  the corrected value back into `tree_offset`. It also means **a list shorter
-  than its viewport does not appear to scroll at all**, which is correct and is
-  why this has to be checked on a list long enough to move: a first attempt at
+  `App::needs_tree_reveal` is what actually works: `true` for exactly the
+  frame after `App::select` last changed `self.selected` (that private setter
+  is the one choke point every real selection change already goes through —
+  keypress, click, a worktree switch's remembered cursor), `false` on every
+  other frame including the animation-driven ones. `draw_tree` reads it once
+  per frame and clears it. On a `true` frame it passes the real selection, so
+  keyboard navigation keeps scrolling into view exactly as before. On a
+  `false` frame it passes `Some(tree_offset)` — the row already at the top of
+  the window, trivially in view — rather than `None`, specifically to avoid
+  the offset-reset above; `List`'s force-reveal logic then has nothing to
+  correct, and `tree_offset` survives untouched no matter how many idle frames
+  render before the next real selection change.
+
+  The offset itself is clamped against the row count rather than the viewport
+  height, which `App` does not know; overshooting just runs it up to the last
+  row rather than past the list. It also means **a list shorter than its
+  viewport does not appear to scroll at all**, which is correct and is why
+  this has to be checked on a list long enough to move: a first attempt at
   verifying it used an 11-row store in a 14-row terminal and showed nothing.
 - **Click** focuses a pane, and in the tree selects the row under the cursor.
 - **The header row is clickable**: a word of the filter menu picks that filter,
@@ -1403,3 +1430,48 @@ authoritative while being wrong. `0.1.0` itself has no git tag at all — it wen
 out during an earlier session's "push and install" work, before this
 convention existed — so there is today no way to check out exactly what that
 version's source was. Don't repeat the gap.
+
+<!-- gitnexus:start -->
+# GitNexus — Code Intelligence
+
+This project is indexed by GitNexus as **dextui** (1422 symbols, 4958 relationships, 127 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+
+> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
+
+## Always Do
+
+- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
+- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
+- When exploring unfamiliar code, use `query({search_query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
+- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
+- For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
+
+## Never Do
+
+- NEVER edit a function, class, or method without first running `impact` on it.
+- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
+- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
+- NEVER commit changes without running `detect_changes()` to check affected scope.
+
+## Resources
+
+| Resource | Use for |
+|----------|---------|
+| `gitnexus://repo/dextui/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/dextui/clusters` | All functional areas |
+| `gitnexus://repo/dextui/processes` | All execution flows |
+| `gitnexus://repo/dextui/process/{name}` | Step-by-step execution trace |
+
+## CLI
+
+| Task | Read this skill file |
+|------|---------------------|
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+
+<!-- gitnexus:end -->
