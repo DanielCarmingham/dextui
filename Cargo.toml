@@ -12,7 +12,7 @@ categories = ["command-line-utilities"]
 # the README's relative image links against `repository`, so the screenshots
 # still render on the crate page without shipping 200 KB to every `cargo
 # install`. The scripts are dev tooling and need the repo to be useful anyway.
-exclude = ["CLAUDE.md", "docs/", "scripts/", ".gitignore", "handoff.md"]
+exclude = ["CLAUDE.md", "docs/", "scripts/", ".gitignore", "handoff.md", ".claude/", "AGENTS.md"]
 # Edition 2024. Stated so cargo says so plainly rather than failing to parse.
 rust-version = "1.85"
 
