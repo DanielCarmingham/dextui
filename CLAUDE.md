@@ -1187,6 +1187,36 @@ its own; the events come from crossterm.
   frame would be an invisible dead zone down the left of the tree. A click
   there **selects only** — switching store stays on `enter`/`l`, because a
   stray click must not spend a ~180ms dex call and replace both other panes.
+- **A click on a tree row's marker opens or closes it**, which is what makes the
+  twisty an affordance rather than a picture. `App::marker_zone` locates it by
+  arithmetic — border, two-cell gutter, prefix, marker — which makes it a second
+  copy of `draw_tree`'s span layout, and second copies drift. Every app-level
+  test of it agrees with the arithmetic because it *is* the arithmetic;
+  `ui::tests::clicking_where_the_marker_was_really_drawn_closes_the_row` is the
+  one that keeps it honest, finding the marker in a rendered buffer and clicking
+  where it actually landed — on an *indented* row, in all three tiers, so a new
+  span or a two-cell glyph fails there rather than in someone's hands.
+
+  **The zone is two cells**: the glyph plus its pad space, exactly the
+  `"{marker} "` span in the render. One cell is too small a target to ask a
+  pointer for; widening it left onto the branch character would start eating
+  clicks meant to select, and that character is tree drawing, not a control.
+
+  **It selects the row as well.** Toggling without selecting is the other
+  tenable design — it is what file explorers do — but here it would let you
+  close a node the selection is *inside*, hiding the cursor and leaving the
+  detail pane describing a task no visible row points at. Selecting the row you
+  clicked keeps the selection on screen by construction, and matches the
+  keyboard, where `+`/`-` and the arrows only ever act on the cursor.
+
+  It reads `repos_right` as the tree's own `x`, which holds in every layout
+  only because the tree is always the pane immediately right of the sidebar —
+  the two-pane sidebar layout publishes it too, not just `Panes::Three`. Moving
+  the sidebar anywhere else would break the zone silently, so publish a real
+  tree `x` if that ever happens rather than leaning on the coincidence.
+
+  The sidebar has no counterpart: `Repo::open` is set `true` and never toggled,
+  `Left` is explicitly a no-op there, and its markers are decoration.
 - **Wheel** acts on the pane under the pointer regardless of focus, which is
   what people expect. Both panes slide their **content** with the gesture, and
   in neither pane does the gesture change what is *selected* — the detail pane

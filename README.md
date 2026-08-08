@@ -214,6 +214,10 @@ menu, clicking the one filter name it does show cycles instead.
 scrolls whichever pane is under the pointer, content moving with your fingers in
 all three; click selects, in the repo sidebar as well as the tree. Switching
 store stays on `enter`, so a click there cannot replace what you were reading.
+Clicking a task's **expand marker** — the `▾`/`▸` before its status glyph — opens
+or closes it, the same thing `+`/`-` and the arrow keys do to the selection. It
+selects that row too, so the cursor never ends up inside something you just
+closed. The sidebar's markers are decoration: its repos are always open.
 Mouse capture means the terminal no longer does its own text selection — hold
 **Shift** to select and copy as usual.
 

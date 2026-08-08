@@ -656,11 +656,12 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
             if let Some(d) = app.divider_at(m.column) {
                 app.dragging = Some(d);
             } else if app.in_body(m.row) {
-                // Click to focus, and in the tree also to select the row.
+                // Click to focus, and in the tree also to select the row --
+                // plus open or close it when the pointer was on its marker.
                 match app.pane_at(m.column) {
                     Focus::Tree => {
                         app.focus = Focus::Tree;
-                        app.select_at_row(m.row);
+                        app.click_tree(m.column, m.row);
                     }
                     Focus::Detail => app.focus = Focus::Detail,
                     // Selects, like the tree -- which is what the help

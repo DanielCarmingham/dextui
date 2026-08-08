@@ -851,6 +851,70 @@ impl App {
         }
     }
 
+    /// The selection gutter `ui::draw_tree` draws before every row's prefix --
+    /// two cells whether or not the cursor is on that row, so a name cannot
+    /// shift out of the column its siblings sit in.
+    const TREE_GUTTER: u16 = 2;
+
+    /// The columns a tree row's expand/collapse marker occupies, given the
+    /// tree-drawing prefix it was rendered with.
+    ///
+    /// This mirrors `ui::draw_tree`'s spans and has to keep mirroring them: the
+    /// pane's left border, the gutter, the prefix, then the marker. `repos_right`
+    /// is the tree's own `x` -- 0 in every layout that draws no sidebar, which is
+    /// exactly what those layouts publish, so no separate field is needed.
+    ///
+    /// The zone is the whole `"{marker} "` span rather than the glyph alone. One
+    /// cell is a poor thing to ask a pointer for, and the pad space is part of
+    /// the same span in the render, so nothing else has a claim on it. It stops
+    /// there deliberately: the branch character to its left is tree drawing, and
+    /// widening onto it would start eating clicks meant to select.
+    fn marker_zone(&self, prefix: &str) -> std::ops::RangeInclusive<u16> {
+        // Character count is a cell count here: every glyph a prefix is built
+        // from -- `│`, `├`, `└`, space -- is one cell wide, and so is every
+        // tier's marker, which `icons` pins with a test.
+        let x = self.repos_right + 1 + Self::TREE_GUTTER + prefix.chars().count() as u16;
+        x..=x + 1
+    }
+
+    /// A left-click in the task tree: selects the row, and *also* opens or
+    /// closes it when the click landed on that row's expand/collapse marker.
+    ///
+    /// It selects either way. Toggling without moving the selection is the other
+    /// tenable design -- it is what file explorers do -- but here it would let
+    /// you collapse a node the selection is *inside*, hiding the cursor and
+    /// leaving the detail pane describing a task no visible row points at.
+    /// Selecting the row you clicked keeps the selection on screen by
+    /// construction, and matches the keyboard, where `-`/`+` and the arrows only
+    /// ever act on the cursor.
+    pub fn click_tree(&mut self, column: u16, row: u16) {
+        self.select_at_row(row);
+
+        let Some(index) = self.list_row_index(row, self.tree_offset) else {
+            return;
+        };
+
+        // Scoped so the borrow of `tree`/`expanded` ends before the toggle.
+        let hit = {
+            let rows = tree::visible_rows(&self.tree, &self.expanded);
+            match rows.get(index) {
+                // A leaf has a marker drawn in that column too, but nothing to
+                // open -- so a click there stays an ordinary select.
+                Some(r) if r.has_children && self.marker_zone(&r.prefix).contains(&column) => {
+                    Some(r.node.task.id.clone())
+                }
+                _ => None,
+            }
+        };
+
+        // `remove` reports whether it was there, so this is the toggle.
+        if let Some(id) = hit
+            && !self.expanded.remove(&id)
+        {
+            self.expanded.insert(id);
+        }
+    }
+
     /// Applies a freshly loaded config to a running session.
     ///
     /// Everything the file controls is a *starting* value, so a reload after an
@@ -3436,6 +3500,96 @@ mod tests {
 
         app.select_at_row(app.body_top + 1);
         assert_eq!(app.selected.as_deref(), Some("c"));
+    }
+
+    /// `p` -> `c` -> `g`, one chain, so every row is the last of its siblings
+    /// and the prefixes are `└`, `  └`, `    └`. With the border and the
+    /// two-cell gutter that puts the markers at columns 4, 6 and 8.
+    fn nested() -> App {
+        let mut app = App::new(
+            vec![
+                task("p", None, &["c"]),
+                task("c", Some("p"), &["g"]),
+                task("g", Some("c"), &[]),
+            ],
+            "t".into(),
+            Config::default(),
+        );
+        geo(&mut app);
+        // `App::new` opens everything on first load, so this starts expanded.
+        assert_eq!(app.row_ids(), vec!["p", "c", "g"], "fixture is not open");
+        app
+    }
+
+    #[test]
+    fn clicking_the_marker_closes_the_row_and_clicking_it_again_reopens_it() {
+        let mut app = nested();
+
+        app.click_tree(4, app.body_top + 1);
+        assert_eq!(app.row_ids(), vec!["p"], "the marker did not close the row");
+        assert_eq!(app.selected.as_deref(), Some("p"), "and it must select too");
+
+        app.click_tree(4, app.body_top + 1);
+        assert_eq!(app.row_ids(), vec!["p", "c", "g"], "it did not reopen");
+    }
+
+    /// The pad space after the glyph is part of the marker's own span, so the
+    /// zone is two cells -- a one-cell pointer target is a poor thing to ask
+    /// for. The branch character before it is tree drawing and stays out.
+    #[test]
+    fn the_marker_zone_is_the_glyph_and_its_pad_space_and_nothing_else() {
+        for (column, toggles) in [(3, false), (4, true), (5, true), (6, false)] {
+            let mut app = nested();
+            app.click_tree(column, app.body_top + 1);
+            assert_eq!(
+                app.row_ids().len() == 1,
+                toggles,
+                "column {column} should {} have toggled",
+                if toggles { "" } else { "not" }
+            );
+        }
+    }
+
+    /// The zone is offset by the row's own indentation. Without that, column 4
+    /// would be "the marker" on every row, so clicking a nested row's twisty
+    /// would land in dead space while clicking its indent would open it.
+    #[test]
+    fn a_nested_rows_marker_moves_right_with_its_indent() {
+        let mut app = nested();
+        // `p`'s marker column, but on `c`'s row -- indentation, not a marker.
+        app.click_tree(4, app.body_top + 2);
+        assert_eq!(app.row_ids(), vec!["p", "c", "g"], "indent acted as a marker");
+        assert_eq!(app.selected.as_deref(), Some("c"), "it should still select");
+
+        app.click_tree(6, app.body_top + 2);
+        assert_eq!(app.row_ids(), vec!["p", "c"], "c's own marker did nothing");
+    }
+
+    /// A leaf has a glyph drawn in the marker column too, but nothing to open.
+    #[test]
+    fn clicking_a_leafs_marker_only_selects() {
+        let mut app = nested();
+        let before = app.expanded.clone();
+
+        app.click_tree(8, app.body_top + 3);
+        assert_eq!(app.selected.as_deref(), Some("g"));
+        assert_eq!(app.expanded, before, "a leaf was recorded as expanded");
+    }
+
+    /// The tree does not start at column 0 when the sidebar is drawn, and the
+    /// zone has to move with it -- otherwise the marker is unclickable in the
+    /// three-pane layout, which is the default on a wide terminal.
+    #[test]
+    fn the_marker_zone_follows_the_tree_past_the_sidebar() {
+        let mut app = nested();
+        app.divider_x = 90;
+        app.repos_right = 26;
+
+        app.click_tree(4, app.body_top + 1);
+        assert_eq!(app.row_ids().len(), 3, "column 4 is inside the sidebar");
+
+        app.click_tree(30, app.body_top + 1);
+        assert_eq!(app.row_ids(), vec!["p"], "the zone did not shift with the pane");
     }
 
     /// The same gesture has to do the same thing in both panes: content slides,

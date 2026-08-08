@@ -278,6 +278,28 @@ mod tests {
         }
     }
 
+    /// `App::marker_zone` maps a click to the marker by counting cells, and it
+    /// counts the marker itself as one. A two-cell glyph in any tier would put
+    /// every column after it out by one, so clicking the twisty on a nested row
+    /// would open its neighbour instead -- silently, and only in that tier.
+    #[test]
+    fn every_tier_draws_its_tree_markers_one_cell_wide() {
+        for ic in ALL {
+            for (role, g) in [
+                ("expanded", ic.expanded),
+                ("collapsed", ic.collapsed),
+                ("leaf", ic.leaf),
+            ] {
+                assert_eq!(
+                    ratatui::text::Span::raw(g).width(),
+                    1,
+                    "tier {}: the {role} marker {g:?} is not one cell",
+                    name(ic.tier)
+                );
+            }
+        }
+    }
+
     /// The tree marker and the status glyph sit side by side, so a glyph serving
     /// both roles makes the pair ambiguous -- `> >` for a collapsed in-progress
     /// row. Colour separates them (dim connector, coloured status) but the shape

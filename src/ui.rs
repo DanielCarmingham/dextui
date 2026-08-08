@@ -1722,8 +1722,9 @@ shows one at a time, with the same [1] [2] [3] as header tabs. Narrow
 terminals zoom on their own below single_pane_below columns.
 
 Mouse: drag the divider to resize, wheel scrolls the pane under the pointer,
-click selects. In the header, click a filter, or the sort label to cycle it
--- right-click the sort to reverse. Shift bypasses capture to select text.
+click selects -- and on a task's expand marker it opens or closes it too.
+In the header, click a filter, or the sort label to cycle it -- right-click
+the sort to reverse. Shift bypasses capture to select text.
 
 The view refreshes itself whenever the dex store changes, including when
 another process or agent edits it. Your selection, expansion and any open
@@ -3805,6 +3806,58 @@ mod tests {
         y: u16,
     ) -> Vec<&'a ratatui::buffer::Cell> {
         (1..app.divider_x).map(|x| &buf[(x, y)]).collect()
+    }
+
+    /// `App::marker_zone` works out where the marker is by hand -- border, then
+    /// gutter, then prefix -- which makes it a second copy of the span layout
+    /// twenty lines up, and second copies drift. Every other test of it agrees
+    /// with the arithmetic because it *is* the arithmetic; this one finds the
+    /// marker in the rendered buffer and clicks where it was actually drawn, so
+    /// adding a span to `draw_tree` fails here rather than in someone's hands.
+    ///
+    /// Every tier, because the zone assumes each marker is one cell and a wider
+    /// glyph would put only that tier out.
+    #[test]
+    fn clicking_where_the_marker_was_really_drawn_closes_the_row() {
+        for ic in crate::icons::ALL.iter() {
+            let tasks = vec![
+                task("parent", None, "Parent task"),
+                task("child", Some("parent"), "Child task"),
+                task("grandchild", Some("child"), "Grandchild task"),
+            ];
+            let (buf, mut app) = render_selection(tasks, "parent", Focus::Tree, ic, 100, 20);
+            assert_eq!(
+                app.row_ids(),
+                vec!["parent", "child", "grandchild"],
+                "{:?}: the fixture did not render open",
+                ic.tier
+            );
+
+            // The *indented* row, so a zone that ignored the prefix would miss
+            // it rather than quietly agreeing at depth zero.
+            let y = row_of(&buf, "Child task");
+            let x = (0..buf.area.width)
+                .find(|&x| buf[(x, y)].symbol() == ic.expanded)
+                .unwrap_or_else(|| panic!("{:?}: no open marker was drawn", ic.tier));
+
+            // One cell left is the branch character. It is tree drawing, not a
+            // control, and a zone off by one in that direction would swallow it.
+            app.click_tree(x - 1, y);
+            assert_eq!(
+                app.row_ids().len(),
+                3,
+                "{:?}: the branch character acted as a marker",
+                ic.tier
+            );
+
+            app.click_tree(x, y);
+            assert_eq!(
+                app.row_ids(),
+                vec!["parent", "child"],
+                "{:?}: a click on the drawn marker did not close the row",
+                ic.tier
+            );
+        }
     }
 
     /// Selection is carried by a rail in the left margin and a bold name, not by
