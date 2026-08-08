@@ -1973,6 +1973,68 @@ mod tests {
         }
     }
 
+    /// A wheel scroll that carries the selection off screen must survive
+    /// rendering -- repeatedly. `App`-level tests of `scroll_tree` and
+    /// `needs_tree_reveal` (in `app.rs`) cover the state transitions, but the
+    /// actual bug here was never in `App`'s own bookkeeping: it was in how
+    /// `ratatui::List` reacts to what gets fed into its `ListState` at render
+    /// time, which nothing short of a real `draw_tree` call exercises.
+    /// `ListState::select(Some(i))` pulls `tree_offset` back the instant `i`
+    /// would land outside the window, and a running task's spinner redraws
+    /// several times a second with no selection change at all -- so a fix that
+    /// only survived *one* render (the immediate reaction to the scroll) would
+    /// still fail the moment an idle animation frame painted after it. Hence
+    /// three renders here with nothing in between them, not one.
+    #[test]
+    fn a_tree_scroll_survives_repeated_idle_renders() {
+        let tasks: Vec<Task> = (0..30)
+            .map(|i| task(&format!("t{i}"), None, &format!("TASK-{i:02}")))
+            .collect();
+
+        let mut app = App::new(tasks, "demo".into(), crate::config::Config::default());
+        app.filter = tree::Filter::All;
+        app.rebuild();
+
+        // Shorter than the list, so there is somewhere for the offset to go.
+        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        terminal
+            .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+            .unwrap();
+
+        let selected_before = app.selected.clone();
+        let top_row = |app: &mut App, terminal: &mut Terminal<TestBackend>| {
+            terminal
+                .draw(|f| draw(f, app, &crate::icons::UNICODE))
+                .unwrap();
+            let buf = terminal.backend().buffer().clone();
+            (0..buf.area.width)
+                .map(|x| buf[(x, app.body_top + 1)].symbol())
+                .collect::<String>()
+        };
+
+        let before = top_row(&mut app, &mut terminal);
+        app.scroll_tree(6);
+        let offset_after_scroll = app.tree_offset;
+        assert_ne!(offset_after_scroll, 0, "scroll_tree did not move the offset");
+
+        for n in 1..=3 {
+            let drawn = top_row(&mut app, &mut terminal);
+            assert_eq!(
+                app.tree_offset, offset_after_scroll,
+                "render {n} after the scroll pulled the offset back to {} from {offset_after_scroll}",
+                app.tree_offset
+            );
+            assert_ne!(
+                drawn, before,
+                "render {n}: the top row never changed, so nothing actually scrolled"
+            );
+            assert_eq!(
+                app.selected, selected_before,
+                "render {n}: the wheel must never change the selected task"
+            );
+        }
+    }
+
     /// The sidebar's own copy of the rule above. It shares `list_row_index`
     /// with the tree, so this is what stops the two drifting apart again.
     #[test]
