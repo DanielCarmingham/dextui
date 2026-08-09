@@ -211,7 +211,7 @@ Press `?` in the app for this list at any time.
 | `1` `2` `3` | jump straight to the repo sidebar / the tree / the detail |
 | `z` | zoom — one pane at a time |
 | `-` `+` | collapse / expand all |
-| `/` | search names and descriptions |
+| `/` | search names, descriptions and ids (an id matches from its start) |
 | `f` | cycle filter — pending / active / all |
 | `o` `O` | cycle sort / reverse it |
 | `w` | toggle wrapping |
