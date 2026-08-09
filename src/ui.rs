@@ -4162,6 +4162,7 @@ mod tests {
         );
         app.terminal_width = 140;
         app.repos_pane_above = 110;
+        app.repos_visible = true; // App::new's default hides it
         app.repos = vec![crate::repos::Repo {
             name: "dextui".into(),
             path: "/x/dextui".into(),
@@ -4212,6 +4213,7 @@ mod tests {
         );
         app.terminal_width = 140;
         app.repos_pane_above = 110;
+        app.repos_visible = true; // App::new's default hides it
         app.repos = (0..20)
             .map(|i| crate::repos::Repo {
                 name: format!("repo{i}"),

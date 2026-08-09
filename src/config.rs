@@ -32,6 +32,7 @@ pub struct Raw {
     split_percent: Option<u16>,
     repos_width: Option<u16>,
     repos_pane_above: Option<u16>,
+    repos_open: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -72,6 +73,17 @@ pub struct Config {
     /// and the detail yields. Not the same as `single_pane_below = 0`, which
     /// really does turn its behaviour off -- see `App::laid_out`.
     pub repos_pane_above: u16,
+    /// Whether the repo sidebar starts shown.
+    ///
+    /// `false` (the default) behaves exactly as if `b` had already been
+    /// pressed: hidden regardless of `repos_pane_above` or terminal width,
+    /// which is what the common case -- running `dextui` in a single repo's
+    /// root and reading `./.dex` -- wants, since there is nothing for the
+    /// sidebar to add there. `true` behaves as if `1` had: shown regardless of
+    /// width. `repos_pane_above` still governs whether it fits as a *third*
+    /// pane once shown, either way -- this only decides the starting state
+    /// `b`/`1` then toggle from.
+    pub repos_open: bool,
 }
 
 impl Default for Config {
@@ -87,6 +99,7 @@ impl Default for Config {
             split_percent: 45,
             repos_width: 26,
             repos_pane_above: 110,
+            repos_open: false,
         }
     }
 }
@@ -164,6 +177,9 @@ fn apply(cfg: &mut Config, raw: Raw, problems: &mut Vec<String>) {
     }
     if let Some(v) = raw.repos_pane_above {
         cfg.repos_pane_above = v;
+    }
+    if let Some(v) = raw.repos_open {
+        cfg.repos_open = v;
     }
 }
 
@@ -292,6 +308,13 @@ single_pane_below = 80
 # the tree and detail panes.  0 never shows it.
 repos_pane_above = 110
 
+# Whether the repo pane starts shown, regardless of repos_pane_above or
+# terminal width -- false is exactly as if b had already been pressed, true as
+# if 1 had. b / 1 still toggle it freely at runtime either way. Most sessions
+# are one repo read from its own directory, where the sidebar has nothing to
+# add, hence false.
+repos_open = false
+
 # The task tree's share of the space it splits with the detail pane, as a
 # percentage of that space -- so it means the same thing with or without the
 # repo pane. Drag the divider to change it for one run; 20-80.
@@ -396,6 +419,7 @@ mod tests {
         }
         assert!(EXAMPLE.contains("split_percent"), "the global template omits split_percent");
         assert!(EXAMPLE.contains("repos_width"), "the global template omits repos_width");
+        assert!(EXAMPLE.contains("repos_open"), "the global template omits repos_open");
     }
 
     /// Clamped rather than rejected, matching what a drag would have done --
@@ -549,6 +573,24 @@ mod tests {
     #[test]
     fn animation_is_on_by_default() {
         assert!(Config::default().animate);
+    }
+
+    /// The typical session is one repo, read from its own directory -- the
+    /// sidebar has nothing to add there, so it must not appear unasked.
+    #[test]
+    fn the_repo_sidebar_is_hidden_by_default() {
+        assert!(!Config::default().repos_open);
+    }
+
+    #[test]
+    fn repos_open_can_be_turned_on_in_a_file() {
+        let mut cfg = Config::default();
+        let mut problems = Vec::new();
+
+        apply(&mut cfg, raw("repos_open = true"), &mut problems);
+
+        assert!(cfg.repos_open);
+        assert!(problems.is_empty());
     }
 
     #[test]

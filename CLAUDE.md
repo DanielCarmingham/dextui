@@ -343,6 +343,14 @@ cramming three into that room. `App::laid_out` now decides the set —
 - shown, and `repos_pane_above` columns available → all three
 - shown, with room for two → **repos and tree; the detail yields**
 
+"Shown" and "columns available" are two different fields answering two
+different questions, and it stayed that way even after the sidebar stopped
+defaulting to width-decided (see `Config::repos_open` below): `repos_shown`
+is purely `self.repos_visible` now, no width fallback left in it at all;
+`repos_pane_above`'s only remaining job is `room_for_three`, deciding what a
+*shown* sidebar gets once it has been asked for, never whether it appears
+unasked.
+
 The detail is what gives way, not the tree, because the sidebar's whole job is
 choosing which store the *tree* shows: those two side by side is the pairing
 that makes asking for the sidebar worth anything, and the detail is a keypress
@@ -388,11 +396,37 @@ Three things that follow:
   must not switch stores was reasoned entirely from the ~180ms it would spend;
   that reason is gone, and consistency with the tree is what is left.
 
-`b` shows and hides the sidebar at any width, the way `z` toggles zoom -- an
-`Option<bool>` that outranks `repos_pane_above`, flipping the *effective*
-state so the first press always does the visible thing. Hiding it while it has
-focus returns you to the tree, since `Tab` never lands there; and `1` reveals
-it, so `b` cannot be a way to lose the pane with no way to ask for it back.
+`b` shows and hides the sidebar at any width, the way `z` toggles zoom --
+`App::repos_visible`, flipping the *effective* state so the first press always
+does the visible thing rather than one that could appear inert. Hiding it
+while it has focus returns you to the tree, since `Tab` never lands there; and
+`1` reveals it, so `b` cannot be a way to lose the pane with no way to ask for
+it back.
+
+**The sidebar starts hidden**, `Config::repos_open` (default `false`) seeded
+into `App::repos_visible` by both `App::new` and a `,` reload -- the common
+case is one repo read from its own directory, where the sidebar has nothing to
+add, and it must not appear just because the terminal happens to be wide.
+`repos_open = true` starts it shown instead, as if `1` had already been
+pressed; either way `b`/`1` still toggle freely afterward, and `repos_pane_above`
+still decides whether a shown sidebar gets a third pane or the detail yields.
+
+**`repos_visible` is a plain `bool`, not `Option<bool>`.** It used to carry a
+third state, `None`, meaning "decide by width" -- the pre-`repos_open` default.
+Once `repos_open` gave every path that sets this field (`App::new`, a reload)
+a concrete value to seed it with, `None` stopped being reachable by anything
+except a test poking the field directly to fake the width rule back into
+existence, which is what the tests looked like immediately after `repos_open`
+first landed: a dozen `app.repos_visible = None; // shown by width, not the
+hidden default`-style resets sprinkled through the width/ladder tests, each
+needed only because the type still *could* express a state nothing real ever
+produced any more. That repetition was the tell -- a type modeling a
+reachable-only-in-tests state is a bug wearing a comment, not a feature worth
+preserving. Collapsing it to `bool` deleted the resets outright: tests that
+want "shown" now call the real `App::show_repos()`/`toggle_repos()` (or just
+set the bool directly) instead of reaching for a magic auto-decide value, and
+`room_for_three` -- the one place width still matters -- was already a
+separate function, so nothing about *that* had to change.
 
 **Each sidebar row's numbers escalate with the pane's width.** One rung is not
 enough for a pane that now drags from twelve columns to half the terminal, so
@@ -1037,6 +1071,7 @@ icons = "unicode"       # nerd | unicode | ascii
 animate = true          # spin the in-progress marker
 split_percent = 45      # the tree's share of what it splits with the detail
 repos_width = 26        # the sidebar's width in columns
+repos_open = false      # starts hidden, as if b had been pressed; see below
 ```
 
 `animate` is the one setting that reaches the **event loop**, not just the

@@ -266,9 +266,16 @@ pub struct App {
     /// Terminal width at or above which the repo pane is drawn as a third pane.
     /// From the config; 0 disables the behaviour entirely.
     pub repos_pane_above: u16,
-    /// A manual answer to "is the sidebar shown?", set by `b`, outranking the
-    /// `repos_pane_above` width rule. `None` means decide by width.
-    pub repos_visible: Option<bool>,
+    /// Whether the sidebar is shown, set by `b`/`1` and seeded at startup from
+    /// `Config::repos_open`. Plain `bool`, not `Option`: there used to be a
+    /// third state, `None`, meaning "decide by width" -- but once every path
+    /// that sets this (`App::new`, a `,` reload) always supplies a concrete
+    /// `repos_open` value, width-decided was no longer reachable by anything
+    /// other than a test poking the field, which is a sign the state itself
+    /// should go rather than be kept alive for its own sake. `repos_pane_above`
+    /// still matters, in `room_for_three` -- once shown, does it get a third
+    /// pane, or does the detail yield -- just never for *whether* it is shown.
+    pub repos_visible: bool,
     /// A manual answer to "zoomed?", set by `z`, which outranks the width rule.
     /// `None` means decide by width. Pressing the key is an explicit decision,
     /// so it holds until it is pressed again rather than being undone by a
@@ -375,7 +382,7 @@ impl App {
             spin_frame: 0,
             single_pane_below: cfg.single_pane_below,
             repos_pane_above: cfg.repos_pane_above,
-            repos_visible: None,
+            repos_visible: cfg.repos_open,
             zoom: None,
             header_zones: Vec::new(),
             selected_worktree: None,
@@ -927,6 +934,7 @@ impl App {
         self.wrap = cfg.wrap;
         self.animate = cfg.animate;
         self.repos_pane_above = cfg.repos_pane_above;
+        self.repos_visible = cfg.repos_open;
         // The file's values are a *starting* layout, and a reload is the one
         // moment they are meant to replace what dragging has done -- otherwise
         // saving an edit to either would appear to do nothing.
@@ -1008,21 +1016,19 @@ impl App {
         !self.laid_out().contains(&self.focus)
     }
 
-    /// Whether the sidebar is shown at all -- by width, or because `b`/`1`
-    /// asked for it.
-    ///
-    /// A separate question from whether there is room for *three* panes, which
-    /// is what it used to be conflated with. Showing the sidebar at a width
-    /// that fits two used to add a third anyway, cramming three panes into
-    /// room the app had already decided was enough for two.
+    /// Whether the sidebar is shown at all: `repos_open` at startup, `b`/`1`
+    /// afterward. Width has no say here any more -- see `repos_visible`'s doc
+    /// -- only in `room_for_three`, a separate question about a sidebar that
+    /// is *already* shown: does it get to be a third pane, or does the detail
+    /// yield to it. Conflating the two used to mean showing the sidebar at a
+    /// width that fits two panes added a third anyway, cramming three into
+    /// room already decided was enough for two.
     fn repos_shown(&self) -> bool {
-        if let Some(shown) = self.repos_visible {
-            return shown;
-        }
-        self.repos_pane_above > 0 && self.terminal_width >= self.repos_pane_above
+        self.repos_visible
     }
 
-    /// Whether the width reserves room for three panes side by side.
+    /// Whether the width reserves room for three panes side by side, once the
+    /// sidebar is already shown by `repos_shown`.
     fn room_for_three(&self) -> bool {
         self.repos_pane_above > 0 && self.terminal_width >= self.repos_pane_above
     }
@@ -1071,11 +1077,7 @@ impl App {
         self.zoom = Some(!self.single_pane());
     }
 
-    /// Shows or hides the repo sidebar, whatever the width would have decided.
-    ///
-    /// Flips the *effective* state, like `toggle_zoom` and for the same reason:
-    /// toggling a stored flag would appear to do nothing on the first press at
-    /// a width that had already made the choice.
+    /// Shows or hides the repo sidebar, whatever it started as.
     ///
     /// Hiding the pane you are standing in has to move you somewhere, or the
     /// movement keys would drive a pane that is not on screen -- and `Tab`
@@ -1083,7 +1085,7 @@ impl App {
     /// to go back to.
     pub fn toggle_repos(&mut self) {
         let showing = self.repos_shown();
-        self.repos_visible = Some(!showing);
+        self.repos_visible = !showing;
         if showing && self.focus == Focus::Repos {
             self.focus = Focus::Tree;
         }
@@ -1094,7 +1096,7 @@ impl App {
     /// A key that reaches a pane has to be able to bring it back, or `b` would
     /// be a way to lose the sidebar with `1` silently refusing to return it.
     pub fn show_repos(&mut self) {
-        self.repos_visible = Some(true);
+        self.repos_visible = true;
         self.focus = Focus::Repos;
     }
 
@@ -1730,6 +1732,7 @@ mod tests {
         let mut app = counted(vec![task("a", None, &[])]);
         app.single_pane_below = 80;
         app.repos_pane_above = 110;
+        app.repos_visible = true; // exercise all three rungs, not just two
 
         let count = |p: Panes| match p {
             Panes::One => 1,
@@ -1751,6 +1754,7 @@ mod tests {
         let mut app = counted(vec![task("a", None, &[])]);
         app.single_pane_below = 80;
         app.repos_pane_above = 110;
+        app.repos_visible = true; // shown throughout; only room_for_three moves
 
         app.terminal_width = 79;
         assert_eq!(app.panes(), Panes::One);
@@ -1768,6 +1772,9 @@ mod tests {
         let mut app = counted(vec![task("a", None, &[])]);
         app.single_pane_below = 0;
         app.repos_pane_above = 0;
+        // Shown throughout, so `repos_pane_above = 0` is what is under test:
+        // shown but never promoted to a third pane, not simply hidden.
+        app.repos_visible = true;
 
         app.terminal_width = 200;
         assert_eq!(app.panes(), Panes::Two, "the repos rung is off");
@@ -1823,19 +1830,24 @@ mod tests {
         assert_eq!(app.drawn_panes(), vec![Focus::Repos, Focus::Tree]);
     }
 
-    /// This is the specific gap a key-handler-only fix cannot close: no key
-    /// is pressed here at all, only a resize -- holding `Focus::Repos` at
-    /// `Three` and then narrowing past `repos_pane_above` used to leave the
-    /// sidebar undrawn with nothing on screen to explain why.
+    /// No key is pressed here at all, only a resize. An *asked-for* sidebar
+    /// (`repos_visible`, set once and not reconsidered by width the way it
+    /// used to be) must not vanish when the room for three panes goes away --
+    /// it steps down to sharing the width with the tree instead, the same
+    /// place `showing_the_sidebar_where_only_two_fit_displaces_the_detail`
+    /// reaches by a keypress. Losing the sidebar to a resize nobody asked for
+    /// would be exactly the silent-disappearance bug this area exists to
+    /// prevent, just arrived at from the wide side instead of the narrow one.
     #[test]
     fn narrowing_into_the_gap_while_already_repo_focused_keeps_it_visible() {
         let mut app = ladder(200);
-        app.focus = Focus::Repos;
+        app.show_repos(); // asked for, not stranded -- see the test above
         assert_eq!(app.panes(), Panes::Three, "fixture should start with room to spare");
 
         app.terminal_width = 90; // resize alone, no key event
 
-        assert_eq!(app.panes(), Panes::One, "must not vanish on a resize with no keypress");
+        assert_eq!(app.panes(), Panes::Two, "must not vanish on a resize with no keypress");
+        assert_eq!(app.drawn_panes(), vec![Focus::Repos, Focus::Tree]);
     }
 
     /// Already has room: forcing a single pane here would take away the tree
@@ -1843,7 +1855,7 @@ mod tests {
     #[test]
     fn repos_focus_does_not_override_the_ladder_once_there_is_room() {
         let mut app = ladder(200);
-        app.focus = Focus::Repos;
+        app.show_repos(); // asked for, not stranded -- see the test above
         assert_eq!(app.panes(), Panes::Three);
     }
 
@@ -1865,16 +1877,15 @@ mod tests {
 
     /// The same monotonicity rule `the_pane_ladder_is_monotone` pins for the
     /// default focus must also hold with the repo pane focused throughout --
-    /// nothing about a wider terminal should ever draw fewer panes, even
-    /// though the count here jumps straight from one to three, skipping two
-    /// entirely (there is no width at which a repo-focused view shows
-    /// exactly two panes).
+    /// nothing about a wider terminal should ever draw fewer panes. Distinct
+    /// coverage from that test: `single_pane`'s *other* clause is in play here
+    /// (focus on a pane the layout has no slot for), not just the width rungs.
     #[test]
     fn the_ladder_is_monotone_with_the_repo_pane_focused_too() {
         let mut app = counted(vec![task("a", None, &[])]);
         app.single_pane_below = 80;
         app.repos_pane_above = 110;
-        app.focus = Focus::Repos;
+        app.show_repos(); // asked for; sets focus to Focus::Repos too
 
         let count = |p: Panes| match p {
             Panes::One => 1,
@@ -2030,6 +2041,53 @@ mod tests {
         });
     }
 
+    /// The typical session is one repo read from its own directory, where the
+    /// sidebar has nothing to add -- it must not appear just because the
+    /// terminal happens to be wide, unless `repos_open` in the config says so.
+    #[test]
+    fn a_fresh_app_hides_the_sidebar_even_when_wide_enough_for_it() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
+        app.repos_pane_above = 110;
+        app.terminal_width = 200;
+        assert_eq!(app.panes(), Panes::Two, "the sidebar must start hidden");
+    }
+
+    /// `repos_open = true` is the config's way of starting with the sidebar
+    /// shown -- as if `1` had already been pressed -- for anyone whose
+    /// workflow wants it every launch rather than pressed for each session.
+    #[test]
+    fn repos_open_in_the_config_shows_the_sidebar_from_the_first_frame() {
+        let cfg = Config {
+            repos_open: true,
+            ..Config::default()
+        };
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), cfg);
+        app.repos_pane_above = 110;
+        app.terminal_width = 200;
+        assert_eq!(app.panes(), Panes::Three, "repos_open = true must show it");
+    }
+
+    /// Reloading a config is the one moment file values are meant to replace
+    /// what the runtime toggles have done -- otherwise flipping `repos_open`
+    /// and pressing `,` would silently do nothing.
+    #[test]
+    fn reloading_config_applies_the_new_repos_open_value() {
+        let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
+        app.repos_pane_above = 110;
+        app.terminal_width = 200;
+        assert_eq!(app.panes(), Panes::Two, "starts hidden");
+
+        app.toggle_repos(); // simulate having pressed `b` mid-session
+        assert_eq!(app.panes(), Panes::Three);
+
+        let cfg = Config {
+            repos_pane_above: 110,
+            ..Config::default()
+        };
+        app.apply_config(cfg);
+        assert_eq!(app.panes(), Panes::Two, "reload must restore the file's repos_open");
+    }
+
     /// `b` outranks the width rule, the way `z` does for zoom -- and toggles
     /// the *effective* state, so the first press always does the visible thing
     /// rather than appearing inert at a width that had already decided.
@@ -2039,6 +2097,7 @@ mod tests {
         app.repos_pane_above = 110;
         app.single_pane_below = 0;
         app.terminal_width = 140;
+        app.repos_visible = true; // starts shown
         assert_eq!(app.panes(), Panes::Three, "wide enough for the sidebar");
 
         app.toggle_repos();
@@ -2050,7 +2109,7 @@ mod tests {
         // And the other direction, from a width that had already hidden it.
         // Still two panes -- that is all this width fits -- but the sidebar is
         // now one of them, which is what asking for it has to mean.
-        app.repos_visible = None;
+        app.repos_visible = false;
         app.terminal_width = 90;
         assert_eq!(app.drawn_panes(), vec![Focus::Tree, Focus::Detail]);
         app.toggle_repos();
@@ -2116,6 +2175,7 @@ mod tests {
         let mut app = counted(vec![task("a", None, &[])]);
         app.repos_pane_above = 110;
         app.terminal_width = 140;
+        app.repos_visible = true; // starts shown, so toggling is what hides it
         app.focus = Focus::Repos;
 
         app.toggle_repos();
@@ -2132,6 +2192,7 @@ mod tests {
         app.repos_pane_above = 110;
         app.single_pane_below = 0;
         app.terminal_width = 140;
+        app.repos_visible = true; // starts shown, so toggle_repos is the `b` that hides it
         app.toggle_repos();
         assert_eq!(app.panes(), Panes::Two);
 
@@ -3173,6 +3234,7 @@ mod tests {
         let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
         app.repos_pane_above = 110;
         app.terminal_width = 140;
+        app.repos_visible = true; // shown, not the hidden default
 
         let mut seen = vec![app.focus];
         for _ in 0..3 {
@@ -3201,6 +3263,7 @@ mod tests {
         let mut app = App::new(vec![task("a", None, &[])], "t".into(), Config::default());
         app.repos_pane_above = 110;
         app.terminal_width = 140;
+        app.repos_visible = true; // starts shown, so toggle_repos is the `b` that hides it
         app.toggle_repos();
 
         for _ in 0..4 {

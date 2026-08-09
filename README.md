@@ -1,8 +1,8 @@
 # dextui
 
 A terminal UI for browsing and triaging [dex](https://dex.rip/) tasks —
-task tree on the left, full detail on the right, and — wide enough, or once
-you have registered more than one — a sidebar of every repo and its worktrees.
+task tree on the left, full detail on the right, and, press `1` away, a
+sidebar of every repo and its worktrees.
 
 ![dextui showing a task tree with progress meters, a selected row, a detail pane and the repo sidebar](docs/img/dextui-dark.png)
 
@@ -143,10 +143,14 @@ unregisters an entry, with confirmation, and moves it back. Unregistering
 only removes the sidebar row: nothing on disk, in the worktree, or in the
 store itself is touched. `A` saves a repo you are *not* in, by path.
 
-Wide enough — `repos_pane_above` columns, 110 by default — and the sidebar
-gets a third pane alongside the tree and detail. Narrower than that, `1`
-still gets you there: focusing it zooms the app down to just the sidebar, the
-same way the whole app zooms below `single_pane_below`.
+The sidebar starts hidden — the common case is one repo read from its own
+directory, where it has nothing to add. Press `1` or `b` to show it, or set
+`repos_open = true` to start every session with it open. Once shown, width
+still decides how it's shown: wide enough — `repos_pane_above` columns, 110
+by default — and it gets a third pane alongside the tree and detail;
+narrower than that, it shares the width with the tree instead and the detail
+yields; narrower still, focusing it zooms the app down to just the sidebar,
+the same way the whole app zooms below `single_pane_below`.
 
 Every registered repo is watched, not only the one on screen, so a change in
 any of them is noticed as promptly as a change in the one you are looking at —
@@ -272,7 +276,8 @@ wrap = true
 icons = "unicode"       # nerd | unicode | ascii
 animate = true          # spin the in-progress marker
 single_pane_below = 80  # below this width, one pane at a time (0 = always split)
-repos_pane_above = 110  # at/above this, the sidebar gets a pane of its own (0 = never)
+repos_pane_above = 110  # at/above this, a shown sidebar gets a pane of its own (0 = never)
+repos_open = false      # start every session with the sidebar shown
 ```
 
 A project file need only mention what it changes:
