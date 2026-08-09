@@ -121,17 +121,27 @@ const BRAILLE_SPIN: &[&str] = &[
     "\u{2827}", "\u{2807}", "\u{280f}",
 ];
 
-/// A growing dot, not the classic `-\|/` rotation.
+/// A swell and shrink, not the classic `-\|/` rotation.
 ///
-/// This tier's structural vocabulary already owns most of that set: `-` is
-/// `expanded`, `|` is the selection `gutter`, `.` is `pending` and `>` is the
-/// still `active`. A spinner cycling through those would put tree-drawing
-/// characters in the state column -- `- - Task` for an expanded row on the
-/// wrong frame -- which is worse than having no rotation at all.
+/// This tier's structural vocabulary already owns half of that set: `-` is
+/// `expanded`, `|` is the selection `gutter`, `+` is `collapsed`, `.` is
+/// `pending` and `>` is the still `active`. A spinner cycling through those
+/// puts tree-drawing characters in the state column -- `- -` for an expanded
+/// row on the wrong frame, `| |` for a selected one -- which is worse than
+/// having no rotation at all. (`/` and `\` are free; it is the vertical and
+/// the horizontal that clash, and a rotation needs both.)
 ///
-/// `*` `o` `O` collide with nothing, and swelling reads as motion just as
-/// clearly as turning does. Plain ASCII, so the width is beyond doubt anywhere.
-const ASCII_SPIN: &[&str] = &["*", "o", "O"];
+/// **Six frames, not three.** Three was too few to read as movement: the eye
+/// got `* o O * o O` at 80ms and saw a throb rather than a cycle, which is
+/// more irritating than a still glyph would be. Adding `0` at the top and
+/// coming back down the same way doubles the cycle to 480ms and gives the
+/// swell a direction -- growing, then shrinking -- where before it snapped
+/// from the largest frame straight back to the smallest.
+///
+/// `*` `o` `O` `0` collide with nothing in this tier. Plain ASCII, so the
+/// width is beyond doubt in any font anywhere, which is the whole point of
+/// the tier.
+const ASCII_SPIN: &[&str] = &["*", "o", "O", "0", "O", "o"];
 
 /// Nerd Font: chevrons and Font Awesome state icons.
 pub const NERD: Icons = Icons {

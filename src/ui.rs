@@ -3630,7 +3630,7 @@ mod tests {
             let tasks = || vec![task("a", None, "Idle task"), started("b", "Running task")];
 
             let mut columns = std::collections::HashSet::new();
-            let mut seen = std::collections::HashSet::new();
+            let mut drawn: Vec<String> = Vec::new();
 
             for f in 0..ic.spin.len() {
                 let buf = render_frame(tasks(), f, ic);
@@ -3663,7 +3663,7 @@ mod tests {
                     ic.tier
                 );
                 columns.insert(at.0);
-                seen.insert(ic.spin[f]);
+                drawn.push(buf[at].symbol().to_string());
 
                 // Colour no longer carries the motion, so it must stay put.
                 assert!(
@@ -3679,10 +3679,28 @@ mod tests {
                 "{:?}: the marker moved between frames: {columns:?}",
                 ic.tier
             );
-            assert_eq!(
-                seen.len(),
-                ic.spin.len(),
-                "{:?}: frames repeated within one cycle",
+            // Every frame must differ from the one before it, wrapping from the
+            // last back to the first -- a repeat there is a visible stall, and
+            // the wrap is where an off-by-one in a frame table shows up.
+            //
+            // This used to demand that all frames be *distinct*, which is a
+            // stronger claim than the defect warrants and forbids a legitimate
+            // shape: the ascii tier swells and shrinks (`* o O 0 O o`), so it
+            // passes back through the sizes it came up through on purpose.
+            // Adjacency is what the eye actually notices, and unlike the old
+            // assertion this one also covers the seam at the end of the cycle.
+            for (i, pair) in drawn.windows(2).enumerate() {
+                assert_ne!(
+                    pair[0], pair[1],
+                    "{:?}: frames {i} and {} are identical -- the spinner stalls",
+                    ic.tier,
+                    i + 1
+                );
+            }
+            assert_ne!(
+                drawn.first(),
+                drawn.last(),
+                "{:?}: the cycle's last frame repeats its first -- it stalls on the wrap",
                 ic.tier
             );
         }
