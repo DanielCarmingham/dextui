@@ -13,8 +13,14 @@ categories = ["command-line-utilities"]
 # still render on the crate page without shipping 200 KB to every `cargo
 # install`. The scripts are dev tooling and need the repo to be useful anyway.
 exclude = ["CLAUDE.md", "docs/", "scripts/", ".gitignore", "handoff.md", ".claude/", "AGENTS.md"]
-# Edition 2024. Stated so cargo says so plainly rather than failing to parse.
-rust-version = "1.85"
+# Edition 2024's own floor is 1.85, but ratatui 0.30.2 and tui-markdown 0.3.9 --
+# the exact versions pinned above, not just some newer release -- both declare
+# rust-version 1.88.0 themselves, which is the real floor. Understating it here
+# does not relax anything; it only stops cargo from telling you why `cargo
+# install` locked to it, right up until the day the actual build fails on an
+# older toolchain instead. Bump this if a future dependency bump raises the
+# floor again, in step with actually verifying it.
+rust-version = "1.88"
 
 [dependencies]
 anyhow = "1.0.104"
