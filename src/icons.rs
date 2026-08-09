@@ -53,7 +53,14 @@ pub struct Icons {
     pub pending: &'static str,
     /// The still marker for in-progress work: used wherever the state has to be
     /// named rather than watched -- the header counts, the help, the legend --
-    /// and as the resting frame when `animate` is off. Always `spin[0]`.
+    /// and as the resting frame when `animate` is off.
+    ///
+    /// Deliberately **not** `spin[0]`, in any tier. A single frame of a
+    /// rotation, held still, does not read as "in progress" -- a lone braille
+    /// dot reads as nothing at all -- so the resting marker is its own glyph
+    /// that says the state outright. `with_animation_off_the_marker_is_the_still_glyph`
+    /// pins it, and `row_glyph` takes an `Option<usize>` so "not animating" is
+    /// a state rather than a frame index.
     pub active: &'static str,
     /// The rotation, one glyph per frame. Every frame must measure exactly one
     /// cell in the tier's font, or the marker column shifts as it turns.
@@ -125,6 +132,30 @@ const BRAILLE_SPIN: &[&str] = &[
 /// clearly as turning does. Plain ASCII, so the width is beyond doubt anywhere.
 const ASCII_SPIN: &[&str] = &["*", "o", "O"];
 
+/// Nerd Fonts' own spinner, `nf-extra-progress_spinner_1..6` at U+EE06-EE0B.
+///
+/// Six frames, and unlike [`BRAILLE_SPIN`] they are **really in the font**:
+/// FiraCode Nerd Font carries all six, each with an advance of 1200 against a
+/// space of 1200 -- exactly 1.000 cells, measured from the font's own `hmtx`
+/// table rather than assumed. So this tier no longer depends on the terminal
+/// snapping an oversized substitute into its cell, which is the one thing
+/// standing between braille and a jittering marker column.
+///
+/// It sits directly after the progress-bar kit at U+EE00-EE05 that `NERD`'s
+/// meter already composes, so the tier now draws both of its moving parts from
+/// the same Nerd Fonts 3.3.0 set.
+///
+/// This was once rejected on the grounds that a spinner existing in only one
+/// tier is "a second animation model for one tier, not worth two code paths".
+/// That cost turned out to be nil: `spin` is already a per-tier slice and
+/// `pulse::frame` already takes the frame count, so six frames here and ten
+/// elsewhere is the arrangement the types were built for -- no branch, no
+/// second path, and `a_running_store_repaints_once_per_frame` is unaffected
+/// because the schedule is `FRAME`, not the frame count.
+const NERD_SPIN: &[&str] = &[
+    "\u{ee06}", "\u{ee07}", "\u{ee08}", "\u{ee09}", "\u{ee0a}", "\u{ee0b}",
+];
+
 /// Nerd Font: chevrons and Font Awesome state icons.
 pub const NERD: Icons = Icons {
     tier: Tier::Nerd,
@@ -133,7 +164,7 @@ pub const NERD: Icons = Icons {
     leaf: " ",
     pending: "\u{f070c}", // md-rhombus_outline
     active: "\u{f04b}",   // fa-play
-    spin: BRAILLE_SPIN,
+    spin: NERD_SPIN,
     done: "\u{f070b}",    // md-rhombus
     blocked: "\u{f05e}",  // fa-ban
     app: "\u{f0ae}",     // fa tasks
@@ -147,9 +178,9 @@ pub const NERD: Icons = Icons {
     // cap at U+EE00-EE02, filled at U+EE03-EE05. Composing by position gives a
     // properly capped, seamless bar rather than seven stamped cells.
     //
-    // Its 6-frame arc spinner at U+EE06-EE0B is native at 1.00 cells too, and
-    // is deliberately unused: it exists only in this tier, and a second
-    // animation model for one tier is not worth two code paths.
+    // Its spinner at U+EE06-EE0B, native at 1.00 cells too, is what this tier's
+    // `spin` now uses -- see `NERD_SPIN`. Both of the tier's moving parts come
+    // from the same 3.3.0 set.
     meter: Meter {
         done: ["\u{ee03}", "\u{ee04}", "\u{ee05}"],
         active: ["\u{ee03}", "\u{ee04}", "\u{ee05}"],
