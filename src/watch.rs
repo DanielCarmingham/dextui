@@ -530,8 +530,24 @@ mod tests {
 
         fs::write(b.join("tasks.jsonl"), "{}").unwrap();
 
-        let got = rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert!(got.ends_with("/b"), "reported the wrong store: {got}");
+        // `settle` alone is not enough to assert on the *first* thing that
+        // arrives, because it cannot distinguish a replay that has already
+        // been and gone from one that has not arrived yet -- so a late one
+        // would land here and read as a mis-tag. Nothing ever writes to `a`,
+        // so any report of it is that replay; skipping those costs nothing.
+        // The claim under test is that the store which *did* change is the one
+        // named, and a genuine mis-tagging bug still fails, by never producing
+        // `b` at all before the deadline.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut also_seen: Vec<String> = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(store) if store.ends_with("/b") => break,
+                Ok(store) => also_seen.push(store),
+                Err(_) => panic!("never named the store that changed; saw {also_seen:?}"),
+            }
+        }
     }
 
     #[test]
@@ -590,19 +606,31 @@ mod tests {
     #[test]
     fn a_safety_timeout_with_nothing_changed_emits_nothing() {
         let dir = TempDir::new("net-quiet");
-        dir.write(r#"{"id":"a"}"#);
         let (tx, rx) = channel();
         let _w = spawn_inner(dir.path(), tx, FAST);
 
-        // The write above happened before the watcher attached, and the
-        // platform replays it -- through the `Ok(())` branch, which is not the
-        // branch under test and is not stat-gated at all. Left in, it emits
-        // once and the assertion below reads that as the safety tick firing,
-        // which is exactly backwards. Swallowing it first is what makes the
-        // rest of this about the timeout branch and nothing else.
+        // The write is deliberately *after* the watcher attaches, and is then
+        // waited for. That ordering is the whole trick, and it replaced a
+        // `settle` that could not work: draining until the channel goes quiet
+        // cannot tell "the replayed events have been and gone" apart from
+        // "they have not arrived yet", so on a loaded runner it returned early
+        // and handed the replay to the assertion below. Three green CI runs
+        // and then a red one is what that looks like.
+        //
+        // Events arrive in order, so receiving the one for a write made after
+        // `watch()` proves everything the platform meant to replay from before
+        // it has already been delivered. A barrier, rather than a guess about
+        // how long a replay takes -- and it also kills the false pass where
+        // nothing works at all and the store stays quiet for that reason.
+        dir.write(r#"{"id":"a"}"#);
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("the watcher must report a write made after it attached");
+
+        // The rest of that write's burst, which `spawn_inner` reports as one
+        // event per debounce window rather than one per raw event.
         settle(&rx, SETTLE_QUIET, Duration::from_secs(3));
 
-        // Several safety intervals pass with the file left exactly alone.
+        // Several safety intervals now pass with the file left exactly alone.
         // This is the whole point of the stat gate: previously every one of
         // these ticks would have emitted, and the caller would have paid for
         // a `dex list` to learn nothing changed.
