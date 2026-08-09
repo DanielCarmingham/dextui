@@ -410,6 +410,52 @@ mod tests {
         }
     }
 
+    /// Waits out the events the platform replays for activity that happened
+    /// *before* the watcher was attached, and reports how many it swallowed.
+    ///
+    /// macOS FSEvents delivers events for filesystem activity that predates the
+    /// stream, **including the creation of the watched directory itself**. So
+    /// "I attached a watcher, therefore the next event I see is one I caused"
+    /// is not true, and two tests here were written as though it were. Both
+    /// failed deterministically on GitHub's macos-14 runners while passing on
+    /// macOS 26 locally -- not an OS difference in the end, just a race this
+    /// machine happened to win. Observed directly with a throwaway watcher that
+    /// printed whole `notify::Event`s: a `Create(File)` and two `Modify`s for a
+    /// write made 6ms *before* `watch()` returned, and a `Create(Folder)` for
+    /// the watched directory.
+    ///
+    /// This does not paper over the race, it ends it: nothing is asserted until
+    /// the channel has been quiet for `quiet`, so every later event is one the
+    /// test itself caused. Condition-based rather than a fixed sleep, so a slow
+    /// machine waits longer instead of flaking.
+    ///
+    /// `cap` bounds the total wait. Without it a genuinely broken gate -- one
+    /// emitting on every tick -- would keep this receiving forever and the test
+    /// would hang rather than fail, which is the worse of the two.
+    fn settle<T>(rx: &Receiver<T>, quiet: Duration, cap: Duration) -> usize {
+        let deadline = Instant::now() + cap;
+        let mut swallowed = 0;
+        while Instant::now() < deadline && rx.recv_timeout(quiet).is_ok() {
+            swallowed += 1;
+        }
+        swallowed
+    }
+
+    /// The quiet window `settle` needs, which is **not** a free choice.
+    ///
+    /// What is being drained is `out`, and the `Ok(())` branch does not forward
+    /// an event as it arrives -- it swallows the rest of the burst for
+    /// `DEBOUNCE` first, so a raw event at 5ms becomes an `out` send at 255ms.
+    /// A quiet window shorter than `DEBOUNCE` therefore returns *during* the
+    /// debounce, having seen nothing, and hands the still-pending emission to
+    /// whatever the test asserts next.
+    ///
+    /// This was not theoretical: at 200ms the safety-timeout test still failed
+    /// 3 runs in 15, while the multi-store test above passed 15/15 at 300ms.
+    /// The margin is over `DEBOUNCE` rather than over a measured latency,
+    /// because it is the debounce that sets the floor.
+    const SETTLE_QUIET: Duration = DEBOUNCE.saturating_add(Duration::from_millis(150));
+
     #[test]
     fn fires_when_the_store_file_changes() {
         let dir = TempDir::new("fires");
@@ -453,11 +499,19 @@ mod tests {
     /// re-read all of them and watching separately buys nothing.
     #[test]
     fn a_change_reports_which_store_it_came_from() {
-        let dir = std::env::temp_dir().join("dextui-watch-many");
-        let a = dir.join("a");
-        let b = dir.join("b");
-        std::fs::create_dir_all(&a).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
+        // A `TempDir` per run, like every other test here. This used to be a
+        // fixed `temp_dir().join("dextui-watch-many")` that nothing ever
+        // cleaned up, which is precisely what hid the bug below: after the
+        // first run `a` and `b` already existed, so `create_dir_all` did
+        // nothing and there was no directory-creation event to replay. It
+        // passed 10/10 locally against a directory dated nine days earlier,
+        // and failed on every fresh CI machine. Deleting that stale directory
+        // reproduced the failure here immediately.
+        let parent = TempDir::new("many");
+        let a = parent.0.join("a");
+        let b = parent.0.join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
 
         let (tx, rx) = std::sync::mpsc::channel();
         let _guards = spawn_many(
@@ -468,9 +522,15 @@ mod tests {
             tx,
         );
 
-        std::fs::write(b.join("tasks.jsonl"), "{}").unwrap();
+        // Creating `a` and `b` is itself filesystem activity, and it happened
+        // before the watchers existed -- so without this, `a` reports its own
+        // creation and wins the race against the write below. That is the
+        // literal CI failure: "reported the wrong store: .../a".
+        settle(&rx, SETTLE_QUIET, Duration::from_secs(3));
 
-        let got = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        fs::write(b.join("tasks.jsonl"), "{}").unwrap();
+
+        let got = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(got.ends_with("/b"), "reported the wrong store: {got}");
     }
 
@@ -533,6 +593,14 @@ mod tests {
         dir.write(r#"{"id":"a"}"#);
         let (tx, rx) = channel();
         let _w = spawn_inner(dir.path(), tx, FAST);
+
+        // The write above happened before the watcher attached, and the
+        // platform replays it -- through the `Ok(())` branch, which is not the
+        // branch under test and is not stat-gated at all. Left in, it emits
+        // once and the assertion below reads that as the safety tick firing,
+        // which is exactly backwards. Swallowing it first is what makes the
+        // rest of this about the timeout branch and nothing else.
+        settle(&rx, SETTLE_QUIET, Duration::from_secs(3));
 
         // Several safety intervals pass with the file left exactly alone.
         // This is the whole point of the stat gate: previously every one of
