@@ -53,7 +53,15 @@ pub struct Icons {
     pub pending: &'static str,
     /// The still marker for in-progress work: used wherever the state has to be
     /// named rather than watched -- the header counts, the help, the legend --
-    /// and as the resting frame when `animate` is off. Always `spin[0]`.
+    /// and as the resting frame when `animate` is off.
+    ///
+    /// Deliberately **not** `spin[0]`, in any tier: nerd rests on fa-play
+    /// against a braille dot, ascii on `>` against `*`. A single frame of a
+    /// rotation, held still, does not say "in progress" -- a lone braille dot
+    /// says nothing at all -- so the resting marker is its own glyph that names
+    /// the state outright. `with_animation_off_the_marker_is_the_still_glyph`
+    /// pins it, and `row_glyph` takes an `Option<usize>` so "not animating" is
+    /// a state rather than a frame index.
     pub active: &'static str,
     /// The rotation, one glyph per frame. Every frame must measure exactly one
     /// cell in the tier's font, or the marker column shifts as it turns.
