@@ -569,8 +569,20 @@ impl App {
 
         // Keep expansion only for tasks that still exist. Tasks added since the
         // last refresh are absent here, so new work arrives collapsed and an agent
-        // creating subtasks cannot explode the tree under the cursor.
+        // creating subtasks cannot explode the tree under the cursor --
+        // except a brand-new task that already has children, which is the one
+        // case collapsing is actively wrong: it was created together with the
+        // subtasks that are the entire reason to look at it, so hiding them
+        // by default just costs a click to see what showed up. `self.by_id`
+        // still holds the *previous* refresh here, so this is exactly "did
+        // not exist a moment ago" -- an existing parent gaining a new child
+        // is untouched, keeping whatever expansion it already had.
         self.expanded.retain(|id| next_ids.contains(id));
+        for t in &next {
+            if !t.children.is_empty() && !self.by_id.contains_key(&t.id) {
+                self.expanded.insert(t.id.clone());
+            }
+        }
 
         self.selected = self.resolve_selection(&next_ids, &next);
 
@@ -2627,8 +2639,17 @@ mod tests {
         assert_eq!(app.selected.as_deref(), Some("b"));
     }
 
+    /// A task that shows up already having children was created together with
+    /// them -- an agent or a script that finished before dextui's next
+    /// refresh -- and collapsing it would hide the exact subtasks that make it
+    /// worth looking at. This used to collapse, on the reasoning that an agent
+    /// creating subtasks must not explode the tree under the cursor; but the
+    /// cursor is never *on* a task that did not exist a moment ago, so nothing
+    /// under it moves. A pre-existing parent gaining a new child is the case
+    /// that reasoning actually protects, and `expansion_is_dropped_only_for_
+    /// tasks_that_disappeared` below still pins that it is left alone.
     #[test]
-    fn new_tasks_arrive_collapsed_so_the_tree_does_not_explode() {
+    fn a_new_parent_arrives_expanded() {
         let mut app = app_with(vec![task("a", None, &[])], "a");
 
         app.apply_tasks(vec![
@@ -2637,7 +2658,20 @@ mod tests {
             task("kid", Some("newparent"), &[]),
         ]);
 
-        assert!(!app.expanded.contains("newparent"));
+        assert!(app.expanded.contains("newparent"));
+    }
+
+    /// A brand-new leaf has no children to reveal, so it must not spuriously
+    /// join `expanded` -- there would be nothing wrong with it doing so, but a
+    /// set that only ever grows for tasks that can actually use it is the
+    /// simpler invariant to keep believing.
+    #[test]
+    fn a_new_leaf_task_does_not_join_expanded() {
+        let mut app = app_with(vec![task("a", None, &[])], "a");
+
+        app.apply_tasks(vec![task("a", None, &[]), task("newleaf", None, &[])]);
+
+        assert!(!app.expanded.contains("newleaf"));
     }
 
     #[test]
@@ -2652,6 +2686,23 @@ mod tests {
 
         assert!(app.expanded.contains("a"));
         assert!(!app.expanded.contains("gone"));
+    }
+
+    /// The auto-expand above must not resurrect a parent the user deliberately
+    /// collapsed -- it only applies to a task that is *new*, and a parent that
+    /// merely gains one more child among ones it already had is not new.
+    #[test]
+    fn an_existing_parent_gaining_a_child_keeps_its_own_expand_state() {
+        let mut app = app_with(vec![task("a", None, &["k1"]), task("k1", Some("a"), &[])], "a");
+        app.expanded.remove("a"); // deliberately collapsed by the user
+
+        app.apply_tasks(vec![
+            task("a", None, &["k1", "k2"]),
+            task("k1", Some("a"), &[]),
+            task("k2", Some("a"), &[]),
+        ]);
+
+        assert!(!app.expanded.contains("a"), "an existing parent must not be re-expanded");
     }
 
     #[test]
