@@ -217,6 +217,21 @@ fn matches(t: &Task, query: Option<&str>, filter: Filter) -> bool {
                     .description
                     .as_deref()
                     .is_some_and(|d| d.to_lowercase().contains(&q))
+                // The id, from its start only.
+                //
+                // Prose is searched by substring because that is what someone
+                // means by it; an id is not prose. It is eight opaque
+                // characters, so the useful gesture is pasting one whole or
+                // typing its first few, and a fragment from the middle
+                // matching some unrelated task is noise nobody asked for.
+                // `the_middle_of_an_id_is_not_a_match` pins the difference.
+                //
+                // There is no separate syntax for this -- no `#id` mode -- on
+                // purpose. Prefixed search modes exist to switch between
+                // different *kinds* of thing (a command palette's `>` against
+                // its `@`); a name and an id are two fields of one task, and
+                // every tool that searches tasks by both uses one box for it.
+                || t.id.to_lowercase().starts_with(&q)
         }
     }
 }
@@ -464,6 +479,46 @@ mod tests {
         t.description = Some("mentions LOGIN here".into());
 
         assert_eq!(build(&[t], "login", Filter::All).len(), 1);
+    }
+
+    /// Ids are what dex prints, what an agent quotes back, and what the detail
+    /// pane shows -- so pasting one into the search box has to find its task.
+    /// It did not: `matches` looked at the name and the description only.
+    #[test]
+    fn a_query_that_is_a_task_id_finds_it() {
+        let tasks = vec![named("b4d5gfpl", None, "Wire up the watcher"), named("x", None, "Other")];
+
+        let roots = build(&tasks, "b4d5gfpl", Filter::All);
+        assert_eq!(roots.len(), 1, "the id should have found its task");
+        assert_eq!(roots[0].task.name, "Wire up the watcher");
+    }
+
+    /// Typing the start of an id is enough -- they are eight opaque characters
+    /// and nobody remembers all of them.
+    #[test]
+    fn a_prefix_of_an_id_finds_it() {
+        let tasks = vec![named("b4d5gfpl", None, "Wire up the watcher")];
+        assert_eq!(build(&tasks, "b4d5", Filter::All).len(), 1);
+    }
+
+    /// Matched as a **prefix**, not a substring. An id is opaque, so a few
+    /// characters from its middle colliding with an unrelated task's id is
+    /// noise with no intent behind it -- unlike a name, where a substring is
+    /// exactly what someone means. `gfpl` is genuinely inside the id below.
+    #[test]
+    fn the_middle_of_an_id_is_not_a_match() {
+        let tasks = vec![named("b4d5gfpl", None, "Wire up the watcher")];
+        assert!(
+            build(&tasks, "gfpl", Filter::All).is_empty(),
+            "an id is matched from its start, not anywhere inside it"
+        );
+    }
+
+    /// The id is searched *as well as* the name, not instead of it.
+    #[test]
+    fn adding_id_search_does_not_cost_the_name_search() {
+        let tasks = vec![named("zzzz1111", None, "Wire up the watcher")];
+        assert_eq!(build(&tasks, "watcher", Filter::All).len(), 1);
     }
 
     #[test]
