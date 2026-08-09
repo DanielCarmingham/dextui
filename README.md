@@ -23,8 +23,9 @@ the code is built around.
 - **[dex](https://dex.rip/)** on your `PATH`. Every read and write goes through
   it, so its validation and any GitHub/Shortcut sync you have configured still
   run. `dex --version` should print something.
-- **Rust 1.85 or newer** to build (this crate is edition 2024). `rustup` from
-  [rustup.rs](https://rustup.rs) is the usual way in.
+- **Rust 1.88 or newer**, but *only* if you build from source. The first three
+  install routes below are prebuilt binaries and need no toolchain at all.
+  `rustup` from [rustup.rs](https://rustup.rs) is the usual way in.
 - **A real terminal.** Piping it somewhere gets you an explanation and exit 1.
   Use `dextui selftest` to see the data without one.
 - Optional: a [Nerd Font](https://www.nerdfonts.com/) if you want the fancier
@@ -32,13 +33,40 @@ the code is built around.
 
 ## Install
 
+macOS and Linux, on x86-64 and arm64. Every route below puts a `dextui` binary
+in `~/.cargo/bin`, so whichever you pick, that directory needs to be on your
+`PATH`.
+
+**Homebrew**
+
+```bash
+brew install DanielCarmingham/tap/dextui
+```
+
+**One line, no package manager** — the shortest way onto a box you have only
+SSH'd into:
+
+```bash
+curl -LsSf https://github.com/DanielCarmingham/dextui/releases/latest/download/dextui-installer.sh | sh
+```
+
+**Cargo**, if you already have a Rust toolchain:
+
+```bash
+cargo install dextui              # compiles it, a couple of minutes
+cargo binstall dextui             # or grab the same prebuilt binary, seconds
+```
+
+**From source**, which is what you want if you are going to change it:
+
 ```bash
 git clone https://github.com/DanielCarmingham/dextui.git
 cd dextui
 cargo install --path .
 ```
 
-That puts `dextui` in `~/.cargo/bin`, which needs to be on your `PATH`.
+Windows is not supported. It compiles, but `dex` will not launch and the
+config paths do not resolve; see the Windows notes in `CLAUDE.md`.
 
 ## Try it in 30 seconds
 

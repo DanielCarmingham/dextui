@@ -5,6 +5,11 @@ edition = "2024"
 description = "A two-pane terminal UI for browsing and triaging dex tasks"
 license = "MIT"
 repository = "https://github.com/DanielCarmingham/dextui"
+# Same URL as `repository` for now, but it is not redundant: dist maps
+# `homepage` and `description` into the generated Homebrew formula, and a
+# formula with no homepage fails `brew audit`. Point it somewhere else the day
+# there is somewhere else to point it.
+homepage = "https://github.com/DanielCarmingham/dextui"
 readme = "README.md"
 keywords = ["tui", "tasks", "dex", "terminal", "ratatui"]
 categories = ["command-line-utilities"]
@@ -12,7 +17,20 @@ categories = ["command-line-utilities"]
 # the README's relative image links against `repository`, so the screenshots
 # still render on the crate page without shipping 200 KB to every `cargo
 # install`. The scripts are dev tooling and need the repo to be useful anyway.
-exclude = ["CLAUDE.md", "docs/", "scripts/", ".gitignore", "handoff.md", ".claude/", "AGENTS.md"]
+# `.github/` and `dist-workspace.toml` are release plumbing: they describe how
+# *this repo* builds and ships binaries, which is meaningless inside a crate
+# tarball someone is about to compile themselves.
+exclude = [
+    "CLAUDE.md",
+    "docs/",
+    "scripts/",
+    ".gitignore",
+    "handoff.md",
+    ".claude/",
+    "AGENTS.md",
+    ".github/",
+    "dist-workspace.toml",
+]
 # Edition 2024's own floor is 1.85, but ratatui 0.30.2 and tui-markdown 0.3.9 --
 # the exact versions pinned above, not just some newer release -- both declare
 # rust-version 1.88.0 themselves, which is the real floor. Understating it here
@@ -21,6 +39,24 @@ exclude = ["CLAUDE.md", "docs/", "scripts/", ".gitignore", "handoff.md", ".claud
 # older toolchain instead. Bump this if a future dependency bump raises the
 # floor again, in step with actually verifying it.
 rust-version = "1.88"
+
+# `cargo binstall dextui` does not find dist's artifacts on its own. Every one
+# of binstall's default filename patterns contains the version
+# (`{name}-{target}-v{version}`, `{name}_{version}_{target}`, and six more),
+# and dist names its archives `{name}-{target}{suffix}` with the version only
+# in the tag -- so the defaults miss every time and binstall silently falls
+# back to a full source build, which looks like it worked and takes two
+# minutes. binstall has no cargo-dist detection to lean on either: its repo
+# mentions dist-manifest.json exactly once, in SIGNING.md.
+#
+# The layout below is dist's actual output, read out of a built archive rather
+# than assumed -- note the leading `{name}-{target}/` directory, which is why
+# `bin-dir` is not just `{ bin }`. Re-check it if dist's archive format ever
+# changes; a wrong `bin-dir` here fails at extraction, not at download.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
+pkg-fmt = "txz"
+bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
 
 [dependencies]
 anyhow = "1.0.104"
@@ -32,3 +68,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 toml = "1.1.4"
 tui-markdown = { version = "0.3.9", default-features = false }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

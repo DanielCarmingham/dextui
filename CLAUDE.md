@@ -1462,6 +1462,10 @@ is a version bump, not a first publish** — cargo will not let a version number
 be reused, even one that is later yanked, so getting the number right is the
 one step in this list that cannot be undone.
 
+A release now goes out on **three channels**: crates.io, a GitHub Release
+carrying prebuilt binaries for four targets, and a Homebrew formula pushed to
+`DanielCarmingham/homebrew-tap`. Only the first is still manual.
+
 ```bash
 # 1. Bump the version in Cargo.toml, then commit it. Cargo enforces this
 #    ordering itself -- even `--dry-run` refuses outright on a dirty tree
@@ -1472,15 +1476,21 @@ git commit -am "chore: bump version to <version>"
 # 2. Verify, in this order -- each is cheap and catches a different failure:
 cargo test
 cargo clippy --all-targets
+dist plan                   # what the tag would build, no network, no builds
+dist generate --check       # release.yml still matches dist-workspace.toml
 cargo publish --dry-run     # packages, compiles the package in isolation, uploads nothing
 
-# 3. The real thing.
+# 3. The real thing. crates.io first, because it is the irreversible one.
 cargo publish
 
 # 4. Tag the commit that was just published, and push the tag -- see below
 #    for why this has to be the same commit rather than "somewhere around here".
+#    The push is what triggers the release workflow.
 git tag v<version>
 git push origin main v<version>
+
+# 5. Watch it, rather than assuming it. ~10 minutes for four targets.
+gh run watch --repo DanielCarmingham/dextui
 ```
 
 **Picking the number** follows ordinary semver, applied the normal way even
@@ -1495,6 +1505,74 @@ authoritative while being wrong. `0.1.0` itself has no git tag at all — it wen
 out during an earlier session's "push and install" work, before this
 convention existed — so there is today no way to check out exactly what that
 version's source was. Don't repeat the gap.
+
+That rule is now **stronger, not weaker**. The tag no longer merely records
+what was published — it *is* the trigger, and what it points at is what the
+binaries and the Homebrew formula are built from. A tag one commit off used to
+make one channel disagree with the git history; it now makes three channels
+disagree with each other, and the two new ones are the ones nobody checks.
+
+### What the tag push does
+
+`.github/workflows/release.yml` fires on any tag matching
+`**[0-9]+.[0-9]+.[0-9]+*`, builds all four targets natively (macOS arm64 and
+x86-64, Linux arm64 and x86-64, all gnu), creates the GitHub Release with the
+archives, a `sha256.sum`, the shell installer and the formula, and then pushes
+`Formula/dextui.rb` to the tap.
+
+**`release.yml` is generated. Never hand-edit it.** It is produced from
+`dist-workspace.toml` by `dist init` / `dist generate`, and step 2's
+`dist generate --check` fails if the two have drifted. Change the config, then
+regenerate — the reverse silently works until the next person runs `dist init`
+and their change is reverted.
+
+`dist init` also rewrites `dist-workspace.toml` itself, stripping any comments
+you add to the `[dist]` table. That is why the reasoning behind those values
+lives here instead:
+
+- **`installers = ["shell", "homebrew"]`.** No npm — dex is an npm package so
+  the audience does have npm, but a second copy of the binary in a second
+  registry is another thing to keep in sync for no new reach. No msi or
+  powershell: dextui compiles for Windows and does not work there (see the
+  Windows bullet in the repos/worktrees section), and shipping an installer
+  for it would be advertising something broken.
+- **`install-path = "CARGO_HOME"`** so the shell installer, `cargo install`
+  and `cargo binstall` all land the binary in the same `~/.cargo/bin`. Two
+  install routes disagreeing about where the binary went is a support question
+  we can simply not have.
+- **gnu, not musl.** The crate has no `build.rs` and no C dependencies, so
+  either builds cleanly; Ubuntu 22.04's glibc is old enough for anything
+  current. Add `x86_64-unknown-linux-musl` to `targets` if a `GLIBC_2.xx not
+  found` report ever turns up.
+- **`publish-jobs = ["homebrew"]` only.** dist supports `homebrew`, `npm` and
+  custom job paths — there is no built-in crates.io publish, which is why step
+  3 above is still a human running `cargo publish`.
+- **`pr-run-mode = "plan"`** so a PR runs the cheap planning step rather than a
+  four-target build.
+
+**`homebrew-core` is not an option**, and reaching for it will waste an
+afternoon: it requires 75 stars or 30 forks or 30 watchers, and this repo has
+none of any. The personal tap is the whole story until that changes.
+
+**Two things live outside this repo** and will not be obvious when they break:
+the `DanielCarmingham/homebrew-tap` repository must exist, and this repo needs
+a `HOMEBREW_TAP_TOKEN` secret holding a PAT with write access to it. That is
+the exact name dist's generated `publish-homebrew-formula` job reads. A missing
+or expired token fails only at the last job, after ten minutes of builds have
+already succeeded.
+
+**`dist` itself is a mild bus-factor.** Axo, the company behind it, is gone —
+`opensource.axo.dev` no longer resolves and the docs moved to
+`axodotdev.github.io/cargo-dist/book/`. The project still ships (0.32.0,
+2026-05-22). The mitigation is that `release.yml` is a checked-in,
+self-contained GitHub Actions file: if dist stops, that workflow keeps working
+and can be maintained by hand.
+
+**`cargo binstall` needs `[package.metadata.binstall]` in `Cargo.toml`**, which
+is there. Without it binstall's default patterns — all of which embed the
+version in the filename, where dist's do not — miss every artifact and it
+falls back to a source build that looks like success and takes two minutes.
+There is no cargo-dist detection in binstall to lean on.
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
