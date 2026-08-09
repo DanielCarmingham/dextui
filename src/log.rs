@@ -100,10 +100,10 @@ fn format_line(area: &str, msg: &str) -> String {
 /// -- is discarded rather than propagated. See the module docs: logging must
 /// never be a way for the app itself to break.
 fn write_line(path: &Path, area: &str, msg: &str) {
-    if let Some(dir) = path.parent() {
-        if std::fs::create_dir_all(dir).is_err() {
-            return;
-        }
+    if let Some(dir) = path.parent()
+        && std::fs::create_dir_all(dir).is_err()
+    {
+        return;
     }
     let Ok(mut file) = OpenOptions::new().append(true).create(true).open(path) else {
         return;

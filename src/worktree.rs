@@ -51,10 +51,10 @@ pub fn parse(porcelain: &str) -> Vec<Worktree> {
                 // No branch line follows, and a blank row is useless.
                 w.branch = head.chars().take(7).collect();
             }
-        } else if line == "locked" || line.starts_with("locked ") {
-            if let Some(w) = current.as_mut() {
-                w.is_locked = true;
-            }
+        } else if (line == "locked" || line.starts_with("locked "))
+            && let Some(w) = current.as_mut()
+        {
+            w.is_locked = true;
         }
     }
     if let Some(w) = current.take() {
