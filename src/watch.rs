@@ -196,6 +196,30 @@ pub fn spawn(store_dir: &str, out: Sender<()>) -> StoreWatcher {
 fn spawn_inner(store_dir: &str, out: Sender<()>, safety: Duration) -> StoreWatcher {
     let (raw_tx, raw_rx): (Sender<()>, Receiver<()>) = channel();
 
+    // The baseline every tick compares against, read here rather than on the
+    // thread: taken there it is taken at some unknowable moment *after*
+    // `spawn` returned, so a write in that window lands in the baseline itself
+    // and every later tick then correctly reports it as unchanged -- the
+    // change is not late, it is gone. Read before `spawn` returns, that window
+    // does not exist.
+    //
+    // **Read before `attach`, and the order is load-bearing.** Both branches
+    // now compare against this baseline, so whichever of the two runs first
+    // decides what "unchanged" means for a write racing startup:
+    //
+    //   - stat, then attach. A write in the gap misses the watcher but is
+    //     *not* in the baseline, so the first safety tick sees it and reports
+    //     it. Late by up to one interval, which is what the safety tick is for.
+    //   - attach, then stat -- the old order. A write in the gap fires an
+    //     event *and* lands in the baseline, so once the event branch is gated
+    //     the event is dropped as a no-op and the tick agrees with it forever.
+    //     Silently lost, which is the failure this file treats as worse than a
+    //     crash.
+    //
+    // Ungated, the old order was survivable: the event was sent regardless.
+    // Gating the event branch is what made this an ordering question at all.
+    let mut last = stat(store_dir);
+
     // Attached here rather than on the thread, even though the thread is what
     // owns it from now on: callers write to the store immediately after
     // `spawn` returns, and a watcher that only exists once the thread has been
@@ -210,17 +234,6 @@ fn spawn_inner(store_dir: &str, out: Sender<()>, safety: Duration) -> StoreWatch
             None => format!("no watcher for {store_dir}; polling until it exists"),
         },
     );
-
-    // The baseline every tick compares against, read here for the same reason
-    // the watcher is attached here: taking it on the thread instead means it is
-    // taken at some unknowable moment *after* `spawn` returned, so a write in
-    // that window lands in the baseline itself and every later tick then
-    // correctly reports it as unchanged -- the change is not late, it is gone.
-    // With a watcher attached that is survivable, since the write also fires an
-    // event; with none -- a store that does not exist yet, which is exactly
-    // when this matters -- nothing ever reports it and the pane simply stays
-    // empty. Read before `spawn` returns, the window does not exist.
-    let mut last = stat(store_dir);
 
     // Drives `quiet_tick_message`. `quiet_run` counts consecutive unchanged
     // ticks since a quiet tick was last logged; `quiet_logged_at` is `None`
@@ -274,10 +287,35 @@ fn spawn_inner(store_dir: &str, out: Sender<()>, safety: Duration) -> StoreWatch
                     // A single dex write touches the file several times; swallow
                     // the burst so it costs one `dex list`, not one per event.
                     while raw_rx.recv_timeout(DEBOUNCE).is_ok() {}
+
+                    // An event says something in the directory happened, not
+                    // that any task changed -- and the caller pays ~180ms of
+                    // Node startup to find out which. So it is put through the
+                    // same fingerprint the safety tick uses, once the burst it
+                    // might belong to has finished arriving.
+                    //
+                    // Two things this drops, both of them free: writes to
+                    // anything in the store that is not `tasks.jsonl`, and --
+                    // the reason it was worth doing -- the events macOS
+                    // FSEvents replays for activity that predates the watcher.
+                    // At startup that was one wasted `dex list` per watched
+                    // store, on top of the load the app had already done.
+                    //
+                    // No new assumption is being made. The safety tick has
+                    // always decided this exact question with this exact
+                    // fingerprint, so a change it cannot see was already
+                    // invisible; this only stops the other branch from being
+                    // more credulous than the one beside it.
+                    let now = stat(&dir);
+                    if now == last {
+                        log::line("watch", &format!("event {dir} changed nothing"));
+                        continue;
+                    }
+
                     // Refreshed here so the next safety tick compares against
                     // what this event already reported, not a stale baseline
                     // from before it.
-                    last = stat(&dir);
+                    last = now;
                     // Real activity, so the next quiet tick must log in full --
                     // see `quiet_tick_message`.
                     quiet_run = 0;
@@ -637,6 +675,46 @@ mod tests {
         assert!(
             rx.recv_timeout(Duration::from_millis(400)).is_err(),
             "an untouched store must not emit on the safety timeout"
+        );
+    }
+
+    /// An event is not by itself a reason to re-read: the caller pays ~180ms of
+    /// Node startup for every one, and the store directory holds more than
+    /// `tasks.jsonl`.
+    ///
+    /// This is the same question the safety tick already asks, asked on the
+    /// other branch. It went unasked there because an event *usually* means a
+    /// real change -- until macOS FSEvents turned out to replay everything that
+    /// happened just before the watcher attached, which at startup is one
+    /// wasted `dex list` per watched store, on top of the load the app has
+    /// already done.
+    ///
+    /// A scratch file is the deterministic way to provoke it: it is a real
+    /// event on every platform, inotify and FSEvents alike, and it leaves
+    /// `tasks.jsonl` untouched. No dependence on replay, which Linux does not
+    /// do.
+    #[test]
+    fn an_event_that_leaves_the_task_file_alone_is_not_reported() {
+        let dir = TempDir::new("no-op-event");
+        let (tx, rx) = channel();
+        let _w = spawn_inner(dir.path(), tx, FAST);
+
+        // A real change first, waited for -- the ordering barrier from
+        // `a_safety_timeout_with_nothing_changed_emits_nothing`, and here it
+        // doubles as proof the watcher is live, so the silence asserted below
+        // cannot be the silence of nothing working.
+        dir.write(r#"{"id":"a"}"#);
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("a real write must be reported");
+        settle(&rx, SETTLE_QUIET, Duration::from_secs(3));
+
+        fs::write(dir.0.join("scratch.tmp"), "not the task file").unwrap();
+
+        // Comfortably past `DEBOUNCE`, since the event is only judged once the
+        // burst it might belong to has finished arriving.
+        assert!(
+            rx.recv_timeout(DEBOUNCE * 3).is_err(),
+            "an event that changed no task must not cost a `dex list`"
         );
     }
 

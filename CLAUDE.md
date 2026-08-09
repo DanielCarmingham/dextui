@@ -133,6 +133,39 @@ now costs nothing until something really changes. This applies to every store
 the app watches, not just the one currently selected — `watch::spawn_many`
 gives each one its own copy of the same stat-gated net.
 
+**The event branch is gated by the same fingerprint**, once the debounce
+window has closed. A notify event says something in the *directory* happened,
+not that any task changed, and the caller pays ~180ms of Node startup to find
+out which. Measured with a store watched by a running app: three writes of
+files that are not `tasks.jsonl` — a `.DS_Store`, an editor swap file, a
+`.tmp` — cost three `dex list` calls before the gate and none after, while
+three real `dex create`s still cost exactly three, with the task count
+climbing 2 → 3 → 4. No new assumption is involved: the safety tick has always
+answered this question with this fingerprint, so a change it cannot see was
+already invisible; this only stops the branch beside it from being more
+credulous.
+
+**Read the baseline before attaching the watcher, not after.** Both branches
+now compare against it, so the order decides what "unchanged" means for a
+write that races startup. `stat` then `attach` leaves a gap where a write
+misses the watcher but is *not* in the baseline, so the first safety tick
+reports it — late, which is what that tick is for. `attach` then `stat` — the
+original order — leaves a gap where a write fires an event *and* lands in the
+baseline, so the gated event branch discards it as a no-op and every later
+tick agrees, forever. Silently lost. That order was survivable only for as
+long as the event branch sent regardless; gating it is what turned this into
+an ordering question at all.
+
+A caution about what this does *not* buy. It was written to kill a supposed
+startup cost — FSEvents replaying activity from just before each watcher
+attached, one wasted `dex list` per store — and **that does not reproduce**.
+The replay window is a few milliseconds, easily seen in-process, and a real
+launch spends far longer than that between any prior activity and attaching:
+measured over a real registry, startup produced zero watcher events at all,
+before the change and after. The saving above is real and the reasoning for
+the gate stands, but the startup story was extrapolated from a test harness
+and does not survive being measured.
+
 ### A store that does not exist yet
 
 You can watch a directory; you cannot watch one that is not there. dex creates
