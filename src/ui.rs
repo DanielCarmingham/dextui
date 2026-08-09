@@ -1122,6 +1122,29 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
     let inner_width = area.width.saturating_sub(2) as usize;
     let rows = tree::visible_rows(&app.tree, &app.expanded);
 
+    // An empty tree used to draw an empty box and leave it at that. In two
+    // panes the detail said why, but zoomed to one pane -- which is the whole
+    // 60-column-over-SSH case this app cares about -- the screen went blank
+    // with nothing to read. Same text as the detail pane's, from the same
+    // place, so they cannot disagree about the screen they are both
+    // describing.
+    if rows.is_empty()
+        && let Some(msg) = app.empty_reason()
+    {
+        frame.render_widget(
+            Paragraph::new(msg)
+                .block(block)
+                .style(Style::default().fg(DIM))
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        // No rows, so nothing below can be clicked or scrolled onto; the
+        // offset is reset so a later non-empty tree does not inherit a scroll
+        // position from a list that no longer exists.
+        app.tree_offset = 0;
+        return;
+    }
+
     // Hoisted: `selected_row` rebuilds the visible-row list on every call, so
     // asking per row would make each frame quadratic in the size of the tree.
     let selected = app.selected_row();
@@ -1361,10 +1384,21 @@ fn draw_detail(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
     let wrap = app.wrap;
 
     let Some(task) = app.selected_task().cloned() else {
-        let msg = if app.tasks.is_empty() {
-            "No tasks yet.\n\nPress n to create one."
+        // The tree owns this explanation, because the tree is the thing that
+        // is empty -- the detail is merely downstream of having no selection.
+        // Repeating it here put the same sentence on screen twice, side by
+        // side, which is how it first looked and read as a glitch.
+        //
+        // Except when the tree is not on screen at all: zoomed to one pane
+        // with the detail focused, this is the only surface there is, and a
+        // bare "Nothing selected" would be the silence the whole change is
+        // about. Same text, same source, shown in exactly one place either
+        // way.
+        let msg = if app.single_pane() {
+            app.empty_reason()
+                .unwrap_or_else(|| "Nothing selected.".into())
         } else {
-            "No tasks match the current filter.\n\nPress f to change it, or clear the search."
+            "Nothing selected.".into()
         };
         frame.render_widget(
             Paragraph::new(msg)

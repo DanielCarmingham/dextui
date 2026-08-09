@@ -683,6 +683,65 @@ impl App {
     ///
     /// The rule mirrors the `dex list --ready` / `dex list --blocked` pair, and
     /// deliberately **not** `dex status`'s partition. dex disagrees with itself:
+    /// Why the tree is empty, phrased for the pane that has to say so -- or
+    /// `None` when it is not empty and nothing needs explaining.
+    ///
+    /// An empty tree has four causes that look identical and are not. The one
+    /// this exists for is the last: **the query is answered, by tasks the
+    /// filter is hiding.** Drawing nothing there reads as the search being
+    /// broken, and most sharply when the query is an id, because an id is a
+    /// thing you know exists -- you copied it from the pane next door.
+    ///
+    /// It names the filter and counts what it is hiding rather than saying
+    /// something vague, on the same reasoning as `Filter::name`: a filter
+    /// silently hiding tasks with nothing on screen saying so is the most
+    /// confusing state this app has.
+    ///
+    /// Deliberately *not* a bypass. Letting an id match jump the filter would
+    /// put a completed task in a tree whose header says `pending`, and a pane
+    /// contradicting its own header is the failure this codebase treats as
+    /// worse than showing nothing. One keypress, named on screen, is the
+    /// cheaper answer -- and it is what GitHub and Jira do with a closed issue
+    /// under an `is:open` search.
+    pub fn empty_reason(&self) -> Option<String> {
+        if !self.tree.is_empty() {
+            return None;
+        }
+        if self.tasks.is_empty() {
+            return Some("No tasks yet.\n\nPress n to create one.".into());
+        }
+
+        let q = self.query.value.trim();
+        if q.is_empty() {
+            return Some(format!(
+                "No tasks match the {} filter.\n\nPress f to change it.",
+                self.filter.name()
+            ));
+        }
+
+        let hidden = self
+            .tasks
+            .iter()
+            .filter(|t| tree::matches_query(t, q))
+            .count();
+        Some(if hidden == 0 {
+            format!("Nothing matches \"{q}\".\n\nPress esc to clear the search.")
+        } else {
+            // "Press f to show it" was the first wording and it was not true.
+            // `f` cycles pending -> active -> all, so from `pending` one press
+            // lands on `active`, which hides a completed task just as firmly.
+            // Naming `all` is the only advice that always works, since it is
+            // the one filter that hides nothing -- and being told to press a
+            // key that does not fix it is worse than being told nothing.
+            format!(
+                "\"{q}\" matches {hidden} task{}, hidden by the {} filter.\n\n\
+                 Press f until the filter reads all.",
+                if hidden == 1 { "" } else { "s" },
+                self.filter.name(),
+            )
+        })
+    }
+
     /// `cli/status.js` counts a parent with unfinished children as blocked,
     /// while `list --blocked` counts only tasks with an incomplete blocker.
     /// Measured across four real stores, five of the six tasks `dex status`
@@ -2612,6 +2671,76 @@ mod tests {
         let mut app = App::new(tasks, "test".into(), Config::default());
         app.selected = Some(selected.to_string());
         app
+    }
+
+    /// The reported case. A completed task's id, pasted while the filter is
+    /// `pending`, matched nothing visible and the screen said only that the
+    /// filter was hiding something -- so searching for a task you had just
+    /// copied the id of looked like the search was broken.
+    #[test]
+    fn a_query_hidden_by_the_filter_says_so_and_counts_it() {
+        let mut done = task("b4d5gfpl", None, &[]);
+        done.name = "Ship the release workflow".into();
+        done.completed = true;
+        let mut app = counted(vec![done, task("other", None, &[])]);
+
+        app.filter = Filter::Pending;
+        app.query.value = "b4d5gfpl".into();
+        app.rebuild();
+
+        let msg = app.empty_reason().expect("the tree is empty, so there is a reason");
+        assert!(msg.contains("1 task,"), "it should count the matches: {msg}");
+        assert!(msg.contains("pending"), "it should name the filter: {msg}");
+        assert!(msg.contains("Press f"), "it should say which key fixes it: {msg}");
+        // Not "press f to show it": from `pending` one press lands on
+        // `active`, which hides a completed task just as firmly.
+        assert!(
+            msg.contains("until the filter reads all"),
+            "only `all` is guaranteed to show it, so that is what it must name: {msg}"
+        );
+    }
+
+    /// The other half of the same question, and the reason it is worth
+    /// distinguishing: a query nothing answers must not claim the filter is
+    /// hiding anything, or the advice it gives is a wild goose chase.
+    #[test]
+    fn a_query_nothing_answers_does_not_blame_the_filter() {
+        let mut app = counted(vec![task("a", None, &[])]);
+
+        app.filter = Filter::Pending;
+        app.query.value = "zzzznope".into();
+        app.rebuild();
+
+        let msg = app.empty_reason().expect("the tree is empty");
+        assert!(msg.contains("Nothing matches"), "{msg}");
+        assert!(!msg.contains("filter"), "there is nothing for the filter to hide: {msg}");
+    }
+
+    /// Plural, because "matches 3 tasks, press f to show it" reads as a bug in
+    /// the message rather than as a message about a bug.
+    #[test]
+    fn the_hidden_count_is_pluralised() {
+        let done = |id: &str| {
+            let mut t = task(id, None, &[]);
+            t.completed = true;
+            t
+        };
+        let mut app = counted(vec![done("zz1"), done("zz2"), done("zz3")]);
+
+        app.filter = Filter::Pending;
+        app.query.value = "zz".into();
+        app.rebuild();
+
+        let msg = app.empty_reason().expect("the tree is empty");
+        assert!(msg.contains("3 tasks,"), "{msg}");
+    }
+
+    /// A tree with rows in it has nothing to explain, and a message drawn over
+    /// one would be covering the thing it describes.
+    #[test]
+    fn a_tree_with_rows_has_no_empty_reason() {
+        let app = counted(vec![task("a", None, &[])]);
+        assert!(app.empty_reason().is_none());
     }
 
     #[test]

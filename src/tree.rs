@@ -197,6 +197,18 @@ fn order(tasks: &mut [&Task], sort: Sort, reversed: bool) {
     }
 }
 
+/// Whether a task matches the query, ignoring the status filter entirely.
+///
+/// Exists so the empty state can tell two situations apart that look identical
+/// on screen and are not: a query nothing answers, and a query answered by
+/// tasks the filter is hiding. Without it both draw an empty tree, which reads
+/// as the search being broken -- most sharply when the query is an id, since an
+/// id is a thing you know exists.
+pub fn matches_query(t: &Task, query: &str) -> bool {
+    let q = query.trim();
+    matches(t, if q.is_empty() { None } else { Some(q) }, Filter::All)
+}
+
 fn matches(t: &Task, query: Option<&str>, filter: Filter) -> bool {
     let status_ok = match filter {
         Filter::All => true,
