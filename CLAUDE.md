@@ -591,8 +591,26 @@ selection, collapse an expanded node, or interrupt typing.
   scratch every frame.
 - A deleted selection falls back to its nearest surviving **sibling**, then an
   **ancestor**, then the first root. That is genuine product logic and is tested.
-- New tasks always arrive **collapsed**, so an agent creating subtasks in the
-  background cannot explode the tree under the cursor.
+- New tasks arrive **collapsed**, so an agent creating subtasks in the
+  background cannot explode the tree under the cursor. **Except a task that has
+  children and did not a moment ago** — whether it arrived with them or just
+  sprouted them. Both are one event to a reader: a thing that was a row is now
+  a branch, and the subtasks are the entire reason it changed, so hiding them
+  behind a twisty that was not there a second ago costs a click to see what
+  showed up.
+
+  The rule is about gaining the *first* children, not about having any, and the
+  dividing line is whether there is any intent to overrule. A leaf has no
+  twisty and `expanded` never held it, so leaving it collapsed preserves
+  nothing. A parent you collapsed by hand is the opposite — that is a decision,
+  and a fifth child arriving must not undo it.
+
+  It was previously keyed on the task being *new* (`!by_id.contains_key(id)`),
+  which silently missed the leaf→parent case: a task converted into a parent
+  after the fact stayed collapsed, hiding exactly the subtasks that had just
+  been created. `apply_tasks` compares against the children `self.by_id` held
+  at the *previous* refresh, which is what makes "did not have children a
+  moment ago" answerable at all.
 - **First load is the exception**: everything is new then, so `App::new` expands
   once up front. Skipping this opens the app onto a single collapsed root, which
   has been shipped as a bug once already.

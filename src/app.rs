@@ -568,18 +568,32 @@ impl App {
         let next_ids: HashSet<String> = next.iter().map(|t| t.id.clone()).collect();
 
         // Keep expansion only for tasks that still exist. Tasks added since the
-        // last refresh are absent here, so new work arrives collapsed and an agent
-        // creating subtasks cannot explode the tree under the cursor --
-        // except a brand-new task that already has children, which is the one
-        // case collapsing is actively wrong: it was created together with the
-        // subtasks that are the entire reason to look at it, so hiding them
-        // by default just costs a click to see what showed up. `self.by_id`
-        // still holds the *previous* refresh here, so this is exactly "did
-        // not exist a moment ago" -- an existing parent gaining a new child
-        // is untouched, keeping whatever expansion it already had.
+        // last refresh are absent here, so new work arrives collapsed and an
+        // agent creating subtasks cannot explode the tree under the cursor.
+        //
+        // The exception is a task that has children *and did not a moment ago*
+        // -- whether because it is brand new or because it just sprouted them.
+        // Both are the same event to a reader: a thing that was one row is now
+        // a branch, and the subtasks are the entire reason it changed. Hiding
+        // them behind a twisty that was not there a second ago costs a click to
+        // see what showed up.
+        //
+        // The rule is deliberately about gaining the *first* children, not
+        // about having any, and the dividing line is whether there is intent to
+        // overrule. A leaf has no twisty and `expanded` never held it, so
+        // leaving it collapsed preserves nothing. A parent you collapsed by
+        // hand is the opposite: that is a decision, and a fifth child arriving
+        // must not undo it.
+        //
+        // `self.by_id` still holds the *previous* refresh at this point, which
+        // is what makes "did not have children a moment ago" answerable at all.
         self.expanded.retain(|id| next_ids.contains(id));
         for t in &next {
-            if !t.children.is_empty() && !self.by_id.contains_key(&t.id) {
+            let had_children = self
+                .by_id
+                .get(&t.id)
+                .is_some_and(|prev| !prev.children.is_empty());
+            if !t.children.is_empty() && !had_children {
                 self.expanded.insert(t.id.clone());
             }
         }
@@ -2832,6 +2846,66 @@ mod tests {
         ]);
 
         assert!(!app.expanded.contains("a"), "an existing parent must not be re-expanded");
+    }
+
+    /// A leaf that becomes a parent is not the same case as a parent gaining
+    /// another child, and the difference is whether there is any user intent to
+    /// preserve.
+    ///
+    /// You cannot collapse a leaf -- it has no twisty, and `expanded` never
+    /// held it -- so leaving it collapsed the moment it sprouts children
+    /// preserves nothing. It just hides the subtasks that are the entire reason
+    /// the task changed, behind a twisty that was not there a second ago.
+    ///
+    /// This is the case `apply_tasks` used to miss: its test was
+    /// `!by_id.contains_key(id)`, which asks "is this task new", and a leaf
+    /// becoming a parent is not new.
+    #[test]
+    fn a_leaf_that_becomes_a_parent_arrives_expanded() {
+        let mut app = app_with(vec![task("a", None, &[]), task("b", None, &[])], "b");
+        assert!(!app.expanded.contains("a"), "a leaf is not in `expanded` to begin with");
+
+        // An agent adds subtasks to a task that had none.
+        app.apply_tasks(vec![
+            task("a", None, &["k1", "k2"]),
+            task("k1", Some("a"), &[]),
+            task("k2", Some("a"), &[]),
+            task("b", None, &[]),
+        ]);
+
+        assert!(
+            app.expanded.contains("a"),
+            "a task that just gained its first children should show them"
+        );
+    }
+
+    /// The other half, and the reason the rule is about the *first* children
+    /// rather than about having any: an explicit collapse is real intent and a
+    /// refresh must not overrule it. Distinct from the test above, where there
+    /// was no intent to overrule.
+    #[test]
+    fn a_collapsed_parent_gaining_more_children_stays_collapsed() {
+        let mut app = app_with(
+            vec![
+                task("a", None, &["k1"]),
+                task("k1", Some("a"), &[]),
+                task("b", None, &[]),
+            ],
+            "b",
+        );
+        app.expanded.remove("a"); // the user collapsed it on purpose
+
+        app.apply_tasks(vec![
+            task("a", None, &["k1", "k2"]),
+            task("k1", Some("a"), &[]),
+            task("k2", Some("a"), &[]),
+            task("b", None, &[]),
+        ]);
+
+        assert!(
+            !app.expanded.contains("a"),
+            "gaining a further child must not undo a deliberate collapse"
+        );
     }
 
     #[test]
