@@ -4,7 +4,7 @@ A terminal UI for browsing and triaging [dex](https://dex.rip/) tasks —
 task tree on the left, full detail on the right, and, press `1` away, a
 sidebar of every repo and its worktrees.
 
-![dextui showing a task tree with progress meters, a selected row, a detail pane and the repo sidebar](docs/img/dextui-dark.png)
+![dextui showing a task tree with progress meters and a selected row beside the detail pane for that task](docs/img/dextui-dark.png)
 
 <sub>Nerd Font glyphs; the default set works in any terminal. Regenerate with
 `scripts/screenshot.sh`.</sub>
@@ -162,6 +162,12 @@ dextui can watch more than one repo at once — other projects, or other
 worktrees of the one you are in. Press `1` to focus the sidebar, and moving
 the cursor switches the tree and detail panes to whatever worktree it lands
 on, the same way moving the tree cursor changes the detail.
+
+![the repo sidebar focused beside the task tree and detail pane, listing the current repo under a "here" heading and a second registered repo and its worktrees under "saved"](docs/img/dextui-repos.png)
+
+<sub>The same terminal as the shot at the top, after pressing `1`. The
+shortcut strip follows the focus, since `a` means something different
+here.</sub>
 
 The sidebar has two sections. **`here`** is the repo you launched in, and it
 sits there while it is still unsaved. **`saved`** is the list you can reach

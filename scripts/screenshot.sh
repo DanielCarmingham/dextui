@@ -12,6 +12,14 @@
 #   scripts/screenshot.sh                        # -> docs/img/dextui-dark.png
 #   DEXTUI_ICONS=unicode scripts/screenshot.sh out.png
 #
+# The default shot is two panes, because the sidebar starts hidden -- see
+# `repos_open` -- and the README leads with what you actually get on launch.
+# The sidebar's own picture is the same terminal with `1` pressed, which both
+# reveals it and focuses it, so the shortcut strip switches to the repo keys:
+#   KEYS=1 scripts/screenshot.sh docs/img/dextui-repos.png
+# 116 columns is above `repos_pane_above` (110), so it lands as a third pane
+# rather than displacing the detail.
+#
 # The narrow README pair is 60x13, not the 116x21 default -- short enough that
 # neither shot has to crop dead space below the content, which 21 rows does at
 # this width. Recorded here because it previously was not, and the only way to
