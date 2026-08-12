@@ -9,8 +9,15 @@
 # The image is therefore the app's own output rather than a photograph of it --
 # reproducible, and incapable of showing a colour the app does not emit.
 #
-#   scripts/screenshot.sh                        # -> docs/img/dextui-dark.png
+#   scripts/screenshot.sh                        # -> docs/img/dextui-dark.gif
 #   DEXTUI_ICONS=unicode scripts/screenshot.sh out.png
+#
+# The output's extension picks the format. A .gif gets the in-progress marker
+# turning -- a looping 10-frame animation at pulse::FRAME -- and is a drop-in
+# for a PNG anywhere one would go, GitHub included. It is also *smaller* than
+# the PNG it replaced (52 KB against 78), because the only thing that changes
+# between frames is the marker column, which is exactly what GIF encodes well.
+# Anything else is a single still frame.
 #
 # The default shot is two panes, because the sidebar starts hidden -- see
 # `repos_open` -- and the README leads with what you actually get on launch.
@@ -31,7 +38,7 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="${1:-$REPO/docs/img/dextui-dark.png}"
+OUT="${1:-$REPO/docs/img/dextui-dark.gif}"
 ICONS="${DEXTUI_ICONS:-nerd}"
 SOCK="dextui-shot"
 # 116 is comfortably above `single_pane_below`, so the default shot shows the
@@ -44,6 +51,19 @@ COLS="${COLS:-116}"
 ROWS="${ROWS:-21}"
 # Keys to send before capturing, space-separated tmux key names.
 KEYS="${KEYS:-}"
+# For a .gif: how many captures, and how long to wait between them. What
+# matters is the *span*, not the count -- ten frames at 80ms is an 800ms
+# rotation, and no number of captures crammed into less than that can contain
+# all ten. Capturing flat out is what gets this wrong, and it looks like a
+# frequency problem while being a duration one: 30 back-to-back captures
+# returned 7 of 10, because they were done inside 600ms.
+#
+# 30 x 40ms spans ~1.8s, comfortably over two rotations, and the interval also
+# keeps each capture under the 80ms frame so nothing is skipped on the way.
+# screenshot.py orders what arrives by glyph regardless, so over-sampling is
+# free and jitter costs nothing.
+SHOTS="${SHOTS:-30}"
+GAP="${GAP:-0.04}"
 
 command -v tmux >/dev/null || { echo "screenshot.sh: tmux is not on PATH" >&2; exit 1; }
 command -v dex >/dev/null || { echo "screenshot.sh: dex is not on PATH" >&2; exit 1; }
@@ -137,4 +157,18 @@ for k in $KEYS; do
   sleep 1
 done
 
-tmux -L "$SOCK" capture-pane -t shot -p -e | python3 "$REPO/scripts/screenshot.py" "$OUT"
+case "$OUT" in
+  *.gif)
+    # One stdin, so the captures are separated by a form feed -- see SEP in
+    # screenshot.py. printf, not echo, since a pane's own output must not be
+    # interpreted on the way through.
+    for _ in $(seq "$SHOTS"); do
+      tmux -L "$SOCK" capture-pane -t shot -p -e
+      printf '\f'
+      sleep "$GAP"
+    done | python3 "$REPO/scripts/screenshot.py" "$OUT"
+    ;;
+  *)
+    tmux -L "$SOCK" capture-pane -t shot -p -e | python3 "$REPO/scripts/screenshot.py" "$OUT"
+    ;;
+esac

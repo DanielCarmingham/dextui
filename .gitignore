@@ -4,6 +4,10 @@ target/
 # Per-machine Claude Code settings
 .claude/settings.local.json
 
+# Bytecode from the scripts/ helpers -- screenshot.py is imported as a module
+# by anything checking its rendering, which leaves one of these behind.
+__pycache__/
+
 # This repo's own dex store. dex resolves it from the cwd, so working on dextui
 # from here creates one; it is a local task list, not part of the project.
 .dex/

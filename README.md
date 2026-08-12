@@ -4,10 +4,11 @@ A terminal UI for browsing and triaging [dex](https://dex.rip/) tasks —
 task tree on the left, full detail on the right, and, press `1` away, a
 sidebar of every repo and its worktrees.
 
-![dextui showing a task tree with progress meters and a selected row beside the detail pane for that task](docs/img/dextui-dark.png)
+![dextui showing a task tree with progress meters and a selected row beside the detail pane for that task, the markers on the two in-progress tasks turning](docs/img/dextui-dark.gif)
 
-<sub>Nerd Font glyphs; the default set works in any terminal. Regenerate with
-`scripts/screenshot.sh`.</sub>
+<sub>Nerd Font glyphs; the default set works in any terminal. The turning
+markers are the real thing at its real speed — the animation is captured from
+the running app, not staged. Regenerate with `scripts/screenshot.sh`.</sub>
 
 dex is a CLI task tracker. It is excellent at *writing* tasks and at being driven
 by an agent, but reading a tree of them means running `dex list` again and again.

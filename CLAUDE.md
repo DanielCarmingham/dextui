@@ -1493,6 +1493,36 @@ it — reproducible, and incapable of showing a colour the app does not emit.
 `scripts/screenshot.py` does the ANSI-to-PNG half and is useful on its own for
 looking at colour work. Needs Pillow on whichever `python3` is first on `PATH`.
 
+**The lead image is a GIF, with the in-progress marker actually turning**, and
+the output's extension is what selects that. It is *smaller* than the still it
+replaced — 52 KB against 78 — because 192 pixels move and the rest of the frame
+is identical, which is the case GIF's delta encoding is for. `optimize=True` is
+what collects that: without it Pillow writes every frame whole, at 295 KB.
+
+Three things about it are not guessable, and each cost a measurement:
+
+- **One shared palette for every frame, or the still 99% of the picture
+  crawls.** Quantised independently, frames pick slightly different 256-colour
+  palettes for the same antialiased text — 1184 pixels shimmering against the
+  192 that genuinely move, a fault you see as motion in the *text* rather than
+  in the marker. Quantising a stack of all ten frames once and reusing that
+  palette takes it to exactly 0, and is smaller again. Dithering reverses both.
+  The check is the one worth keeping: count pixels that differ between frames
+  *outside* the region the source frames disagree on. It should be zero.
+- **Frames are ordered by their glyph, never by arrival.** `capture-pane` is
+  not free and the spinner turns every 80ms, so a run of captures is in cycle
+  order only by luck. `spinner_frames` reads `BRAILLE_SPIN` out of
+  `src/icons.rs` rather than restating it, so the ordering cannot drift from
+  the app's own table. It also means over-sampling is free, and that the ascii
+  tier cannot be animated this way — `ASCII_SPIN` repeats glyphs, so an index
+  is ambiguous. `screenshot.py` says so rather than emitting a scrambled loop.
+- **What has to be big enough is the *span*, not the count.** Ten frames at
+  80ms is an 800ms rotation, and no number of captures taken inside less than
+  that can hold all ten. Captured flat out, 30 of them returned 7 frames — and
+  it reads as a sampling-frequency problem while being a duration one. Hence
+  `GAP`: 30 × 40ms spans two rotations, and also keeps each capture under one
+  frame so nothing is skipped along the way.
+
 ## Scope
 
 In: browse, search, filter, start, complete, edit, create, subtask, delete —
@@ -1628,7 +1658,7 @@ There is no cargo-dist detection in binstall to lean on.
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **dextui** (1422 symbols, 4958 relationships, 127 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **dextui** (1491 symbols, 5242 relationships, 133 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 

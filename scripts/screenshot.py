@@ -10,12 +10,21 @@ Reads a `tmux capture-pane -e` dump on stdin and writes a PNG.
 
     scripts/screenshot.sh          # captures and calls this
 
+Ask for a `.gif` instead and it writes the spinner turning: stdin then holds
+several captures separated by form feeds, one per distinct in-progress frame.
+See `animate` for why they are ordered by glyph rather than by arrival.
+
 Requires: Pillow, and FiraCode Nerd Font installed.
 """
 
+import pathlib
 import re
 import sys
 from PIL import Image, ImageDraw, ImageFont
+
+# Captures arrive on one stdin, so they need a separator that cannot occur
+# inside one. A form feed is not something a terminal pane ever contains.
+SEP = "\f"
 
 def find_font(*names):
     """First of `names` that exists in any of the usual font directories.
@@ -136,7 +145,7 @@ def coverage(path):
     return set().union(*[t.cmap.keys() for t in f["cmap"].tables])
 
 
-def render(rows, path):
+def draw(rows):
     probe = ImageFont.truetype(REGULAR, FONT_SIZE)
     cw = probe.getlength("M")
     # Ascent+descent, so box-drawing rows meet with no seam between lines.
@@ -195,9 +204,91 @@ def render(rows, path):
                 mid = py + ch * 0.52
                 d.line([(px, mid), (px + cw, mid)], fill=colour, width=1)
 
+    return img
+
+
+def render(rows, path):
+    img = draw(rows)
     img.save(path)
+    cols = max(len(r) for r in rows)
     print(f"{path}  {img.width}x{img.height}  ({cols}x{len(rows)} cells)")
 
 
+def spinner_frames():
+    """The braille rotation, read out of `src/icons.rs` rather than copied here.
+
+    A second copy of that table would be a thing to keep in sync for no gain --
+    and a silently wrong one would order the animation wrong, which is exactly
+    the failure that is hard to see in a looping 800ms GIF.
+    """
+    src = pathlib.Path(__file__).resolve().parent.parent / "src/icons.rs"
+    body = re.search(
+        r"const BRAILLE_SPIN: &\[&str\] = &\[(.*?)\];", src.read_text(), re.S
+    )
+    if not body:
+        sys.exit("screenshot.py: no BRAILLE_SPIN in src/icons.rs")
+    return [chr(int(h, 16)) for h in re.findall(r"\\u\{([0-9a-fA-F]+)\}", body.group(1))]
+
+
+def animate(panes, path):
+    """Write the captures as a looping GIF, one frame per spinner glyph.
+
+    **Ordered by glyph, not by arrival.** `capture-pane` costs ~50ms and the
+    spinner turns every 80ms, so the sampling cadence lands around 91ms -- it
+    cannot help skipping frames, and a run of captures is therefore in cycle
+    order only by luck. Indexing each capture by the braille glyph it contains
+    is exact whatever the cadence does, and lets the caller simply over-sample.
+
+    Every frame is quantised to **one shared palette**, which is the whole
+    difference between this looking like a spinner and looking like a screen
+    with a fault. Left to quantise themselves, frames pick slightly different
+    256-colour palettes for the same antialiased text, and the static 99% of
+    the image crawls: measured at 1184 shimmering pixels against 192 that
+    genuinely move. A shared palette takes that to 0, and is *smaller* -- the
+    delta between frames is then only the spinner. Dithering undoes both.
+    """
+    spin = spinner_frames()
+    seen = {}
+    for pane in panes:
+        hit = {c for c in spin if c in pane}
+        if len(hit) != 1:
+            continue  # a torn capture, or no task running
+        seen.setdefault(spin.index(hit.pop()), pane)
+    if len(seen) != len(spin):
+        sys.exit(
+            f"screenshot.py: saw {len(seen)} of {len(spin)} spinner frames in "
+            f"{len(panes)} captures -- is a task actually in progress, and is "
+            f"DEXTUI_ICONS a braille tier?"
+        )
+
+    imgs = [draw(parse(seen[i])) for i in sorted(seen)]
+    w, h = imgs[0].size
+    stack = Image.new("RGB", (w, h * len(imgs)))
+    for i, im in enumerate(imgs):
+        stack.paste(im, (0, i * h))
+    pal = stack.quantize(colors=256, method=Image.MEDIANCUT, dither=Image.NONE)
+    frames = [im.quantize(palette=pal, dither=Image.NONE) for im in imgs]
+
+    # 80ms is pulse::FRAME, and GIF delays are centiseconds -- so 8cs is exact
+    # and the loop cannot drift at the wrap. optimize is not cosmetic: without
+    # it Pillow writes every frame whole and the file is ~6x larger.
+    frames[0].save(
+        path,
+        save_all=True,
+        append_images=frames[1:],
+        duration=80,
+        loop=0,
+        optimize=True,
+        disposal=1,
+    )
+    size = pathlib.Path(path).stat().st_size / 1024
+    print(f"{path}  {w}x{h}  {len(frames)} frames  {size:.0f} KB")
+
+
 if __name__ == "__main__":
-    render(parse(sys.stdin.read()), sys.argv[1])
+    out = sys.argv[1]
+    text = sys.stdin.read()
+    if out.endswith(".gif"):
+        animate([p for p in text.split(SEP) if p.strip()], out)
+    else:
+        render(parse(text), out)
