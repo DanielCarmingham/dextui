@@ -23,6 +23,14 @@ impl Filter {
         }
     }
 
+    pub fn prev(self) -> Filter {
+        match self {
+            Filter::Pending => Filter::All,
+            Filter::InProgress => Filter::Pending,
+            Filter::All => Filter::InProgress,
+        }
+    }
+
     /// Menu order, which is not cycle order: the menu reads widest-to-narrowest
     /// scope so it looks like a scale, while `next` steps from where you usually
     /// are. Both are deliberate and neither should be derived from the other.
@@ -57,12 +65,23 @@ pub enum Sort {
 }
 
 impl Sort {
+    pub const MENU: [Sort; 4] = [Sort::Priority, Sort::Updated, Sort::Created, Sort::Name];
+
     pub fn next(self) -> Sort {
         match self {
             Sort::Priority => Sort::Updated,
             Sort::Updated => Sort::Created,
             Sort::Created => Sort::Name,
             Sort::Name => Sort::Priority,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Sort::Priority => "priority",
+            Sort::Updated => "updated",
+            Sort::Created => "created",
+            Sort::Name => "name",
         }
     }
 
@@ -390,7 +409,10 @@ mod tests {
     }
 
     fn named(id: &str, parent: Option<&str>, name: &str) -> Task {
-        Task { name: name.to_string(), ..task(id, parent) }
+        Task {
+            name: name.to_string(),
+            ..task(id, parent)
+        }
     }
 
     #[test]
@@ -498,7 +520,10 @@ mod tests {
     /// It did not: `matches` looked at the name and the description only.
     #[test]
     fn a_query_that_is_a_task_id_finds_it() {
-        let tasks = vec![named("b4d5gfpl", None, "Wire up the watcher"), named("x", None, "Other")];
+        let tasks = vec![
+            named("b4d5gfpl", None, "Wire up the watcher"),
+            named("x", None, "Other"),
+        ];
 
         let roots = build(&tasks, "b4d5gfpl", Filter::All);
         assert_eq!(roots.len(), 1, "the id should have found its task");
@@ -560,8 +585,22 @@ mod tests {
         let p = subtree_progress(&tasks);
 
         // root sees the grandchild too.
-        assert_eq!(p["root"], Progress { done: 1, active: 0, total: 2 });
-        assert_eq!(p["mid"], Progress { done: 1, active: 0, total: 1 });
+        assert_eq!(
+            p["root"],
+            Progress {
+                done: 1,
+                active: 0,
+                total: 2
+            }
+        );
+        assert_eq!(
+            p["mid"],
+            Progress {
+                done: 1,
+                active: 0,
+                total: 1
+            }
+        );
     }
 
     #[test]
@@ -571,11 +610,20 @@ mod tests {
         let mut finished = task("c", Some("root"));
         finished.completed = true;
 
-        let tasks = vec![task("root", None), task("a", Some("root")), started, finished];
+        let tasks = vec![
+            task("root", None),
+            task("a", Some("root")),
+            started,
+            finished,
+        ];
 
         assert_eq!(
             subtree_progress(&tasks)["root"],
-            Progress { done: 1, active: 1, total: 3 }
+            Progress {
+                done: 1,
+                active: 1,
+                total: 3
+            }
         );
     }
 
@@ -629,8 +677,14 @@ mod tests {
             stamped("third", "2026-03-01T00:00:00Z", "2026-03-01T00:00:00Z"),
             stamped("second", "2026-02-01T00:00:00Z", "2026-02-01T00:00:00Z"),
         ];
-        assert_eq!(sorted(&tasks, Sort::Created, false), ["third", "second", "first"]);
-        assert_eq!(sorted(&tasks, Sort::Created, true), ["first", "second", "third"]);
+        assert_eq!(
+            sorted(&tasks, Sort::Created, false),
+            ["third", "second", "first"]
+        );
+        assert_eq!(
+            sorted(&tasks, Sort::Created, true),
+            ["first", "second", "third"]
+        );
     }
 
     #[test]
@@ -644,8 +698,14 @@ mod tests {
     fn sorting_applies_at_every_level_not_just_the_roots() {
         let tasks = vec![
             task("root", None),
-            Task { name: "zulu".into(), ..task("z", Some("root")) },
-            Task { name: "alpha".into(), ..task("a", Some("root")) },
+            Task {
+                name: "zulu".into(),
+                ..task("z", Some("root"))
+            },
+            Task {
+                name: "alpha".into(),
+                ..task("a", Some("root"))
+            },
         ];
         let roots = super::build(&tasks, "", Filter::All, Sort::Name, false);
         assert_eq!(ids(&roots[0].children), ["a", "z"]);

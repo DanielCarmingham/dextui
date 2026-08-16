@@ -62,10 +62,19 @@ impl TextInput {
 /// What a prompt should do once the user accepts it.
 #[derive(Debug, Clone)]
 pub enum Pending {
-    Complete { id: String },
-    CreateName { parent: Option<String> },
-    CreateDescription { parent: Option<String>, name: String },
-    EditName { id: String },
+    Complete {
+        id: String,
+    },
+    CreateName {
+        parent: Option<String>,
+    },
+    CreateDescription {
+        parent: Option<String>,
+        name: String,
+    },
+    EditName {
+        id: String,
+    },
     /// A path typed into the sidebar's "save a repo" prompt.
     ///
     /// The only prompt that is not about a task, which is why it carries
@@ -87,9 +96,16 @@ pub enum Mode {
     Search,
     Prompt(Prompt),
     /// Delete confirmation.
-    Confirm { id: String, message: String },
+    Confirm {
+        id: String,
+        message: String,
+    },
     /// Offered when dex refuses to complete a task with unfinished subtasks.
-    ForceComplete { id: String, result: String, message: String },
+    ForceComplete {
+        id: String,
+        result: String,
+        message: String,
+    },
     Error(String),
     Help,
 }
@@ -129,8 +145,11 @@ pub enum Panes {
 /// of itself here: a rung that dropped the menu simply publishes no zones for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderZone {
-    /// Left cycles the order, right reverses it -- mirroring `o` and `O`.
-    Sort,
+    /// One word of the sort menu. Picks that sort outright.
+    Sort(Sort),
+    /// The lone sort name a narrow header falls back to. Left cycles the order,
+    /// right reverses it -- mirroring `o` and `O`.
+    SortCycle,
     /// One word of the menu. Picks that filter outright.
     Filter(Filter),
     /// The lone filter name a narrow header falls back to. With no options on
@@ -558,9 +577,10 @@ impl App {
         }
 
         if let Some(parent) = self.by_id.get(&id).and_then(|t| t.parent_id.clone())
-            && self.row_ids().contains(&parent) {
-                self.selected = Some(parent);
-            }
+            && self.row_ids().contains(&parent)
+        {
+            self.selected = Some(parent);
+        }
     }
 
     /// Applies a freshly fetched task list without disturbing the user.
@@ -659,9 +679,10 @@ impl App {
         // Scan outward from where it used to be: next sibling first, then previous.
         for offset in 1..=siblings.len() {
             if let Some(after) = siblings.get(idx + offset)
-                && next_ids.contains(after) {
-                    return Some(after.clone());
-                }
+                && next_ids.contains(after)
+            {
+                return Some(after.clone());
+            }
             if offset <= idx {
                 let before = &siblings[idx - offset];
                 if next_ids.contains(before) {
@@ -913,8 +934,13 @@ impl App {
             return false;
         };
         match zone {
-            HeaderZone::Sort if secondary => self.sort_reversed = !self.sort_reversed,
-            HeaderZone::Sort => self.sort = self.sort.next(),
+            HeaderZone::Sort(s) if secondary => {
+                self.sort = s;
+                self.sort_reversed = !self.sort_reversed;
+            }
+            HeaderZone::Sort(s) => self.sort = s,
+            HeaderZone::SortCycle if secondary => self.sort_reversed = !self.sort_reversed,
+            HeaderZone::SortCycle => self.sort = self.sort.next(),
             // Picking a filter with the right button would be a surprise; only
             // the sort has a second action.
             _ if secondary => return false,
@@ -1061,7 +1087,11 @@ impl App {
             return;
         };
         let n = cycle.len();
-        self.focus = cycle[if forward { (i + 1) % n } else { (i + n - 1) % n }];
+        self.focus = cycle[if forward {
+            (i + 1) % n
+        } else {
+            (i + n - 1) % n
+        }];
     }
 
     /// Whether only one pane is drawn, the focused one filling the width.
@@ -1609,7 +1639,8 @@ impl App {
             if let Some(row) = self.repos.iter_mut().find(|r| r.path == repo_path) {
                 row.registered = false;
             }
-            self.repos.retain(|r| r.registered || Some(&r.path) == self.here_path.as_ref());
+            self.repos
+                .retain(|r| r.registered || Some(&r.path) == self.here_path.as_ref());
             self.selected_repo_row = self
                 .selected_repo_row
                 .min(self.repo_rows().len().saturating_sub(1));
@@ -1659,7 +1690,10 @@ fn counts_from(tasks: &[Task], by_id: &HashMap<String, Task>) -> Counts {
 /// Immediate children only, matching dex's `hasIncompleteChildren` -- not the
 /// progress rollup, which counts all descendants.
 fn has_incomplete_children(t: &Task, by_id: &HashMap<String, Task>) -> bool {
-    t.children.iter().filter_map(|id| by_id.get(id)).any(|c| !c.completed)
+    t.children
+        .iter()
+        .filter_map(|id| by_id.get(id))
+        .any(|c| !c.completed)
 }
 
 /// Counts for a task list that belongs to no running `App` -- another
@@ -1744,7 +1778,11 @@ mod tests {
 
         app.sort_reversed = !app.sort_reversed;
         app.rebuild();
-        assert_eq!(app.selected.as_deref(), Some("b"), "reordering is not moving");
+        assert_eq!(
+            app.selected.as_deref(),
+            Some("b"),
+            "reordering is not moving"
+        );
     }
 
     fn narrow(width: u16) -> App {
@@ -1770,7 +1808,10 @@ mod tests {
         let mut small = narrow(60);
         assert!(small.single_pane(), "the width already zoomed this one");
         small.toggle_zoom();
-        assert!(!small.single_pane(), "z must be able to force the split back");
+        assert!(
+            !small.single_pane(),
+            "z must be able to force the split back"
+        );
     }
 
     /// Pressing the key is an explicit decision, so it outranks the width until
@@ -1790,7 +1831,10 @@ mod tests {
     #[test]
     fn the_split_gives_way_below_the_configured_width() {
         assert!(narrow(60).single_pane(), "60 columns should be one pane");
-        assert!(!narrow(80).single_pane(), "the threshold itself still splits");
+        assert!(
+            !narrow(80).single_pane(),
+            "the threshold itself still splits"
+        );
         assert!(!narrow(100).single_pane());
     }
 
@@ -1902,7 +1946,11 @@ mod tests {
     fn repos_focus_becomes_a_single_pane_when_the_ladder_has_no_room_for_it() {
         let mut app = ladder(90);
         app.focus = Focus::Tree;
-        assert_eq!(app.panes(), Panes::Two, "fixture should land squarely in the gap");
+        assert_eq!(
+            app.panes(),
+            Panes::Two,
+            "fixture should land squarely in the gap"
+        );
 
         app.focus = Focus::Repos;
 
@@ -1927,11 +1975,19 @@ mod tests {
     fn narrowing_into_the_gap_while_already_repo_focused_keeps_it_visible() {
         let mut app = ladder(200);
         app.show_repos(); // asked for, not stranded -- see the test above
-        assert_eq!(app.panes(), Panes::Three, "fixture should start with room to spare");
+        assert_eq!(
+            app.panes(),
+            Panes::Three,
+            "fixture should start with room to spare"
+        );
 
         app.terminal_width = 90; // resize alone, no key event
 
-        assert_eq!(app.panes(), Panes::Two, "must not vanish on a resize with no keypress");
+        assert_eq!(
+            app.panes(),
+            Panes::Two,
+            "must not vanish on a resize with no keypress"
+        );
         assert_eq!(app.drawn_panes(), vec![Focus::Repos, Focus::Tree]);
     }
 
@@ -1957,7 +2013,11 @@ mod tests {
         app.toggle_zoom();
 
         assert_eq!(app.zoom, Some(false));
-        assert_eq!(app.panes(), Panes::Two, "z must be able to force the split back");
+        assert_eq!(
+            app.panes(),
+            Panes::Two,
+            "z must be able to force the split back"
+        );
     }
 
     /// The same monotonicity rule `the_pane_ladder_is_monotone` pins for the
@@ -2105,7 +2165,10 @@ mod tests {
                 app.repos.iter().any(|r| r.path == "/x/two"),
                 "the repo you are in was dropped"
             );
-            assert!(app.repo_rows().contains(&crate::repos::Row::Repo { index: 1 }));
+            assert!(
+                app.repo_rows()
+                    .contains(&crate::repos::Row::Repo { index: 1 })
+            );
             assert_eq!(app.registry.repos, vec!["/x/one".to_string()]);
         });
     }
@@ -2170,7 +2233,11 @@ mod tests {
             ..Config::default()
         };
         app.apply_config(cfg);
-        assert_eq!(app.panes(), Panes::Two, "reload must restore the file's repos_open");
+        assert_eq!(
+            app.panes(),
+            Panes::Two,
+            "reload must restore the file's repos_open"
+        );
     }
 
     /// `b` outranks the width rule, the way `z` does for zoom -- and toggles
@@ -2284,7 +2351,11 @@ mod tests {
         app.show_repos();
 
         assert_eq!(app.focus, Focus::Repos);
-        assert_eq!(app.panes(), Panes::Three, "1 could not bring the sidebar back");
+        assert_eq!(
+            app.panes(),
+            Panes::Three,
+            "1 could not bring the sidebar back"
+        );
     }
 
     /// The reported bug: switching into a saved repo made the repo you came
@@ -2296,7 +2367,11 @@ mod tests {
         let mut app = app_with_repos();
         let before = app.repo_rows();
         assert_eq!(before[0], crate::repos::Row::Heading("here"));
-        assert_eq!(before[1], crate::repos::Row::Repo { index: 1 }, "launched in two");
+        assert_eq!(
+            before[1],
+            crate::repos::Row::Repo { index: 1 },
+            "launched in two"
+        );
 
         // Switch to the other repo's store, as `enter` on a saved row does.
         app.load_store(Vec::new(), "/x/one/.dex".into());
@@ -2331,7 +2406,10 @@ mod tests {
 
         // The store appearing is enough to bring it back -- no relaunch.
         app.here_store = std::env::temp_dir().to_string_lossy().into_owned();
-        assert!(app.repo_rows().contains(&crate::repos::Row::Repo { index: 1 }));
+        assert!(
+            app.repo_rows()
+                .contains(&crate::repos::Row::Repo { index: 1 })
+        );
     }
 
     /// Headings are labels, so the cursor passes over them rather than landing
@@ -2356,9 +2434,15 @@ mod tests {
         }
 
         app.select_first_repo_row();
-        assert!(app.repo_rows()[app.selected_repo_row].selectable(), "g landed on a label");
+        assert!(
+            app.repo_rows()[app.selected_repo_row].selectable(),
+            "g landed on a label"
+        );
         app.select_last_repo_row();
-        assert!(app.repo_rows()[app.selected_repo_row].selectable(), "G landed on a label");
+        assert!(
+            app.repo_rows()[app.selected_repo_row].selectable(),
+            "G landed on a label"
+        );
     }
 
     /// Clicking a label should no more move the cursor than clicking below the
@@ -2388,7 +2472,10 @@ mod tests {
         app.select_repo_at_row(app.body_top + 1 + 3); // fourth row: Repo(two)
 
         assert_eq!(app.selected_repo_row, 3);
-        assert_eq!(app.selected, task_before, "a sidebar click moved the task selection");
+        assert_eq!(
+            app.selected, task_before,
+            "a sidebar click moved the task selection"
+        );
     }
 
     /// Dead space below the last row must do nothing -- not jump the cursor to
@@ -2454,7 +2541,10 @@ mod tests {
         let mut app = narrow(60);
         app.divider_x = 0;
         for col in [0, 1, 30, 59] {
-            assert!(app.divider_at(col).is_none(), "column {col} looked like a divider");
+            assert!(
+                app.divider_at(col).is_none(),
+                "column {col} looked like a divider"
+            );
         }
     }
 
@@ -2515,7 +2605,7 @@ mod tests {
     /// Mirrors `o` and `O`: the two buttons are the two keys.
     #[test]
     fn the_sort_zone_cycles_on_left_and_reverses_on_right() {
-        let mut app = clickable(vec![(4, 11, HeaderZone::Sort)]);
+        let mut app = clickable(vec![(4, 11, HeaderZone::SortCycle)]);
         let order = app.sort;
 
         assert!(app.click_header(5, false));
@@ -2526,6 +2616,15 @@ mod tests {
         assert!(app.click_header(5, true));
         assert!(app.sort_reversed);
         assert_eq!(app.sort, after_cycle, "reversing must not also cycle");
+    }
+
+    #[test]
+    fn clicking_a_sort_word_selects_that_sort() {
+        let mut app = clickable(vec![(4, 10, HeaderZone::Sort(Sort::Updated))]);
+        app.sort = Sort::Priority;
+
+        assert!(app.click_header(6, false));
+        assert_eq!(app.sort, Sort::Updated);
     }
 
     /// Right-clicking a filter would be a surprise -- only the sort has a second
@@ -2543,25 +2642,35 @@ mod tests {
     /// or disturb the selection, which is what the whole app is built around.
     #[test]
     fn clicking_empty_header_space_changes_nothing() {
-        let mut app = clickable(vec![(40, 47, HeaderZone::Sort)]);
-        let before = (app.filter, app.sort, app.sort_reversed, app.selected.clone());
+        let mut app = clickable(vec![(40, 47, HeaderZone::SortCycle)]);
+        let before = (
+            app.filter,
+            app.sort,
+            app.sort_reversed,
+            app.selected.clone(),
+        );
 
         assert!(!app.click_header(3, false));
         assert!(!app.click_header(39, false));
         assert!(!app.click_header(48, false));
 
         assert_eq!(
-            (app.filter, app.sort, app.sort_reversed, app.selected.clone()),
+            (
+                app.filter,
+                app.sort,
+                app.sort_reversed,
+                app.selected.clone()
+            ),
             before
         );
     }
 
     #[test]
     fn a_zone_covers_its_last_column() {
-        let app = clickable(vec![(10, 12, HeaderZone::Sort)]);
+        let app = clickable(vec![(10, 12, HeaderZone::SortCycle)]);
         assert_eq!(app.header_zone_at(9), None);
-        assert_eq!(app.header_zone_at(10), Some(HeaderZone::Sort));
-        assert_eq!(app.header_zone_at(12), Some(HeaderZone::Sort));
+        assert_eq!(app.header_zone_at(10), Some(HeaderZone::SortCycle));
+        assert_eq!(app.header_zone_at(12), Some(HeaderZone::SortCycle));
         assert_eq!(app.header_zone_at(13), None);
     }
 
@@ -2623,7 +2732,11 @@ mod tests {
         kid.completed = true;
 
         let app = counted(vec![parent, kid]);
-        assert_eq!(app.counts().ready, 1, "nothing is holding the parent up now");
+        assert_eq!(
+            app.counts().ready,
+            1,
+            "nothing is holding the parent up now"
+        );
     }
 
     /// In progress is its own bucket and is never also counted ready or blocked,
@@ -2702,10 +2815,18 @@ mod tests {
         app.query.value = "b4d5gfpl".into();
         app.rebuild();
 
-        let msg = app.empty_reason().expect("the tree is empty, so there is a reason");
-        assert!(msg.contains("1 task,"), "it should count the matches: {msg}");
+        let msg = app
+            .empty_reason()
+            .expect("the tree is empty, so there is a reason");
+        assert!(
+            msg.contains("1 task,"),
+            "it should count the matches: {msg}"
+        );
         assert!(msg.contains("pending"), "it should name the filter: {msg}");
-        assert!(msg.contains("Press f"), "it should say which key fixes it: {msg}");
+        assert!(
+            msg.contains("Press f"),
+            "it should say which key fixes it: {msg}"
+        );
         // Not "press f to show it": from `pending` one press lands on
         // `active`, which hides a completed task just as firmly.
         assert!(
@@ -2727,7 +2848,10 @@ mod tests {
 
         let msg = app.empty_reason().expect("the tree is empty");
         assert!(msg.contains("Nothing matches"), "{msg}");
-        assert!(!msg.contains("filter"), "there is nothing for the filter to hide: {msg}");
+        assert!(
+            !msg.contains("filter"),
+            "there is nothing for the filter to hide: {msg}"
+        );
     }
 
     /// Plural, because "matches 3 tasks, press f to show it" reads as a bug in
@@ -2820,7 +2944,11 @@ mod tests {
     #[test]
     fn expansion_is_dropped_only_for_tasks_that_disappeared() {
         let mut app = app_with(
-            vec![task("a", None, &["k"]), task("k", Some("a"), &[]), task("gone", None, &[])],
+            vec![
+                task("a", None, &["k"]),
+                task("k", Some("a"), &[]),
+                task("gone", None, &[]),
+            ],
             "a",
         );
         app.expanded.insert("gone".to_string());
@@ -2836,7 +2964,10 @@ mod tests {
     /// merely gains one more child among ones it already had is not new.
     #[test]
     fn an_existing_parent_gaining_a_child_keeps_its_own_expand_state() {
-        let mut app = app_with(vec![task("a", None, &["k1"]), task("k1", Some("a"), &[])], "a");
+        let mut app = app_with(
+            vec![task("a", None, &["k1"]), task("k1", Some("a"), &[])],
+            "a",
+        );
         app.expanded.remove("a"); // deliberately collapsed by the user
 
         app.apply_tasks(vec![
@@ -2845,7 +2976,10 @@ mod tests {
             task("k2", Some("a"), &[]),
         ]);
 
-        assert!(!app.expanded.contains("a"), "an existing parent must not be re-expanded");
+        assert!(
+            !app.expanded.contains("a"),
+            "an existing parent must not be re-expanded"
+        );
     }
 
     /// A leaf that becomes a parent is not the same case as a parent gaining
@@ -2863,7 +2997,10 @@ mod tests {
     #[test]
     fn a_leaf_that_becomes_a_parent_arrives_expanded() {
         let mut app = app_with(vec![task("a", None, &[]), task("b", None, &[])], "b");
-        assert!(!app.expanded.contains("a"), "a leaf is not in `expanded` to begin with");
+        assert!(
+            !app.expanded.contains("a"),
+            "a leaf is not in `expanded` to begin with"
+        );
 
         // An agent adds subtasks to a task that had none.
         app.apply_tasks(vec![
@@ -3058,7 +3195,10 @@ mod tests {
 
         assert!(!app.is_animating());
         for ms in (0..3000).step_by(50) {
-            assert!(!app.pulse_tick(std::time::Duration::from_millis(ms), 10), "{ms}ms");
+            assert!(
+                !app.pulse_tick(std::time::Duration::from_millis(ms), 10),
+                "{ms}ms"
+            );
         }
     }
 
@@ -3116,7 +3256,11 @@ mod tests {
 
         app.select_worktree("/x/two");
 
-        assert_eq!(app.detail_scroll, (0, 0), "a stale scroll would hide the new content");
+        assert_eq!(
+            app.detail_scroll,
+            (0, 0),
+            "a stale scroll would hide the new content"
+        );
     }
 
     #[test]
@@ -3135,10 +3279,17 @@ mod tests {
         // switch that leaves the new tree collapsed to a single root because
         // it reused `apply_tasks`'s "only expand what is genuinely new"
         // rule against a tree where every id looks new by definition.
-        assert!(app.expanded.contains("root"), "the new store opened collapsed");
+        assert!(
+            app.expanded.contains("root"),
+            "the new store opened collapsed"
+        );
         assert_eq!(app.row_ids().len(), 2, "the child must be visible too");
         assert_eq!(app.store_label, "other");
-        assert_eq!(app.selected.as_deref(), Some("root"), "old-store id must not linger");
+        assert_eq!(
+            app.selected.as_deref(),
+            Some("root"),
+            "old-store id must not linger"
+        );
         assert_eq!(app.tree_offset, 0);
         assert_eq!(app.detail_scroll, (0, 0));
     }
@@ -3184,7 +3335,10 @@ mod tests {
         // Return to "/x/one": select_worktree restores "b" from task_memory
         // first, and load_store must not stomp over it afterward.
         app.select_worktree("/x/one");
-        app.load_store(vec![task("a", None, &[]), task("b", None, &[])], "one".into());
+        app.load_store(
+            vec![task("a", None, &[]), task("b", None, &[])],
+            "one".into(),
+        );
 
         assert_eq!(
             app.selected.as_deref(),
@@ -3295,7 +3449,10 @@ mod tests {
         assert!(app.repo_rows()[app.selected_repo_row].selectable());
 
         app.move_repo_row(100);
-        assert_eq!(app.selected_repo_row, last, "must not run past the last row");
+        assert_eq!(
+            app.selected_repo_row, last,
+            "must not run past the last row"
+        );
     }
 
     #[test]
@@ -3317,7 +3474,10 @@ mod tests {
         assert_eq!(app.selected_repo_row, last);
 
         app.select_first_repo_row();
-        assert_eq!(app.selected_repo_row, first, "g must clear the `here` label");
+        assert_eq!(
+            app.selected_repo_row, first,
+            "g must clear the `here` label"
+        );
     }
 
     /// `crate::test_support::with_isolated_registry`, not a copy of its own:
@@ -3417,7 +3577,11 @@ mod tests {
             let before = app.repos.len();
             let err = app.unregister_repo_path("/x/one").unwrap_err();
             assert!(!err.is_empty());
-            assert_eq!(app.repos.len(), before, "the row must survive a failed save");
+            assert_eq!(
+                app.repos.len(),
+                before,
+                "the row must survive a failed save"
+            );
         });
     }
 
@@ -3507,7 +3671,10 @@ mod tests {
             app.cycle_focus(false);
             back.push(app.focus);
         }
-        assert_eq!(back, vec![Focus::Tree, Focus::Repos, Focus::Detail, Focus::Tree]);
+        assert_eq!(
+            back,
+            vec![Focus::Tree, Focus::Repos, Focus::Detail, Focus::Tree]
+        );
     }
 
     /// The cycle follows what is drawn, so hiding the sidebar with `b` takes
@@ -3645,7 +3812,12 @@ mod tests {
         // is left over.
         let span = 100 - app.repos_right;
         let landed = app.repos_right + span * app.split_percent / 100;
-        assert_eq!(landed, 60, "the divider moved {} cells from the pointer", landed as i32 - 60);
+        assert_eq!(
+            landed,
+            60,
+            "the divider moved {} cells from the pointer",
+            landed as i32 - 60
+        );
     }
 
     /// Widening the sidebar must cost both panes, not one. The percentage is
@@ -3667,7 +3839,10 @@ mod tests {
         let (tree_narrow, detail_narrow) = widths(20);
         let (tree_wide, detail_wide) = widths(50);
 
-        assert!(tree_wide < tree_narrow, "the tree kept its width: {tree_wide}");
+        assert!(
+            tree_wide < tree_narrow,
+            "the tree kept its width: {tree_wide}"
+        );
         assert!(detail_wide < detail_narrow, "the detail should shrink too");
         assert_eq!(
             tree_narrow - tree_wide,
@@ -3766,7 +3941,11 @@ mod tests {
     #[test]
     fn clicking_a_row_selects_the_task_drawn_there() {
         let mut app = App::new(
-            vec![task("a", None, &[]), task("b", None, &[]), task("c", None, &[])],
+            vec![
+                task("a", None, &[]),
+                task("b", None, &[]),
+                task("c", None, &[]),
+            ],
             "t".into(),
             Config::default(),
         );
@@ -3786,7 +3965,11 @@ mod tests {
         geo(&mut app);
 
         app.select_at_row(app.body_top + 15);
-        assert_eq!(app.selected.as_deref(), Some("a"), "selection moved to nothing");
+        assert_eq!(
+            app.selected.as_deref(),
+            Some("a"),
+            "selection moved to nothing"
+        );
     }
 
     #[test]
@@ -3800,7 +3983,11 @@ mod tests {
         app.select(Some("b".into()));
 
         app.select_at_row(app.body_top);
-        assert_eq!(app.selected.as_deref(), Some("b"), "border click moved selection");
+        assert_eq!(
+            app.selected.as_deref(),
+            Some("b"),
+            "border click moved selection"
+        );
     }
 
     #[test]
@@ -3808,7 +3995,11 @@ mod tests {
         // Without honouring the offset, every click would address the top of the
         // list rather than what is actually drawn.
         let mut app = App::new(
-            vec![task("a", None, &[]), task("b", None, &[]), task("c", None, &[])],
+            vec![
+                task("a", None, &[]),
+                task("b", None, &[]),
+                task("c", None, &[]),
+            ],
             "t".into(),
             Config::default(),
         );
@@ -3875,7 +4066,11 @@ mod tests {
         let mut app = nested();
         // `p`'s marker column, but on `c`'s row -- indentation, not a marker.
         app.click_tree(4, app.body_top + 2);
-        assert_eq!(app.row_ids(), vec!["p", "c", "g"], "indent acted as a marker");
+        assert_eq!(
+            app.row_ids(),
+            vec!["p", "c", "g"],
+            "indent acted as a marker"
+        );
         assert_eq!(app.selected.as_deref(), Some("c"), "it should still select");
 
         app.click_tree(6, app.body_top + 2);
@@ -3906,7 +4101,11 @@ mod tests {
         assert_eq!(app.row_ids().len(), 3, "column 4 is inside the sidebar");
 
         app.click_tree(30, app.body_top + 1);
-        assert_eq!(app.row_ids(), vec!["p"], "the zone did not shift with the pane");
+        assert_eq!(
+            app.row_ids(),
+            vec!["p"],
+            "the zone did not shift with the pane"
+        );
     }
 
     /// The same gesture has to do the same thing in both panes: content slides,
@@ -3937,7 +4136,11 @@ mod tests {
         // view from the bottom, exactly as later lines do on the right.
         app.scroll_tree(2);
         assert_eq!(app.tree_offset, 5, "the tree's content did not move");
-        assert_eq!(app.selected.as_deref(), Some("f"), "the wheel must not reselect");
+        assert_eq!(
+            app.selected.as_deref(),
+            Some("f"),
+            "the wheel must not reselect"
+        );
 
         app.scroll_tree(-2);
         assert_eq!(app.tree_offset, 3, "the tree did not come back");
@@ -3958,8 +4161,16 @@ mod tests {
         app.select(Some("a".into()));
 
         app.scroll_tree(50);
-        assert_eq!(app.selected.as_deref(), Some("a"), "the wheel must not reselect");
-        assert!(app.tree_offset <= 4, "offset ran past the list: {}", app.tree_offset);
+        assert_eq!(
+            app.selected.as_deref(),
+            Some("a"),
+            "the wheel must not reselect"
+        );
+        assert!(
+            app.tree_offset <= 4,
+            "offset ran past the list: {}",
+            app.tree_offset
+        );
 
         app.scroll_tree(-50);
         assert_eq!(app.selected.as_deref(), Some("a"));
@@ -3972,10 +4183,17 @@ mod tests {
     /// the bug this field exists to prevent. See `App::needs_tree_reveal`.
     #[test]
     fn scroll_tree_does_not_ask_for_a_reveal() {
-        let mut app = App::new(vec![task("a", None, &[]), task("b", None, &[])], "t".into(), Config::default());
+        let mut app = App::new(
+            vec![task("a", None, &[]), task("b", None, &[])],
+            "t".into(),
+            Config::default(),
+        );
         app.needs_tree_reveal = false; // as it would be on every frame after the first
         app.scroll_tree(1);
-        assert!(!app.needs_tree_reveal, "a wheel scroll must not ask for a reveal");
+        assert!(
+            !app.needs_tree_reveal,
+            "a wheel scroll must not ask for a reveal"
+        );
     }
 
     /// A real selection change is the one thing that must ask for a reveal --
@@ -3984,10 +4202,17 @@ mod tests {
     /// follow it.
     #[test]
     fn a_real_selection_change_asks_for_a_reveal() {
-        let mut app = App::new(vec![task("a", None, &[]), task("b", None, &[])], "t".into(), Config::default());
+        let mut app = App::new(
+            vec![task("a", None, &[]), task("b", None, &[])],
+            "t".into(),
+            Config::default(),
+        );
         app.needs_tree_reveal = false;
         app.move_selection(1);
-        assert!(app.needs_tree_reveal, "a moved selection must ask for a reveal");
+        assert!(
+            app.needs_tree_reveal,
+            "a moved selection must ask for a reveal"
+        );
     }
 
     #[test]

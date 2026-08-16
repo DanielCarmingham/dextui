@@ -4,6 +4,7 @@
 //! neutral descriptions of what things *are*, and this module decides how they
 //! look.
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -11,7 +12,6 @@ use ratatui::widgets::{
     Block, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Wrap,
 };
-use ratatui::Frame;
 
 use crate::app::{App, Counts, Focus, HeaderZone, Mode, Panes};
 
@@ -19,16 +19,13 @@ use crate::app::{App, Counts, Focus, HeaderZone, Mode, Panes};
 /// terminal, so the app inherits whatever scheme the user runs -- including a
 /// light/dark switch at runtime -- instead of imposing its own. The values live
 /// in `theme`; this module decides where they go.
-use crate::theme::{
-    ACCENT, ACCENT_DIM, ACTIVE, BLOCKED, CODE, DIM, DONE, PLAIN, TODO,
-};
+use crate::theme::{ACCENT, ACCENT_DIM, ACTIVE, BLOCKED, CODE, DIM, DONE, PLAIN, TODO};
 
+use crate::dex::{self, Status, Task, age, local_time};
 use crate::icons::Icons;
-use crate::dex::{self, age, local_time, Status, Task};
 use crate::tree::{self, Progress};
 
-const SHORTCUTS: &str =
-    " s start  c done  r rename  e edit  n new  a sub  d del  f filter  o sort  1 repos  , config  ? help";
+const SHORTCUTS: &str = " s start  c done  r rename  e edit  n new  a sub  d del  f/F filter  o/O sort  1 repos  , config  ? help";
 
 /// What the strip says while the sidebar has focus.
 ///
@@ -41,7 +38,6 @@ const REPO_SHORTCUTS: &str =
 
 /// Width of the inline progress meter, in cells.
 const METER_WIDTH: usize = 7;
-
 
 /// What separates the header's parts, and the detail pane's summary fields.
 /// Named because the header's width arithmetic has to account for it, and a
@@ -293,7 +289,9 @@ impl Bar {
             // started, which contradicts the row's own status glyph.
             whole
         } else {
-            let want = ((done as f64 / total as f64) * width as f64).round().max(1.0) as usize;
+            let want = ((done as f64 / total as f64) * width as f64)
+                .round()
+                .max(1.0) as usize;
             want.min(whole - 1)
         };
 
@@ -365,7 +363,10 @@ fn bar_spans(progress: Progress, ic: &Icons, width: usize) -> Vec<Span<'static>>
         // Extends whichever run reaches the outer edge, so the fraction reads
         // as more of that state rather than as a state of its own.
         let fg = if bar.active > 0 { ACTIVE } else { DONE };
-        spans.push(Span::styled(m.partial[bar.partial - 1], Style::default().fg(fg)));
+        spans.push(Span::styled(
+            m.partial[bar.partial - 1],
+            Style::default().fg(fg),
+        ));
         at += 1;
     }
     if bar.empty > 0 {
@@ -417,22 +418,33 @@ fn counts_floor(c: Counts, ic: &Icons) -> usize {
 /// Where each clickable word of the right-hand block ended up.
 ///
 /// Derived by walking the spans that were *actually rendered*, so the header's
-/// degradation ladder does not need restating here -- a rung that dropped the
-/// menu simply contains no filter words, and one that dropped the sort contains
-/// no sort word. The block's vocabulary is closed and tiny (one sort label plus
-/// filter names, which never collide), so matching on content is exact.
+/// degradation ladder does not need restating here -- a rung that dropped a menu
+/// simply contains no option words. The block's vocabulary is closed and tiny
+/// (sort names plus filter names, which never collide), so matching on content
+/// is exact.
 ///
 /// A single filter word means the header fell back to naming the current filter
 /// with no menu around it. There is nothing to pick from, so that word cycles.
-fn right_zones(right: &[Span], x0: u16, sort_label: &str) -> Vec<(u16, u16, HeaderZone)> {
+/// Sort follows the same rule.
+fn right_zones(
+    right: &[Span],
+    x0: u16,
+    sort: tree::Sort,
+    sort_reversed: bool,
+) -> Vec<(u16, u16, HeaderZone)> {
     let mut found: Vec<(u16, u16, HeaderZone)> = Vec::new();
     let mut x = x0;
 
     for span in right {
         let w = span.content.chars().count() as u16;
         if w > 0 {
-            let zone = if span.content == sort_label {
-                Some(HeaderZone::Sort)
+            let zone = if let Some(s) = tree::Sort::MENU
+                .iter()
+                .find(|s| sort_menu_text(**s, **s == sort, sort_reversed) == span.content)
+            {
+                Some(HeaderZone::Sort(*s))
+            } else if span.content == sort.label(sort_reversed) {
+                Some(HeaderZone::SortCycle)
             } else if let Some(pane) = tab_zone(&span.content) {
                 Some(pane)
             } else {
@@ -446,6 +458,18 @@ fn right_zones(right: &[Span], x0: u16, sort_label: &str) -> Vec<(u16, u16, Head
             }
         }
         x += w;
+    }
+
+    let sorts = found
+        .iter()
+        .filter(|(_, _, z)| matches!(z, HeaderZone::Sort(_)))
+        .count();
+    if sorts == 1 {
+        for entry in found.iter_mut() {
+            if matches!(entry.2, HeaderZone::Sort(_)) {
+                entry.2 = HeaderZone::SortCycle;
+            }
+        }
     }
 
     let filters = found
@@ -512,10 +536,7 @@ fn pane_number(focus: Focus) -> String {
 fn pane_block(title: &str, pane: Focus, focus: Focus) -> Block<'static> {
     let focused = pane == focus;
     Block::bordered()
-        .title_top(Line::styled(
-            format!(" {title} "),
-            Style::default().fg(DIM),
-        ))
+        .title_top(Line::styled(format!(" {title} "), Style::default().fg(DIM)))
         .title_top(
             Line::styled(
                 pane_number(pane),
@@ -576,7 +597,10 @@ fn filter_name(f: tree::Filter, current: bool) -> Span<'static> {
         tree::Filter::InProgress => ACTIVE,
         tree::Filter::All => PLAIN,
     };
-    Span::styled(f.name(), Style::default().fg(fg).add_modifier(Modifier::BOLD))
+    Span::styled(
+        f.name(),
+        Style::default().fg(fg).add_modifier(Modifier::BOLD),
+    )
 }
 
 /// The whole menu, `[ all  pending  active ]`, as one span per word.
@@ -597,15 +621,45 @@ fn filter_menu(current: tree::Filter) -> Vec<Span<'static>> {
     spans
 }
 
+fn sort_menu_text(s: tree::Sort, current: bool, reversed: bool) -> String {
+    if current && reversed {
+        format!("{} ↓", s.name())
+    } else {
+        s.name().to_string()
+    }
+}
+
+fn sort_name(s: tree::Sort, current: bool, reversed: bool) -> Span<'static> {
+    let text = sort_menu_text(s, current, reversed);
+    if current {
+        Span::styled(
+            text,
+            Style::default().fg(PLAIN).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(text, Style::default().fg(DIM))
+    }
+}
+
+fn sort_menu(current: tree::Sort, reversed: bool) -> Vec<Span<'static>> {
+    let dim = || Style::default().fg(DIM);
+    let mut spans = vec![Span::styled("[ ", dim())];
+    for (i, s) in tree::Sort::MENU.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(sort_name(*s, *s == current, reversed));
+    }
+    spans.push(Span::styled(" ]", dim()));
+    spans
+}
+
 /// A leading icon and its trailing space, or nothing in the tiers that have none.
 fn icon_span(glyph: &str) -> Vec<Span<'static>> {
     if glyph.is_empty() {
         Vec::new()
     } else {
-        vec![Span::styled(
-            format!("{glyph} "),
-            Style::default().fg(DIM),
-        )]
+        vec![Span::styled(format!("{glyph} "), Style::default().fg(DIM))]
     }
 }
 
@@ -671,24 +725,29 @@ fn header_identity(store: &str, ic: &Icons, room: usize) -> Vec<Span<'static>> {
 /// own Rect to the last cell without the two ending up flush against each other
 /// -- which read as `2 readyA-Z` and looked exactly like the overlap this
 /// replaced.
-fn right_candidates(sort: &str, filter: tree::Filter) -> [Vec<Span<'static>>; 4] {
+fn right_candidates(
+    sort: tree::Sort,
+    sort_reversed: bool,
+    filter: tree::Filter,
+) -> [Vec<Span<'static>>; 4] {
     let dim = || Style::default().fg(DIM);
-    let with_sort = |rest: Vec<Span<'static>>| -> Vec<Span<'static>> {
+    let pair = |left: Vec<Span<'static>>, right: Vec<Span<'static>>| -> Vec<Span<'static>> {
         [
-            vec![
-                Span::raw(" "),
-                Span::styled(sort.to_string(), dim()),
-                Span::raw("  "),
-            ],
-            rest,
+            vec![Span::raw(" ")],
+            left,
+            vec![Span::raw("  ")],
+            right,
             vec![Span::raw(" ")],
         ]
         .concat()
     };
 
     [
-        with_sort(filter_menu(filter)),
-        with_sort(vec![filter_name(filter, true)]),
+        pair(sort_menu(sort, sort_reversed), filter_menu(filter)),
+        pair(
+            vec![Span::styled(sort.label(sort_reversed).to_string(), dim())],
+            vec![filter_name(filter, true)],
+        ),
         vec![Span::raw(" "), filter_name(filter, true), Span::raw(" ")],
         Vec::new(),
     ]
@@ -712,14 +771,15 @@ fn right_candidates(sort: &str, filter: tree::Filter) -> [Vec<Span<'static>>; 4]
 fn header_sides(
     store: &str,
     ic: &Icons,
-    sort: &str,
+    sort: tree::Sort,
+    sort_reversed: bool,
     filter: tree::Filter,
     counts_floor: usize,
     width: usize,
 ) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
     let full = header_identity(store, ic, usize::MAX);
     let short = identity_store(store, ic);
-    let rights = right_candidates(sort, filter);
+    let rights = right_candidates(sort, sort_reversed, filter);
 
     // Every rung leaves the counts room to say *something*. Without that the
     // 24-cell menu outbid them: at 52 columns the header showed the whole filter
@@ -874,7 +934,8 @@ fn draw_header(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
     let (mut spans, right) = header_sides(
         &app.store_label,
         ic,
-        app.sort.label(app.sort_reversed),
+        app.sort,
+        app.sort_reversed,
         app.filter,
         counts_floor(c, ic),
         (area.width as usize).saturating_sub(span_width(&tabs)),
@@ -893,7 +954,7 @@ fn draw_header(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
         spans.extend(part);
     }
 
-    app.header_zones = right_zones(&right, right_area.x, app.sort.label(app.sort_reversed));
+    app.header_zones = right_zones(&right, right_area.x, app.sort, app.sort_reversed);
 
     frame.render_widget(Paragraph::new(Line::from(spans)), left_area);
     frame.render_widget(Paragraph::new(Line::from(right)), right_area);
@@ -939,7 +1000,11 @@ fn repo_stat_spans(c: Counts, room: usize, ic: &Icons) -> Vec<Span<'static>> {
     // looks like one -- same arithmetic, same glyph tiers, same three colours.
     let bar = |width: usize| {
         bar_spans(
-            Progress { done: c.completed, active: c.active, total: c.total },
+            Progress {
+                done: c.completed,
+                active: c.active,
+                total: c.total,
+            },
             ic,
             width,
         )
@@ -949,7 +1014,10 @@ fn repo_stat_spans(c: Counts, room: usize, ic: &Icons) -> Vec<Span<'static>> {
         if c.pending == 0 {
             return Vec::new();
         }
-        vec![Span::styled(c.pending.to_string(), Style::default().fg(TODO))]
+        vec![Span::styled(
+            c.pending.to_string(),
+            Style::default().fg(TODO),
+        )]
     };
 
     // Numbers first, bar last. The block is right-aligned, so whatever sits at
@@ -991,7 +1059,10 @@ fn draw_scrollbar(frame: &mut Frame, area: Rect, thumb: Color, state: &mut Scrol
             .end_symbol(None)
             .track_style(Style::default().fg(DIM))
             .thumb_style(Style::default().fg(thumb)),
-        area.inner(Margin { vertical: 1, horizontal: 0 }),
+        area.inner(Margin {
+            vertical: 1,
+            horizontal: 0,
+        }),
         state,
     );
 }
@@ -1180,19 +1251,14 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
                     format!("{} ", ic.marker(row.has_children, row.is_open)),
                     Style::default().fg(DIM),
                 ),
-                Span::styled(
-                    format!("{} ", row_glyph(st, ic, spin)),
-                    status_style(st),
-                ),
+                Span::styled(format!("{} ", row_glyph(st, ic, spin)), status_style(st)),
             ];
 
             let mut name_style = if !row.node.is_match {
                 // Scaffolding: kept only because a descendant matched.
                 Style::default().fg(DIM)
             } else if t.completed {
-                Style::default()
-                    .fg(DIM)
-                    .add_modifier(Modifier::CROSSED_OUT)
+                Style::default().fg(DIM).add_modifier(Modifier::CROSSED_OUT)
             } else {
                 Style::default().fg(PLAIN)
             };
@@ -1373,7 +1439,11 @@ fn draw_detail(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
     // that says `detail` half the time and `no wrap` the other half tells you
     // one of the two things at a time.
     let block = pane_block(
-        if app.wrap { "detail" } else { "detail · no wrap" },
+        if app.wrap {
+            "detail"
+        } else {
+            "detail · no wrap"
+        },
         Focus::Detail,
         app.focus,
     );
@@ -1475,13 +1545,14 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Vec<Line<'a>> {
     )];
 
     if t.is_in_progress()
-        && let Some(a) = age(&t.started_at) {
-            summary.push(Span::styled(SEP, Style::default().fg(DIM)));
-            summary.push(Span::styled(
-                format!("started {}", since(&a)),
-                Style::default().fg(ACTIVE),
-            ));
-        }
+        && let Some(a) = age(&t.started_at)
+    {
+        summary.push(Span::styled(SEP, Style::default().fg(DIM)));
+        summary.push(Span::styled(
+            format!("started {}", since(&a)),
+            Style::default().fg(ACTIVE),
+        ));
+    }
 
     // How long it actually took, which reads better than two raw timestamps.
     if let Some(took) = t.worked_duration() {
@@ -1563,11 +1634,7 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Vec<Line<'a>> {
         None => local_time(iso),
     };
 
-    field(
-        "created",
-        stamp(&t.created_at),
-        Style::default().fg(PLAIN),
-    );
+    field("created", stamp(&t.created_at), Style::default().fg(PLAIN));
     if t.started_at.is_some() {
         field("started", stamp(&t.started_at), Style::default().fg(ACTIVE));
     }
@@ -1590,16 +1657,10 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Vec<Line<'a>> {
             Style::default().fg(CODE).add_modifier(Modifier::BOLD),
         ));
         if let Some(m) = c.message.as_ref().filter(|m| !m.trim().is_empty()) {
-            parts.push(Span::styled(
-                format!("  {m}"),
-                Style::default().fg(PLAIN),
-            ));
+            parts.push(Span::styled(format!("  {m}"), Style::default().fg(PLAIN)));
         }
         if let Some(b) = c.branch.as_ref().filter(|b| !b.trim().is_empty()) {
-            parts.push(Span::styled(
-                format!("  ({b})"),
-                Style::default().fg(DIM),
-            ));
+            parts.push(Span::styled(format!("  ({b})"), Style::default().fg(DIM)));
         }
         lines.push(Line::from(parts));
     }
@@ -1611,10 +1672,7 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Vec<Line<'a>> {
 
     if let Some(r) = t.result.as_ref().filter(|r| !r.trim().is_empty()) {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "result",
-            Style::default().fg(DIM),
-        )));
+        lines.push(Line::from(Span::styled("result", Style::default().fg(DIM))));
         for line in r.lines() {
             lines.push(Line::from(Span::styled(
                 line.to_string(),
@@ -1728,7 +1786,7 @@ g / G      first / last      e   edit description in $EDITOR
 w / z      wrap / zoom       n   new top-level task
 o / O      sort / reverse    a   new subtask of selection
 /          search            d   delete (with confirmation)
-f          cycle filter      ^R  refresh now
+f / F      filter fwd / back ^R  refresh now
 ,          edit config       q   quit
 - / +      collapse / expand all
 ^L         redraw the screen (if the terminal has corrupted it)
@@ -1757,8 +1815,9 @@ terminals zoom on their own below single_pane_below columns.
 
 Mouse: drag the divider to resize, wheel scrolls the pane under the pointer,
 click selects -- and on a task's expand marker it opens or closes it too.
-In the header, click a filter, or the sort label to cycle it -- right-click
-the sort to reverse. Shift bypasses capture to select text.
+In the header, click a sort or filter word to switch directly. When either
+control has collapsed to one label, click that label to cycle it; right-click
+the collapsed sort label to reverse. Shift bypasses capture to select text.
 
 The view refreshes itself whenever the dex store changes, including when
 another process or agent edits it. Your selection, expansion and any open
@@ -1776,6 +1835,13 @@ fn draw_help(frame: &mut Frame, app: &mut App) {
 
     let block = Block::bordered()
         .title(" dextui ")
+        .title_top(
+            Line::styled(
+                format!(" v{} ", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(DIM),
+            )
+            .right_aligned(),
+        )
         .border_style(Style::default().fg(ACTIVE));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1798,9 +1864,14 @@ fn draw_help(frame: &mut Frame, app: &mut App) {
     let scroll = app.help_scroll;
 
     frame.render_widget(
-        Paragraph::new(folded.iter().map(|s| Line::from(s.as_str())).collect::<Vec<_>>())
-            .style(Style::default().fg(PLAIN))
-            .scroll((scroll, 0)),
+        Paragraph::new(
+            folded
+                .iter()
+                .map(|s| Line::from(s.as_str()))
+                .collect::<Vec<_>>(),
+        )
+        .style(Style::default().fg(PLAIN))
+        .scroll((scroll, 0)),
         body,
     );
 
@@ -1821,7 +1892,10 @@ fn draw_help(frame: &mut Frame, app: &mut App) {
     // which ones now do something else instead, and sheds down to nothing
     // rather than being truncated into a lie.
     let ladder: &[&str] = if app.help_max_scroll() > 0 {
-        &["j / k scroll  \u{b7}  any other key dismisses", "j / k scroll"]
+        &[
+            "j / k scroll  \u{b7}  any other key dismisses",
+            "j / k scroll",
+        ]
     } else {
         &["any key to dismiss", "any key"]
     };
@@ -1831,10 +1905,7 @@ fn draw_help(frame: &mut Frame, app: &mut App) {
         .find(|s| s.chars().count() as u16 <= text.width)
         .unwrap_or("");
 
-    frame.render_widget(
-        Paragraph::new(label).style(Style::default().fg(DIM)),
-        text,
-    );
+    frame.render_widget(Paragraph::new(label).style(Style::default().fg(DIM)), text);
     frame.render_widget(
         Paragraph::new(marks).style(Style::default().fg(ACTIVE)),
         arrows,
@@ -1927,8 +1998,8 @@ fn print_node(node: &tree::Node, depth: usize, app: &App, ic: &Icons, out: &mut 
 mod tests {
     use super::*;
     use crate::dex::Task;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn task(id: &str, parent: Option<&str>, name: &str) -> Task {
         Task {
@@ -2049,7 +2120,10 @@ mod tests {
         let before = top_row(&mut app, &mut terminal);
         app.scroll_tree(6);
         let offset_after_scroll = app.tree_offset;
-        assert_ne!(offset_after_scroll, 0, "scroll_tree did not move the offset");
+        assert_ne!(
+            offset_after_scroll, 0,
+            "scroll_tree did not move the offset"
+        );
 
         for n in 1..=3 {
             let drawn = top_row(&mut app, &mut terminal);
@@ -2124,7 +2198,10 @@ mod tests {
                             app.repos[*repo].worktrees[*index].branch.clone()
                         }
                     };
-                    assert_eq!(picked, label, "row {row} draws {label:?}, click picked {picked:?}");
+                    assert_eq!(
+                        picked, label,
+                        "row {row} draws {label:?}, click picked {picked:?}"
+                    );
                 }
                 None => assert_eq!(
                     after, before,
@@ -2214,9 +2291,7 @@ mod tests {
         app.repos_pane_above = 0;
 
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
-        terminal
-            .draw(|f| draw(f, &mut app, ic))
-            .unwrap();
+        terminal.draw(|f| draw(f, &mut app, ic)).unwrap();
 
         let buf = terminal.backend().buffer().clone();
         (0..buf.area.height)
@@ -2282,7 +2357,7 @@ mod tests {
             for (sn, s) in [
                 ("TODO", TODO),
                 ("ACTIVE", ACTIVE),
-                            ("DONE", DONE),
+                ("DONE", DONE),
                 ("BLOCKED", BLOCKED),
             ] {
                 assert_ne!(c, s, "{n} is the same colour as {sn}");
@@ -2296,10 +2371,7 @@ mod tests {
         // Regression: the app once ran happily while painting an empty screen.
         let rows = render(100, 20, &crate::icons::UNICODE);
         let text = rows.join("\n");
-        assert!(
-            text.contains("Parent task"),
-            "nothing was drawn:\n{text}"
-        );
+        assert!(text.contains("Parent task"), "nothing was drawn:\n{text}");
     }
 
     #[test]
@@ -2327,8 +2399,8 @@ mod tests {
             ("n", "new"),
             ("a", "sub"),
             ("d", "del"),
-            ("f", "filter"),
-            ("o", "sort"),
+            ("f/F", "filter"),
+            ("o/O", "sort"),
         ] {
             assert!(
                 SHORTCUTS.contains(&format!("{key} {action}")),
@@ -2337,7 +2409,10 @@ mod tests {
         }
 
         // Zoom took `z`, so collapse/expand moved and both surfaces must agree.
-        assert!(HELP.contains("- / +      collapse / expand all"), "help: -/+");
+        assert!(
+            HELP.contains("- / +      collapse / expand all"),
+            "help: -/+"
+        );
         assert!(HELP.contains("w / z"), "help: z zooms");
         assert!(!HELP.contains("z Z"), "the old collapse keys are gone");
 
@@ -2354,7 +2429,10 @@ mod tests {
         assert!(HELP.contains("r   rename"), "help: r renames");
         assert!(HELP.contains("e   edit description"), "help: e edits");
         assert!(HELP.contains("^R  refresh now"), "help: Ctrl-R refreshes");
-        assert!(HELP.contains("^L         redraw the screen"), "help: Ctrl-L redraws");
+        assert!(
+            HELP.contains("^L         redraw the screen"),
+            "help: Ctrl-L redraws"
+        );
     }
 
     /// The sidebar's keys were on neither surface: the strip still read
@@ -2363,7 +2441,10 @@ mod tests {
     /// same defect as one that documents them wrongly.
     #[test]
     fn both_surfaces_advertise_the_repo_sidebar_keys() {
-        assert!(SHORTCUTS.contains("1 repos"), "the strip hides the sidebar: {SHORTCUTS}");
+        assert!(
+            SHORTCUTS.contains("1 repos"),
+            "the strip hides the sidebar: {SHORTCUTS}"
+        );
 
         // The strip swaps while the sidebar has focus, because `a` means
         // something else there.
@@ -2379,9 +2460,18 @@ mod tests {
         );
 
         // And the help names each of them too.
-        assert!(HELP.contains("1          focus repos"), "help: 1 focuses the sidebar");
-        assert!(HELP.contains("a          save the repo you are in"), "help: a saves");
-        assert!(HELP.contains("A          save a repo by path"), "help: A saves by path");
+        assert!(
+            HELP.contains("1          focus repos"),
+            "help: 1 focuses the sidebar"
+        );
+        assert!(
+            HELP.contains("a          save the repo you are in"),
+            "help: a saves"
+        );
+        assert!(
+            HELP.contains("A          save a repo by path"),
+            "help: A saves by path"
+        );
         assert!(
             HELP.contains("b   show / hide the sidebar"),
             "help: b hides the sidebar"
@@ -2390,12 +2480,18 @@ mod tests {
             HELP.contains("switches the tree and detail panes to that worktree"),
             "the help still implies the sidebar needs a commit key"
         );
-        assert!(HELP.contains("D          forget a saved repo"), "help: D forgets");
+        assert!(
+            HELP.contains("D          forget a saved repo"),
+            "help: D forgets"
+        );
         assert!(
             HELP.contains("follow it over to the tasks"),
             "help: enter follows the cursor to the tasks"
         );
-        assert!(HELP.contains("[1] [2] [3]"), "help: the third pane has a tab");
+        assert!(
+            HELP.contains("[1] [2] [3]"),
+            "help: the third pane has a tab"
+        );
     }
 
     /// The dialog used to be a fixed 16 rows against ~28 lines of text, so
@@ -2477,6 +2573,25 @@ mod tests {
         render(&mut app)
     }
 
+    #[test]
+    fn the_help_border_names_the_running_version() {
+        let screen = help_screen(80, 24, false);
+        let version = format!(" v{} ", env!("CARGO_PKG_VERSION"));
+        let top = screen
+            .lines()
+            .find(|l| l.contains("┌") && l.contains("dextui"))
+            .unwrap();
+
+        assert!(
+            top.contains(&version),
+            "help border should show {version:?}:\n{screen}"
+        );
+        assert!(
+            top.find(&version) > top.find("dextui"),
+            "version should sit to the right of the dialog title:\n{top}"
+        );
+    }
+
     /// The whole point of the scroll: the closing paragraph is off the bottom
     /// of a short terminal, and `G` has to be able to reach it. Before this it
     /// was simply gone, with nothing on screen saying so.
@@ -2489,10 +2604,16 @@ mod tests {
             !top.contains(LAST),
             "80x24 is not short enough to test scrolling:\n{top}"
         );
-        assert!(top.contains("tab / ⇧tab next / prev pane"), "help starts at the top:\n{top}");
+        assert!(
+            top.contains("tab / ⇧tab next / prev pane"),
+            "help starts at the top:\n{top}"
+        );
 
         let end = help_screen(80, 24, true);
-        assert!(end.contains(LAST), "the last line stayed out of reach:\n{end}");
+        assert!(
+            end.contains(LAST),
+            "the last line stayed out of reach:\n{end}"
+        );
     }
 
     /// `fold` exists to give an exact row count, so the cases that matter are
@@ -2507,7 +2628,10 @@ mod tests {
                     "{width}: row overruns: {r:?}"
                 );
             }
-            assert!(rows.len() >= HELP.lines().count(), "{width}: rows went missing");
+            assert!(
+                rows.len() >= HELP.lines().count(),
+                "{width}: rows went missing"
+            );
         }
     }
 
@@ -2607,8 +2731,14 @@ mod tests {
 
         let end = help_screen(80, 24, true);
         let hint = help_hint(&end);
-        assert!(hint.contains('\u{2191}'), "no more-above marker at the end: {hint:?}");
-        assert!(!hint.contains('\u{2193}'), "still claims more below at the end: {hint:?}");
+        assert!(
+            hint.contains('\u{2191}'),
+            "no more-above marker at the end: {hint:?}"
+        );
+        assert!(
+            !hint.contains('\u{2193}'),
+            "still claims more below at the end: {hint:?}"
+        );
 
         // Sized from `HELP` itself rather than a constant that goes stale the
         // next time a key is documented -- which is exactly what happened to
@@ -2684,7 +2814,10 @@ mod tests {
         ] {
             let s = screen(60, 80, focus);
             let row = header_row(&s);
-            assert!(row.contains(marked), "{focus:?} should mark {marked}: {row}");
+            assert!(
+                row.contains(marked),
+                "{focus:?} should mark {marked}: {row}"
+            );
             assert_eq!(
                 row.matches('[').count(),
                 1,
@@ -2795,8 +2928,14 @@ mod tests {
 
         // The colours are the states', so the menu speaks the same language as
         // the rows below it. `all` is not a state and gets no colour.
-        assert_eq!(filter_name(tree::Filter::Pending, true).style.fg, Some(TODO));
-        assert_eq!(filter_name(tree::Filter::InProgress, true).style.fg, Some(ACTIVE));
+        assert_eq!(
+            filter_name(tree::Filter::Pending, true).style.fg,
+            Some(TODO)
+        );
+        assert_eq!(
+            filter_name(tree::Filter::InProgress, true).style.fg,
+            Some(ACTIVE)
+        );
         assert_eq!(filter_name(tree::Filter::All, true).style.fg, Some(PLAIN));
     }
 
@@ -2818,10 +2957,17 @@ mod tests {
             );
         }
 
-        assert!(
-            zones.iter().any(|(_, _, z)| *z == HeaderZone::Sort),
-            "the sort label is clickable too: {zones:?}"
-        );
+        for s in tree::Sort::MENU {
+            let z = zones
+                .iter()
+                .find(|(_, _, z)| *z == HeaderZone::Sort(s))
+                .unwrap_or_else(|| panic!("no zone for {s:?} in {zones:?}"));
+            assert_eq!(
+                (z.1 - z.0 + 1) as usize,
+                s.name().chars().count(),
+                "zone for {s:?} is not the width of its word"
+            );
+        }
 
         // Zones must not overlap, or a click would be ambiguous.
         let mut spans: Vec<(u16, u16)> = zones.iter().map(|(a, b, _)| (*a, *b)).collect();
@@ -2852,6 +2998,23 @@ mod tests {
                 .iter()
                 .any(|(_, _, z)| matches!(z, HeaderZone::Filter(_))),
             "nothing to pick from when only one word is drawn: {zones:?}"
+        );
+    }
+
+    /// Sort follows the same rule as filter: when only the current value is
+    /// drawn, there are no options to pick from, so the label cycles.
+    #[test]
+    fn the_collapsed_sort_label_cycles_instead_of_picking() {
+        let zones = zones_for(46, tree::Filter::Pending, Mode::Normal);
+        assert!(
+            zones.iter().any(|(_, _, z)| *z == HeaderZone::SortCycle),
+            "collapsed sort should be one cycling label: {zones:?}"
+        );
+        assert!(
+            !zones
+                .iter()
+                .any(|(_, _, z)| matches!(z, HeaderZone::Sort(_))),
+            "nothing to pick from when only one sort word is drawn: {zones:?}"
         );
     }
 
@@ -3098,21 +3261,40 @@ mod tests {
     #[test]
     fn the_right_hand_block_keeps_the_active_filter_longest() {
         let filter = tree::Filter::Pending;
-        let cs = right_candidates("priority", filter);
-        let text = |i: usize| -> String {
-            cs[i].iter().map(|s| s.content.to_string()).collect()
-        };
+        let cs = right_candidates(tree::Sort::Priority, false, filter);
+        let text = |i: usize| -> String { cs[i].iter().map(|s| s.content.to_string()).collect() };
 
-        assert!(text(0).contains("[ all  pending  active ]"), "{:?}", text(0));
+        assert!(
+            text(0).contains("[ priority  updated  created  name ]"),
+            "{:?}",
+            text(0)
+        );
+        assert!(
+            text(0).contains("[ all  pending  active ]"),
+            "{:?}",
+            text(0)
+        );
 
-        assert!(!text(1).contains('['), "the menu should have gone: {:?}", text(1));
+        assert!(
+            !text(1).contains('['),
+            "the menu should have gone: {:?}",
+            text(1)
+        );
         assert!(text(1).contains("priority"), "{:?}", text(1));
         assert!(text(1).contains(filter.name()), "{:?}", text(1));
 
-        assert!(!text(2).contains("priority"), "sort should have gone: {:?}", text(2));
+        assert!(
+            !text(2).contains("priority"),
+            "sort should have gone: {:?}",
+            text(2)
+        );
         assert!(text(2).contains(filter.name()), "{:?}", text(2));
 
-        assert!(cs[3].is_empty(), "the last rung draws nothing: {:?}", text(3));
+        assert!(
+            cs[3].is_empty(),
+            "the last rung draws nothing: {:?}",
+            text(3)
+        );
 
         // Strictly descending, which is what makes the ladder in `header_sides`
         // monotone: a wider terminal can never pick a narrower rung.
@@ -3236,7 +3418,10 @@ mod tests {
             24,
         );
 
-        assert!(text.contains('┌') && text.contains('┼'), "no table borders:\n{text}");
+        assert!(
+            text.contains('┌') && text.contains('┼'),
+            "no table borders:\n{text}"
+        );
         assert!(
             !text.contains("|---"),
             "the delimiter row leaked through:\n{text}"
@@ -3313,10 +3498,16 @@ mod tests {
     fn a_zero_count_is_never_drawn() {
         every_bar(|p, b, partials| {
             if p.active == 0 {
-                assert_eq!(b.active, 0, "phantom in-flight: {p:?} partials={partials} -> {b:?}");
+                assert_eq!(
+                    b.active, 0,
+                    "phantom in-flight: {p:?} partials={partials} -> {b:?}"
+                );
             }
             if p.done == 0 {
-                assert_eq!(b.done, 0, "phantom done: {p:?} partials={partials} -> {b:?}");
+                assert_eq!(
+                    b.done, 0,
+                    "phantom done: {p:?} partials={partials} -> {b:?}"
+                );
             }
         });
 
@@ -3349,10 +3540,26 @@ mod tests {
             }
         });
 
-        let one = Bar::new(Progress { done: 1, active: 0, total: 100 }, METER_WIDTH, true);
+        let one = Bar::new(
+            Progress {
+                done: 1,
+                active: 0,
+                total: 100,
+            },
+            METER_WIDTH,
+            true,
+        );
         assert_eq!((one.done, one.partial), (1, 0), "{one:?}");
 
-        let both = Bar::new(Progress { done: 1, active: 1, total: 100 }, METER_WIDTH, true);
+        let both = Bar::new(
+            Progress {
+                done: 1,
+                active: 1,
+                total: 100,
+            },
+            METER_WIDTH,
+            true,
+        );
         assert_eq!((both.done, both.active), (1, 1), "{both:?}");
     }
 
@@ -3366,7 +3573,15 @@ mod tests {
             assert!(b.partial <= 7, "{p:?} partials={partials} -> {b:?}");
         });
 
-        let b = Bar::new(Progress { done: 16, active: 16, total: 45 }, METER_WIDTH, true);
+        let b = Bar::new(
+            Progress {
+                done: 16,
+                active: 16,
+                total: 45,
+            },
+            METER_WIDTH,
+            true,
+        );
         assert!(b.partial <= 7, "{b:?}");
     }
 
@@ -3380,8 +3595,20 @@ mod tests {
             }
         });
 
-        let b = Bar::new(Progress { done: 3, active: 0, total: 8 }, METER_WIDTH, false);
-        assert_eq!((b.done, b.active, b.partial, b.empty), (3, 0, 0, 4), "{b:?}");
+        let b = Bar::new(
+            Progress {
+                done: 3,
+                active: 0,
+                total: 8,
+            },
+            METER_WIDTH,
+            false,
+        );
+        assert_eq!(
+            (b.done, b.active, b.partial, b.empty),
+            (3, 0, 0, 4),
+            "{b:?}"
+        );
     }
 
     /// A true sub-cell colour boundary would need fg=green on bg=blue, which
@@ -3394,29 +3621,83 @@ mod tests {
     /// two separately-rounded runs (2 + 2 = 4).
     #[test]
     fn the_partial_sits_at_the_outer_edge_not_the_done_active_boundary() {
-        let b = Bar::new(Progress { done: 1, active: 1, total: 3 }, METER_WIDTH, true);
-        assert_eq!((b.done, b.active, b.partial, b.empty), (2, 2, 5, 2), "{b:?}");
+        let b = Bar::new(
+            Progress {
+                done: 1,
+                active: 1,
+                total: 3,
+            },
+            METER_WIDTH,
+            true,
+        );
+        assert_eq!(
+            (b.done, b.active, b.partial, b.empty),
+            (2, 2, 5, 2),
+            "{b:?}"
+        );
     }
 
     /// The reason the sub-cell edge exists at all: without it 13 of 14 fills
     /// every cell and reads as finished.
     #[test]
     fn the_outer_edge_carries_the_sub_cell_remainder() {
-        let b = Bar::new(Progress { done: 3, active: 0, total: 8 }, METER_WIDTH, true);
-        assert_eq!((b.done, b.active, b.partial, b.empty), (2, 0, 5, 4), "{b:?}");
+        let b = Bar::new(
+            Progress {
+                done: 3,
+                active: 0,
+                total: 8,
+            },
+            METER_WIDTH,
+            true,
+        );
+        assert_eq!(
+            (b.done, b.active, b.partial, b.empty),
+            (2, 0, 5, 4),
+            "{b:?}"
+        );
 
-        let nearly = Bar::new(Progress { done: 13, active: 0, total: 14 }, METER_WIDTH, true);
+        let nearly = Bar::new(
+            Progress {
+                done: 13,
+                active: 0,
+                total: 14,
+            },
+            METER_WIDTH,
+            true,
+        );
         assert_eq!(nearly.done, 6, "{nearly:?}");
-        assert!(nearly.partial > 0, "a full bar would read as finished: {nearly:?}");
+        assert!(
+            nearly.partial > 0,
+            "a full bar would read as finished: {nearly:?}"
+        );
         assert_eq!(nearly.empty, 0, "{nearly:?}");
     }
 
     #[test]
     fn an_untouched_parent_is_all_trough_and_a_finished_one_is_all_bar() {
-        let none = Bar::new(Progress { done: 0, active: 0, total: 4 }, METER_WIDTH, true);
-        assert_eq!((none.done, none.active, none.partial, none.empty), (0, 0, 0, METER_WIDTH));
+        let none = Bar::new(
+            Progress {
+                done: 0,
+                active: 0,
+                total: 4,
+            },
+            METER_WIDTH,
+            true,
+        );
+        assert_eq!(
+            (none.done, none.active, none.partial, none.empty),
+            (0, 0, 0, METER_WIDTH)
+        );
 
-        let all = Bar::new(Progress { done: 7, active: 0, total: 7 }, METER_WIDTH, true);
+        let all = Bar::new(
+            Progress {
+                done: 7,
+                active: 0,
+                total: 7,
+            },
+            METER_WIDTH,
+            true,
+        );
         assert_eq!((all.done, all.partial, all.empty), (METER_WIDTH, 0, 0));
     }
 
@@ -3439,12 +3720,36 @@ mod tests {
     #[test]
     fn the_meter_is_exactly_seven_cells_wide_in_every_tier() {
         let cases = [
-            Progress { done: 0, active: 0, total: 4 },
-            Progress { done: 3, active: 0, total: 8 },
-            Progress { done: 1, active: 1, total: 3 },
-            Progress { done: 1, active: 0, total: 100 },
-            Progress { done: 13, active: 0, total: 14 },
-            Progress { done: 7, active: 0, total: 7 },
+            Progress {
+                done: 0,
+                active: 0,
+                total: 4,
+            },
+            Progress {
+                done: 3,
+                active: 0,
+                total: 8,
+            },
+            Progress {
+                done: 1,
+                active: 1,
+                total: 3,
+            },
+            Progress {
+                done: 1,
+                active: 0,
+                total: 100,
+            },
+            Progress {
+                done: 13,
+                active: 0,
+                total: 14,
+            },
+            Progress {
+                done: 7,
+                active: 0,
+                total: 7,
+            },
         ];
         for ic in crate::icons::ALL {
             for p in cases {
@@ -3471,7 +3776,11 @@ mod tests {
     /// speaks the same colour language as the status glyphs.
     #[test]
     fn the_meter_paints_done_in_flight_and_untouched_in_the_status_colours() {
-        let p = Progress { done: 2, active: 2, total: 7 };
+        let p = Progress {
+            done: 2,
+            active: 2,
+            total: 7,
+        };
         for ic in crate::icons::ALL {
             let fgs: Vec<_> = meter_bar(p, &ic).into_iter().map(|(_, fg)| fg).collect();
             assert_eq!(
@@ -3483,7 +3792,11 @@ mod tests {
         }
 
         let spans = meter_spans(p, &crate::icons::UNICODE);
-        assert_eq!(spans.last().unwrap().style.fg, Some(DIM), "the fraction is secondary");
+        assert_eq!(
+            spans.last().unwrap().style.fg,
+            Some(DIM),
+            "the fraction is secondary"
+        );
     }
 
     /// The fraction is a sliver of *more of the same state*, not a state of its
@@ -3492,7 +3805,14 @@ mod tests {
     fn the_partial_cell_takes_the_colour_of_the_run_it_extends() {
         let ic = &crate::icons::UNICODE;
 
-        let done_only = meter_bar(Progress { done: 3, active: 0, total: 8 }, ic);
+        let done_only = meter_bar(
+            Progress {
+                done: 3,
+                active: 0,
+                total: 8,
+            },
+            ic,
+        );
         assert_eq!(
             done_only.iter().map(|(_, fg)| *fg).collect::<Vec<_>>(),
             vec![Some(DONE), Some(DONE), Some(DIM)],
@@ -3500,7 +3820,14 @@ mod tests {
         );
         assert_eq!(done_only[1].0, "\u{258b}", "5/8 of a cell: {done_only:?}");
 
-        let mixed = meter_bar(Progress { done: 1, active: 1, total: 3 }, ic);
+        let mixed = meter_bar(
+            Progress {
+                done: 1,
+                active: 1,
+                total: 3,
+            },
+            ic,
+        );
         assert_eq!(
             mixed.iter().map(|(_, fg)| *fg).collect::<Vec<_>>(),
             vec![Some(DONE), Some(ACTIVE), Some(ACTIVE), Some(DIM)],
@@ -3512,13 +3839,19 @@ mod tests {
     /// make seven cells read as one bar rather than seven stamps.
     #[test]
     fn the_nerd_meter_is_capped_at_both_ends() {
-        let bar: String = meter_bar(Progress { done: 2, active: 0, total: 7 }, &crate::icons::NERD)
-            .into_iter()
-            .map(|(t, _)| t)
-            .collect();
+        let bar: String = meter_bar(
+            Progress {
+                done: 2,
+                active: 0,
+                total: 7,
+            },
+            &crate::icons::NERD,
+        )
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect();
         assert_eq!(
-            bar,
-            "\u{ee03}\u{ee04}\u{ee01}\u{ee01}\u{ee01}\u{ee01}\u{ee02}",
+            bar, "\u{ee03}\u{ee04}\u{ee01}\u{ee01}\u{ee01}\u{ee01}\u{ee02}",
             "{bar:?}"
         );
     }
@@ -3527,7 +3860,14 @@ mod tests {
     /// is the part that is actually useful for triage.
     #[test]
     fn the_fraction_stays_beside_the_bar() {
-        let spans = meter_spans(Progress { done: 3, active: 0, total: 8 }, &crate::icons::UNICODE);
+        let spans = meter_spans(
+            Progress {
+                done: 3,
+                active: 0,
+                total: 8,
+            },
+            &crate::icons::UNICODE,
+        );
         assert_eq!(spans.last().unwrap().content.as_ref(), " 3/8");
     }
 
@@ -3648,7 +3988,10 @@ mod tests {
             .map(|(x, y)| buf[(x, y)].symbol())
             .collect();
 
-        assert!(text.contains("next / prev pane"), "the help dialog is missing");
+        assert!(
+            text.contains("next / prev pane"),
+            "the help dialog is missing"
+        );
     }
 
     /// The glyph changes every frame now, so the assertion that matters is that
@@ -3725,7 +4068,8 @@ mod tests {
             // assertion this one also covers the seam at the end of the cycle.
             for (i, pair) in drawn.windows(2).enumerate() {
                 assert_ne!(
-                    pair[0], pair[1],
+                    pair[0],
+                    pair[1],
                     "{:?}: frames {i} and {} are identical -- the spinner stalls",
                     ic.tier,
                     i + 1
@@ -3992,8 +4336,16 @@ mod tests {
         let other = row_of(&buf, "Beta task");
 
         // x = 0 is the pane border, so the gutter is the first cell inside it.
-        assert_eq!(buf[(1, sel)].symbol(), ic.gutter, "no gutter on the selection");
-        assert_eq!(buf[(1, other)].symbol(), " ", "an unselected row drew a gutter");
+        assert_eq!(
+            buf[(1, sel)].symbol(),
+            ic.gutter,
+            "no gutter on the selection"
+        );
+        assert_eq!(
+            buf[(1, other)].symbol(),
+            " ",
+            "an unselected row drew a gutter"
+        );
 
         for cell in tree_cells(&buf, &app, sel) {
             assert!(
@@ -4071,7 +4423,11 @@ mod tests {
         let y = row_of(&buf, "Parent task");
         let cells = tree_cells(&buf, &app, y);
 
-        assert_eq!(buf[(1, y)].symbol(), ic.gutter, "fixture: the parent is selected");
+        assert_eq!(
+            buf[(1, y)].symbol(),
+            ic.gutter,
+            "fixture: the parent is selected"
+        );
 
         let fg_of = |sym: &str| -> Vec<Option<Color>> {
             cells
@@ -4180,7 +4536,11 @@ mod tests {
             task("kid", Some("root"), "Pending child"),
         ];
         let mut app = App::new(app_tasks, "demo".into(), crate::config::Config::default());
-        assert_eq!(app.filter, tree::Filter::Pending, "fixture assumes the default filter");
+        assert_eq!(
+            app.filter,
+            tree::Filter::Pending,
+            "fixture assumes the default filter"
+        );
         // About the tree pane's rollup, not the sidebar; `tree_rows` below
         // assumes the tree pane starts at column 0.
         app.repos_pane_above = 0;
@@ -4196,7 +4556,10 @@ mod tests {
         let rows = tree_rows(&rows);
         let text = rows.join("\n");
 
-        assert!(!text.contains("Finished child"), "the filter should hide it:\n{text}");
+        assert!(
+            !text.contains("Finished child"),
+            "the filter should hide it:\n{text}"
+        );
         let parent = rows.iter().find(|r| r.contains("Parent task")).unwrap();
         assert!(
             parent.contains("1/2"),
@@ -4280,16 +4643,25 @@ mod tests {
 
         let render = |app: &mut App| -> String {
             let mut terminal = Terminal::new(TestBackend::new(140, 14)).unwrap();
-            terminal.draw(|f| draw(f, app, &crate::icons::UNICODE)).unwrap();
+            terminal
+                .draw(|f| draw(f, app, &crate::icons::UNICODE))
+                .unwrap();
             let buf = terminal.backend().buffer().clone();
             (0..buf.area.height)
-                .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+                .map(|y| {
+                    (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         };
 
         let first_frame = render(&mut app);
-        assert!(first_frame.contains("repo0"), "the top row should be visible initially");
+        assert!(
+            first_frame.contains("repo0"),
+            "the top row should be visible initially"
+        );
         assert!(
             !first_frame.contains("repo19"),
             "the fixture should not already fit everything: {first_frame}"
@@ -4362,4 +4734,3 @@ mod tests {
         }
     }
 }
-

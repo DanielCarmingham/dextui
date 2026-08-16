@@ -219,7 +219,7 @@ Press `?` in the app for this list at any time.
 | `z` | zoom — one pane at a time |
 | `-` `+` | collapse / expand all |
 | `/` | search names, descriptions and ids (an id matches from its start) |
-| `f` | cycle filter — pending / active / all |
+| `f` `F` | cycle filter forward / backward |
 | `o` `O` | cycle sort / reverse it |
 | `w` | toggle wrapping |
 | `Ctrl-R` | refresh now (it refreshes itself; this is the escape hatch) |
@@ -244,10 +244,10 @@ Acting on the selected task:
 
 
 
-**The header is clickable.** Click a word in `[ all  pending  active ]` to switch
-filter, or the sort label to cycle it — right-click the sort label to reverse it,
-the same pair as `o` and `O`. When the terminal is too narrow to show the whole
-menu, clicking the one filter name it does show cycles instead.
+**The header is clickable.** When there is room, sort and filter both show word
+menus: click a sort or filter word to switch directly. When the terminal is too
+narrow for the menus, each collapses to its current label; clicking a collapsed
+label cycles it, and right-clicking the collapsed sort label reverses it.
 
 **Mouse**: drag the divider to resize the panes; the wheel or a trackpad drag
 scrolls whichever pane is under the pointer, content moving with your fingers in
@@ -322,7 +322,7 @@ A project file need only mention what it changes:
 wrap = false
 ```
 
-Both files are **read-only** to the app — `w`, `o`, `O` and `f` change only the
+Both files are **read-only** to the app — `w`, `o`, `O`, `f` and `F` change only the
 current run, so nothing you toggle is written back over a file you hand-edited.
 
 Registered repos live in their own file, `~/.config/dextui/repos.toml` — not a

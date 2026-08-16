@@ -415,6 +415,26 @@ pub fn spawn_many(dirs: &[String], out: Sender<String>) -> Vec<StoreWatcher> {
 }
 
 #[cfg(test)]
+fn spawn_many_inner(dirs: &[String], out: Sender<String>, safety: Duration) -> Vec<StoreWatcher> {
+    dirs.iter()
+        .map(|dir| {
+            let (tx, rx) = channel::<()>();
+            let guard = spawn_inner(dir, tx, safety);
+            let out = out.clone();
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                while rx.recv().is_ok() {
+                    if out.send(dir.clone()).is_err() {
+                        return;
+                    }
+                }
+            });
+            guard
+        })
+        .collect()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
@@ -498,12 +518,12 @@ mod tests {
     fn fires_when_the_store_file_changes() {
         let dir = TempDir::new("fires");
         let (tx, rx) = channel();
-        let _w = spawn(dir.path(), tx);
+        let _w = spawn_inner(dir.path(), tx, FAST);
 
         dir.write(r#"{"id":"a"}"#);
 
         assert!(
-            rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            rx.recv_timeout(Duration::from_millis(500)).is_ok(),
             "watcher did not fire on a file write"
         );
     }
@@ -512,7 +532,7 @@ mod tests {
     fn collapses_a_burst_of_writes() {
         let dir = TempDir::new("burst");
         let (tx, rx) = channel();
-        let _w = spawn(dir.path(), tx);
+        let _w = spawn_inner(dir.path(), tx, DEBOUNCE + Duration::from_millis(100));
 
         // A single dex write touches the file several times; without debouncing
         // this would cost one `dex list` per event.
@@ -552,12 +572,13 @@ mod tests {
         fs::create_dir_all(&b).unwrap();
 
         let (tx, rx) = std::sync::mpsc::channel();
-        let _guards = spawn_many(
+        let _guards = spawn_many_inner(
             &[
                 a.to_string_lossy().into_owned(),
                 b.to_string_lossy().into_owned(),
             ],
             tx,
+            FAST,
         );
 
         // Creating `a` and `b` is itself filesystem activity, and it happened

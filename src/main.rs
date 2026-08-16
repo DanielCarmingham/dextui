@@ -18,8 +18,8 @@ mod ui;
 mod watch;
 mod worktree;
 
-use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
+use std::sync::mpsc::{Sender, channel};
 use std::thread;
 
 use crossterm::event::{
@@ -281,9 +281,7 @@ fn main() -> std::io::Result<()> {
     //
     // `selftest` is exempt: printing the data path without a terminal is the
     // entire reason it exists.
-    if matches!(command, Command::Run)
-        && !std::io::IsTerminal::is_terminal(&std::io::stdout())
-    {
+    if matches!(command, Command::Run) && !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
         eprintln!("{}", requires_a_terminal());
         std::process::exit(1);
     }
@@ -321,7 +319,10 @@ fn main() -> std::io::Result<()> {
     let (registry, registry_problem) = registry::Registry::load();
     match &registry_problem {
         Some(p) => log::line("registry", &format!("load failed: {p}")),
-        None => log::line("registry", &format!("loaded {} repo(s)", registry.repos.len())),
+        None => log::line(
+            "registry",
+            &format!("loaded {} repo(s)", registry.repos.len()),
+        ),
     }
 
     // The repo/worktree sidebar. `App::new` cannot populate this itself --
@@ -465,8 +466,7 @@ fn main() -> std::io::Result<()> {
     let mut store_watchers = watch::spawn_many(&all_store_dirs, worktree_tx.clone());
     // What already has one, so adding a repo mid-run does not stack a second
     // watcher on a store that is fine.
-    let mut watched: std::collections::HashSet<String> =
-        all_store_dirs.iter().cloned().collect();
+    let mut watched: std::collections::HashSet<String> = all_store_dirs.iter().cloned().collect();
     {
         let tx = tx.clone();
         thread::spawn(move || {
@@ -679,13 +679,11 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
             }
         }
 
-        MouseEventKind::Drag(MouseButton::Left) if app.dragging.is_some() => {
-            match app.dragging {
-                Some(app::Divider::Repos) => app.set_repos_width(m.column, app.terminal_width),
-                Some(app::Divider::Split) => app.set_split(m.column, app.terminal_width),
-                None => {}
-            }
-        }
+        MouseEventKind::Drag(MouseButton::Left) if app.dragging.is_some() => match app.dragging {
+            Some(app::Divider::Repos) => app.set_repos_width(m.column, app.terminal_width),
+            Some(app::Divider::Split) => app.set_split(m.column, app.terminal_width),
+            None => {}
+        },
 
         MouseEventKind::Up(_) => app.dragging = None,
 
@@ -693,26 +691,22 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
         // people expect regardless of where focus happens to be. Both panes slide
         // their *content* with the gesture -- see `App::scroll_tree` for why the
         // tree cannot just move its selection.
-        MouseEventKind::ScrollDown => {
-            match app.pane_at(m.column) {
-                Focus::Tree => app.scroll_tree(1),
-                Focus::Detail => app.scroll_detail(1, 0),
-                Focus::Repos => {
-                    app.scroll_repos(1);
-                    follow_repo_cursor(app);
-                }
+        MouseEventKind::ScrollDown => match app.pane_at(m.column) {
+            Focus::Tree => app.scroll_tree(1),
+            Focus::Detail => app.scroll_detail(1, 0),
+            Focus::Repos => {
+                app.scroll_repos(1);
+                follow_repo_cursor(app);
             }
-        }
-        MouseEventKind::ScrollUp => {
-            match app.pane_at(m.column) {
-                Focus::Tree => app.scroll_tree(-1),
-                Focus::Detail => app.scroll_detail(-1, 0),
-                Focus::Repos => {
-                    app.scroll_repos(-1);
-                    follow_repo_cursor(app);
-                }
+        },
+        MouseEventKind::ScrollUp => match app.pane_at(m.column) {
+            Focus::Tree => app.scroll_tree(-1),
+            Focus::Detail => app.scroll_detail(-1, 0),
+            Focus::Repos => {
+                app.scroll_repos(-1);
+                follow_repo_cursor(app);
             }
-        }
+        },
         MouseEventKind::ScrollLeft => app.scroll_detail(0, -4),
         MouseEventKind::ScrollRight => app.scroll_detail(0, 4),
 
@@ -733,7 +727,9 @@ fn handle_msg(app: &mut App, msg: Msg, dex: &Arc<Dex>, tx: &Sender<Msg>) {
             );
         }
 
-        Msg::Tasks { result: Ok(tasks), .. } => app.apply_tasks(tasks),
+        Msg::Tasks {
+            result: Ok(tasks), ..
+        } => app.apply_tasks(tasks),
         // Keep the last good model rather than blanking the view.
         Msg::Tasks { result: Err(e), .. } => {
             app.status = format!("refresh failed: {}", flatten(&e))
@@ -894,7 +890,10 @@ fn switch_store(app: &mut App, dex: &mut Arc<Dex>, tx: &Sender<Msg>, worktree_pa
     if dir == app.store_dir {
         return;
     }
-    log::line("store", &format!("switching from {} to {dir}", app.store_dir));
+    log::line(
+        "store",
+        &format!("switching from {} to {dir}", app.store_dir),
+    );
 
     let new_dex = match Dex::for_store(&dir) {
         Ok(d) => d,
@@ -1115,7 +1114,10 @@ fn current_repo(store_dir: &str, problems: &mut Vec<String>) -> Option<repos::Re
             // `git worktree list` reports the main checkout first, whatever
             // was asked about, so the repo's identity is that path -- not the
             // worktree this happens to be running in.
-            let path = worktrees.first().map_or(root, |w| w.path.as_str()).to_string();
+            let path = worktrees
+                .first()
+                .map_or(root, |w| w.path.as_str())
+                .to_string();
             Some(repos::Repo {
                 name: repo_name(&path),
                 path,
@@ -1186,8 +1188,14 @@ fn follow_repo_cursor(app: &mut App) {
 fn log_list_outcome(store: &str, result: &Result<Vec<Task>, String>, elapsed: std::time::Duration) {
     let ms = elapsed.as_millis();
     match result {
-        Ok(tasks) => log::line("dex", &format!("list {store} - {} tasks {ms}ms", tasks.len())),
-        Err(e) => log::line("dex", &format!("list {store} failed after {ms}ms: {}", flatten(e))),
+        Ok(tasks) => log::line(
+            "dex",
+            &format!("list {store} - {} tasks {ms}ms", tasks.len()),
+        ),
+        Err(e) => log::line(
+            "dex",
+            &format!("list {store} failed after {ms}ms: {}", flatten(e)),
+        ),
     }
 }
 
@@ -1273,7 +1281,11 @@ fn handle_key(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>) {
                         }
                     };
                 } else {
-                    let name = app.by_id.get(&id).map(|t| t.name.clone()).unwrap_or_default();
+                    let name = app
+                        .by_id
+                        .get(&id)
+                        .map(|t| t.name.clone())
+                        .unwrap_or_default();
                     act(dex, tx, format!("deleted {name}"), move |d| d.delete(&id));
                 }
             }
@@ -1473,6 +1485,10 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
             app.filter = app.filter.next();
             app.rebuild();
         }
+        KeyCode::Char('F') => {
+            app.filter = app.filter.prev();
+            app.rebuild();
+        }
         // Ctrl-R, because `r` is worth more as rename. The store is watched and
         // a 10s safety poll backstops it, so this is an escape hatch for the
         // events macOS drops rather than something you should need.
@@ -1507,7 +1523,9 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         KeyCode::Char('s') => {
             if let Some(t) = selected {
                 let id = t.id.clone();
-                act(dex, tx, format!("started {}", t.name), move |d| d.start(&id));
+                act(dex, tx, format!("started {}", t.name), move |d| {
+                    d.start(&id)
+                });
             }
         }
         // Guarded, and placed ahead of the unguarded `a` below on purpose:
@@ -1724,10 +1742,16 @@ mod tests {
     #[test]
     fn the_no_terminal_message_offers_a_way_forward() {
         let m = super::requires_a_terminal();
-        assert!(m.contains("real terminal"), "does not say what is wrong: {m}");
+        assert!(
+            m.contains("real terminal"),
+            "does not say what is wrong: {m}"
+        );
         assert!(m.contains("dextui selftest"), "offers no alternative: {m}");
         assert!(
-            matches!(super::parse(&["selftest".to_string()]), Ok(super::Command::SelfTest)),
+            matches!(
+                super::parse(&["selftest".to_string()]),
+                Ok(super::Command::SelfTest)
+            ),
             "the message names a command that is not accepted"
         );
     }
@@ -1788,7 +1812,11 @@ mod tests {
             KeyCode::Char(' '),
             KeyCode::Char('x'),
         ] {
-            assert_eq!(help_key(key).0, None, "{key:?} should have dismissed the help");
+            assert_eq!(
+                help_key(key).0,
+                None,
+                "{key:?} should have dismissed the help"
+            );
         }
     }
 
@@ -1801,7 +1829,10 @@ mod tests {
     fn saving_a_repo_by_path_rejects_what_is_not_a_git_repo() {
         let mut app = App::new(vec![], "demo".into(), crate::config::Config::default());
 
-        assert!(save_repo_at(&mut app, "  ").is_empty(), "blank is a no-op, not an error");
+        assert!(
+            save_repo_at(&mut app, "  ").is_empty(),
+            "blank is a no-op, not an error"
+        );
 
         let missing = save_repo_at(&mut app, "/nonexistent-path-for-tests");
         assert!(missing.contains("not a directory"), "{missing}");
@@ -1851,7 +1882,11 @@ mod tests {
         // global store on the way there.
         let r = current_repo("/nonexistent-repo-for-tests/.dex", &mut problems);
         assert!(r.is_none());
-        assert_eq!(problems.len(), 1, "a git failure has to be reported: {problems:?}");
+        assert_eq!(
+            problems.len(),
+            1,
+            "a git failure has to be reported: {problems:?}"
+        );
         assert!(
             problems[0].starts_with("/nonexistent-repo-for-tests"),
             "the problem names the repo, not its store: {problems:?}"
@@ -1894,6 +1929,32 @@ mod tests {
         assert!(!app.force_redraw, "the plain `l` should not force a redraw");
     }
 
+    /// `f` and `F` should behave like the sort pair: one moves through the
+    /// choices in the normal direction, the shifted key walks back.
+    #[test]
+    fn filter_keys_cycle_forward_and_backward() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let dex = Arc::new(Dex::real());
+
+        let mut app = App::new(vec![], "demo".into(), crate::config::Config::default());
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+            &dex,
+            &tx,
+        );
+        assert_eq!(app.filter, crate::tree::Filter::InProgress);
+
+        let mut app = App::new(vec![], "demo".into(), crate::config::Config::default());
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT),
+            &dex,
+            &tx,
+        );
+        assert_eq!(app.filter, crate::tree::Filter::All);
+    }
+
     /// `?` is pressed by someone looking for a key, and resuming halfway down
     /// the dialog would hide the first ten of them.
     #[test]
@@ -1922,7 +1983,11 @@ mod tests {
         // `--help` did nothing in a terminal and panicked outside one.
         assert!(parsed(&["--nonsense"]).unwrap_err().contains("--nonsense"));
         assert!(parsed(&["wibble"]).unwrap_err().contains("wibble"));
-        assert!(parsed(&["config", "wibble"]).unwrap_err().contains("wibble"));
+        assert!(
+            parsed(&["config", "wibble"])
+                .unwrap_err()
+                .contains("wibble")
+        );
     }
 
     #[test]
@@ -1936,14 +2001,23 @@ mod tests {
     #[test]
     fn help_wins_even_after_a_command() {
         // Asking for help should never run something instead.
-        assert!(matches!(parsed(&["config", "init", "--help"]), Ok(Command::Help)));
+        assert!(matches!(
+            parsed(&["config", "init", "--help"]),
+            Ok(Command::Help)
+        ));
     }
 
     #[test]
     fn config_subcommands_parse() {
         assert!(matches!(parsed(&["config"]), Ok(Command::ShowConfig)));
-        assert!(matches!(parsed(&["config", "init"]), Ok(Command::InitConfig { .. })));
-        assert!(matches!(parsed(&["config", "edit"]), Ok(Command::EditConfig { .. })));
+        assert!(matches!(
+            parsed(&["config", "init"]),
+            Ok(Command::InitConfig { .. })
+        ));
+        assert!(matches!(
+            parsed(&["config", "edit"]),
+            Ok(Command::EditConfig { .. })
+        ));
     }
 
     #[test]
@@ -1953,7 +2027,9 @@ mod tests {
             assert!(
                 matches!(
                     parsed(&["config", "edit", flag]),
-                    Ok(Command::EditConfig { scope: config::Scope::Project })
+                    Ok(Command::EditConfig {
+                        scope: config::Scope::Project
+                    })
                 ),
                 "{flag} did not select the project scope"
             );
@@ -1964,12 +2040,16 @@ mod tests {
     fn global_is_the_default_and_can_be_stated_explicitly() {
         assert!(matches!(
             parsed(&["config", "edit"]),
-            Ok(Command::EditConfig { scope: config::Scope::Global })
+            Ok(Command::EditConfig {
+                scope: config::Scope::Global
+            })
         ));
         for flag in ["-g", "--global"] {
             assert!(matches!(
                 parsed(&["config", "edit", flag]),
-                Ok(Command::EditConfig { scope: config::Scope::Global })
+                Ok(Command::EditConfig {
+                    scope: config::Scope::Global
+                })
             ));
         }
     }
@@ -1978,7 +2058,10 @@ mod tests {
     fn options_may_appear_before_the_command() {
         assert!(matches!(
             parsed(&["--local", "--force", "config", "init"]),
-            Ok(Command::InitConfig { force: true, scope: config::Scope::Project })
+            Ok(Command::InitConfig {
+                force: true,
+                scope: config::Scope::Project
+            })
         ));
     }
 
@@ -2039,7 +2122,11 @@ mod tests {
     /// old store's tasks painted under the new store's label, silently.
     #[test]
     fn a_task_list_from_the_store_we_just_left_is_dropped() {
-        let mut app = App::new(vec![a_task("new")], "/x/two/.dex".into(), config::Config::default());
+        let mut app = App::new(
+            vec![a_task("new")],
+            "/x/two/.dex".into(),
+            config::Config::default(),
+        );
 
         apply(
             &mut app,
@@ -2051,7 +2138,10 @@ mod tests {
 
         let ids: Vec<&str> = app.tasks.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, vec!["new"], "the old store's tasks were painted");
-        assert_eq!(app.store_label, "two", "and the header still says the new store");
+        assert_eq!(
+            app.store_label, "two",
+            "and the header still says the new store"
+        );
     }
 
     /// The ordinary case still applies, or the tag would have turned every
@@ -2202,7 +2292,11 @@ mod tests {
             register_repo(&mut app, worktrees_of("one"));
 
             let paths: Vec<&str> = app.repos.iter().map(|r| r.path.as_str()).collect();
-            assert_eq!(paths, vec!["/x/one", "/x/two"], "rows are not in registry order");
+            assert_eq!(
+                paths,
+                vec!["/x/one", "/x/two"],
+                "rows are not in registry order"
+            );
 
             let status = register_repo(&mut app, worktrees_of("one"));
             assert!(status.contains("already saved"), "status: {status}");
@@ -2258,7 +2352,11 @@ mod tests {
         select_worktree_under_cursor(&mut app);
 
         assert_eq!(app.pending_store, None);
-        assert_eq!(app.focus, Focus::Repos, "must not steal focus with nothing to select");
+        assert_eq!(
+            app.focus,
+            Focus::Repos,
+            "must not steal focus with nothing to select"
+        );
     }
 
     /// `Mode::Confirm.id` is overloaded to carry either a task id or, with a
@@ -2289,6 +2387,9 @@ mod tests {
         app.focus = Focus::Repos;
 
         assert_eq!(app.focus, Focus::Repos);
-        assert_eq!(app.zoom, None, "must not reach for zoom -- that used to be sticky");
+        assert_eq!(
+            app.zoom, None,
+            "must not reach for zoom -- that used to be sticky"
+        );
     }
 }
