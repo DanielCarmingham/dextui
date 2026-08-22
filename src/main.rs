@@ -1249,7 +1249,59 @@ fn close_modal(app: &mut App, dex: &Arc<Dex>, tx: &Sender<Msg>) {
     }
 }
 
+/// The only three chords this app binds: `^C` quit, `^L` redraw, `^R` refresh.
+///
+/// Kept as a list rather than asked of the match, because the match cannot
+/// answer it -- `handle_normal`'s arms are tried in order and the plain
+/// `Char` arms do not look at modifiers at all, so "is this chord bound?" has
+/// no expression there. See `reject_unbound_chords`.
+fn is_a_bound_chord(key: &KeyEvent) -> bool {
+    key.modifiers.difference(KeyModifiers::SHIFT) == KeyModifiers::CONTROL
+        && matches!(key.code, KeyCode::Char('c' | 'l' | 'r'))
+}
+
+/// A chord is not a key, and before this the app could not tell the two apart.
+///
+/// `handle_normal` matches on `key.code` alone -- only `^C`, `^L` and `^R`
+/// inspect the modifiers -- and the text-entry modes insert `Char(c)`
+/// verbatim. Crossterm decodes the wire byte `0x04` back into `Char('d')` plus
+/// CONTROL, so the code by itself cannot distinguish `Ctrl-D` from `d`, and
+/// every unguarded arm answered to both. `Ctrl-D` opened the delete
+/// confirmation, `Alt-D` and `Ctrl-Alt-D` with it; `Ctrl-Q` quit, `Ctrl-W`
+/// toggled wrapping, `Ctrl-J`/`Ctrl-K` walked the tree, and `Ctrl-A` in the
+/// rename box typed an `a` into the task name. `d` is only the one that got
+/// noticed, because it is the one with a dialog attached.
+///
+/// Three rules, and each is load-bearing:
+///
+/// - **SHIFT is not a chord.** `O`, `G`, `F`, `D`, `A` and `+` are all shifted
+///   keys carrying bindings of their own, so "drop anything modified" would
+///   delete a sixth of the keymap. Anything *other* than SHIFT is a chord --
+///   stated as a difference rather than by naming CONTROL and ALT, so SUPER,
+///   META and HYPER are covered without this having to enumerate crossterm's
+///   set and stay in step with it.
+/// - **The three bound chords are let through only in `Mode::Normal`**, which
+///   is the one mode that binds them. Passed on unconditionally they would
+///   reach `handle_search`/`handle_prompt`, whose `Char(c)` arm would type a
+///   literal `l` or `r` into the field -- the same defect this exists to stop.
+/// - **One place, not forty.** Per-arm modifier guards would leave the next
+///   binding someone adds exposed by default, which is exactly how this got
+///   here: the `^L` arm's own comment already noted that a guarded arm works
+///   only by being written above the plain one.
+///
+/// Returns `true` when the key was a chord and has been swallowed.
+fn reject_unbound_chords(app: &App, key: &KeyEvent) -> bool {
+    if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+        return false;
+    }
+    !(matches!(app.mode, Mode::Normal) && is_a_bound_chord(key))
+}
+
 fn handle_key(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>) {
+    if reject_unbound_chords(app, &key) {
+        return;
+    }
+
     match app.mode.clone() {
         Mode::Normal => handle_normal(app, key, dex, tx),
         Mode::Search => handle_search(app, key),
@@ -1927,6 +1979,139 @@ mod tests {
             &tx,
         );
         assert!(!app.force_redraw, "the plain `l` should not force a redraw");
+    }
+
+    /// Every modifier chord that still decodes to a letter used to reach that
+    /// letter's *plain* binding. The match is on `key.code` alone and only
+    /// `^C`, `^L` and `^R` look at the modifiers at all, so `Ctrl-D` opened
+    /// the delete confirmation -- as did `Alt-D` and `Ctrl-Alt-D`, and as did
+    /// `Ctrl-Q` for quit, `Ctrl-W` for wrap and `Ctrl-A` for a new subtask.
+    /// `d` is simply the one that was noticed, because it is the one with a
+    /// dialog attached: reported as "why does pressing ctrl+d cause the delete
+    /// box to come up".
+    ///
+    /// SHIFT is deliberately still let through, and that is why this cannot
+    /// just drop everything modified: `O`, `G`, `F`, `D`, `A` and `+` are all
+    /// shifted keys carrying bindings of their own.
+    #[test]
+    fn a_modifier_chord_does_not_fire_the_plain_letter_binding() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let dex = Arc::new(Dex::real());
+
+        let pressed = |code: KeyCode, mods: KeyModifiers| {
+            let mut app = App::new(
+                vec![a_task("t1")],
+                "demo".into(),
+                crate::config::Config::default(),
+            );
+            app.focus = Focus::Tree;
+            handle_key(&mut app, KeyEvent::new(code, mods), &dex, &tx);
+            app
+        };
+
+        // The plain key still means what it always did.
+        assert!(
+            matches!(
+                pressed(KeyCode::Char('d'), KeyModifiers::NONE).mode,
+                Mode::Confirm { .. }
+            ),
+            "the plain `d` no longer asks to delete"
+        );
+
+        // Nothing layered over it does.
+        for mods in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ] {
+            assert!(
+                matches!(pressed(KeyCode::Char('d'), mods).mode, Mode::Normal),
+                "{mods:?} + d opened the delete dialog"
+            );
+        }
+
+        // The rest of the unguarded set went exactly the same way.
+        assert!(
+            !pressed(KeyCode::Char('q'), KeyModifiers::CONTROL).should_quit,
+            "ctrl-q quit the app"
+        );
+        let wrap = crate::config::Config::default().wrap;
+        assert_eq!(
+            pressed(KeyCode::Char('w'), KeyModifiers::CONTROL).wrap,
+            wrap,
+            "ctrl-w toggled wrapping"
+        );
+        assert!(
+            matches!(
+                pressed(KeyCode::Char('a'), KeyModifiers::ALT).mode,
+                Mode::Normal
+            ),
+            "alt-a opened the new-subtask prompt"
+        );
+
+        // The three deliberate control keys are untouched, and so is SHIFT.
+        assert!(
+            pressed(KeyCode::Char('c'), KeyModifiers::CONTROL).should_quit,
+            "ctrl-c no longer quits"
+        );
+        assert!(
+            pressed(KeyCode::Char('l'), KeyModifiers::CONTROL).force_redraw,
+            "ctrl-l no longer redraws"
+        );
+        assert_eq!(
+            pressed(KeyCode::Char('F'), KeyModifiers::SHIFT).filter,
+            crate::tree::Filter::All,
+            "shift-F no longer walks the filter back"
+        );
+    }
+
+    /// The same defect, in the modes where `Char(c)` is *text* rather than a
+    /// binding. `handle_search` and `handle_prompt` insert the character
+    /// verbatim, so `Ctrl-A` in the rename box -- the reflex for "go to the
+    /// start of the line" -- typed an `a` into the task name, and `Ctrl-W`
+    /// (delete the previous word) typed a `w`. A chord doing nothing is the
+    /// honest outcome here: the app does not bind these, and silently
+    /// corrupting the field you are editing is the worst of the options.
+    #[test]
+    fn a_chord_does_not_type_its_letter_into_a_text_field() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let dex = Arc::new(Dex::real());
+
+        let mut app = App::new(vec![], "demo".into(), crate::config::Config::default());
+        app.mode = Mode::Search;
+        for mods in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Char('a'), mods), &dex, &tx);
+        }
+        assert_eq!(app.query.value, "", "a chord typed into the search box");
+
+        // And the plain key still reaches it, so this has not simply muted
+        // the field.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            &dex,
+            &tx,
+        );
+        assert_eq!(app.query.value, "a", "the search box stopped accepting text");
+
+        let prompt = Prompt {
+            title: "rename".into(),
+            label: "name".into(),
+            input: TextInput::default(),
+            pending: Pending::EditName { id: "t1".into() },
+        };
+        let mut app = App::new(vec![], "demo".into(), crate::config::Config::default());
+        app.mode = Mode::Prompt(prompt);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            &dex,
+            &tx,
+        );
+        let Mode::Prompt(p) = &app.mode else {
+            panic!("ctrl-a left the prompt: {:?}", app.mode);
+        };
+        assert_eq!(p.input.value, "", "ctrl-a typed an `a` into the rename box");
     }
 
     /// `f` and `F` should behave like the sort pair: one moves through the

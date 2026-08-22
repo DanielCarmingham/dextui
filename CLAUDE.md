@@ -994,6 +994,41 @@ holding once the sidebar drove the other two panes and earned a number of its
 own. An ordered cycle answers the old objection rather than ignoring it — with
 a direction, "back" is never in doubt.
 
+**A chord is not a key, and the match cannot tell the difference.** Every arm
+in `handle_normal` matches on `key.code` alone — only `^C`, `^L` and `^R` look
+at the modifiers — and the text-entry modes insert `Char(c)` verbatim. But
+crossterm decodes the wire byte `0x04` back into `Char('d')` *plus* CONTROL, so
+the code by itself cannot separate `Ctrl-D` from `d`, and every unguarded arm
+answered to both: `Ctrl-D` opened the delete confirmation, `Alt-D` and
+`Ctrl-Alt-D` with it, `Ctrl-Q` quit, `Ctrl-W` toggled wrapping, and `Ctrl-A` in
+the rename box typed an `a` into the task name. `d` is only the one that got
+noticed, because it is the one with a dialog attached.
+
+`reject_unbound_chords` swallows them at the top of `handle_key`, before the
+mode dispatch. Three things about it are load-bearing:
+
+- **SHIFT is not a chord.** `O`, `G`, `F`, `D`, `A` and `+` are shifted keys
+  with bindings of their own, so "drop anything modified" would delete a sixth
+  of the keymap. It is stated as `difference(SHIFT)` rather than by naming
+  CONTROL and ALT, so SUPER, META and HYPER are covered without this having to
+  enumerate crossterm's set and stay in step with it.
+- **The three bound chords pass only in `Mode::Normal`**, the one mode that
+  binds them. Let through everywhere they would reach `handle_search` /
+  `handle_prompt`, whose `Char(c)` arm would type a literal `l` or `r` into
+  the field — the same defect, one mode over.
+- **One place, not forty.** Per-arm guards leave the *next* binding exposed by
+  default, which is exactly how this happened: the `^L` arm's own comment
+  already observed that a guarded arm works only by being written above the
+  plain one, and drew no conclusion from it.
+
+There is a floor under how precise this can get, and it is the terminal, not
+the code. On the legacy encoding `Ctrl-Shift-D` is indistinguishable from
+`Ctrl-D` (both arrive as `0x04`), and `Ctrl-1` or `Shift-Enter` are not
+representable at all. Reaching those needs the kitty keyboard protocol
+(`PushKeyboardEnhancementFlags`), which Ghostty and kitty support and
+Terminal.app does not — so bind conservatively rather than building a chord
+system the wire cannot carry.
+
 **Both surfaces that advertise keys have to be kept honest, and a test does
 it.** `SHORTCUTS` (the status strip) and `HELP` (the `?` dialog) name the same
 keys to the same person, so `the_shortcut_strip_and_the_help_dialog_agree`
