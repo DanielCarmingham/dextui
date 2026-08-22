@@ -994,35 +994,56 @@ holding once the sidebar drove the other two panes and earned a number of its
 own. An ordered cycle answers the old objection rather than ignoring it — with
 a direction, "back" is never in doubt.
 
-**A chord is not a key, and the match cannot tell the difference.** Every arm
-in `handle_normal` matches on `key.code` alone — only `^C`, `^L` and `^R` look
-at the modifiers — and the text-entry modes insert `Char(c)` verbatim. But
-crossterm decodes the wire byte `0x04` back into `Char('d')` *plus* CONTROL, so
-the code by itself cannot separate `Ctrl-D` from `d`, and every unguarded arm
-answered to both: `Ctrl-D` opened the delete confirmation, `Alt-D` and
-`Ctrl-Alt-D` with it, `Ctrl-Q` quit, `Ctrl-W` toggled wrapping, and `Ctrl-A` in
-the rename box typed an `a` into the task name. `d` is only the one that got
-noticed, because it is the one with a dialog attached.
+**The keymap is a table, not a `match`, and a chord is not a key.** Those two
+are the same fact. `handle_normal` used to be forty arms matching on
+`key.code`, of which exactly three inspected the modifiers — and crossterm
+decodes the wire byte `0x04` back into `Char('d')` *plus* CONTROL, so an arm
+matching on the code alone answered to `Ctrl-D` precisely as it answered to
+`d`. `Ctrl-D` opened the delete confirmation, `Alt-D` and `Ctrl-Alt-D` with it;
+`Ctrl-Q` quit, `Ctrl-W` toggled wrapping, `Ctrl-J`/`Ctrl-K` walked the tree,
+`Ctrl-A` made a subtask. `d` is only the one that got noticed, because it is
+the one with a dialog attached. Reported as "why does pressing ctrl+d cause the
+delete box to come up".
 
-`reject_unbound_chords` swallows them at the top of `handle_key`, before the
-mode dispatch. Three things about it are load-bearing:
+`BINDINGS` maps an exact chord to an `Action`; `handle_normal` matches on the
+`Action`. `Ctrl-D` is not in the table, so it resolves to nothing — the class
+of bug is unrepresentable rather than guarded against. Five things about the
+shape:
 
-- **SHIFT is not a chord.** `O`, `G`, `F`, `D`, `A` and `+` are shifted keys
-  with bindings of their own, so "drop anything modified" would delete a sixth
-  of the keymap. It is stated as `difference(SHIFT)` rather than by naming
-  CONTROL and ALT, so SUPER, META and HYPER are covered without this having to
-  enumerate crossterm's set and stay in step with it.
-- **The three bound chords pass only in `Mode::Normal`**, the one mode that
-  binds them. Let through everywhere they would reach `handle_search` /
-  `handle_prompt`, whose `Char(c)` arm would type a literal `l` or `r` into
-  the field — the same defect, one mode over.
-- **One place, not forty.** Per-arm guards leave the *next* binding exposed by
-  default, which is exactly how this happened: the `^L` arm's own comment
-  already observed that a guarded arm works only by being written above the
-  plain one, and drew no conclusion from it.
+- **`Action` is coarse on purpose.** Eleven of them depend on focus —
+  `MoveDown` walks the tree, scrolls the detail or moves the sidebar cursor;
+  `Add` makes a subtask in the tree and registers a repo in the sidebar — and
+  that stays the handler's business. Per-focus keymaps would be a different
+  and much larger design for a keymap where a key means the same verb in every
+  pane. It also kept the change mechanical: the arm bodies moved verbatim.
+- **SHIFT is normalised away in `chord`, not matched.** For a `Char` the shift
+  is already in the character's *case* (`G` is not `g`), and terminals disagree
+  about whether to report the modifier as well — crossterm sets it for
+  uppercase ASCII, kitty reports it on more keys. Matching on it would make `G`
+  a different binding depending on the terminal. `BackTab` carries it for the
+  same reason and is normalised the same way.
+- **The text-entry modes are the other half, and the table cannot help them.**
+  There `Char(c)` is data, not a binding, so they inserted whatever arrived:
+  `Ctrl-A` in the rename box — the reflex for "go to the start of the line" —
+  typed an `a` into the task name. `typed_char` is the one place that answers
+  "did this key type a character", and `handle_search`, `handle_prompt` and the
+  confirmation dialogs' `y` all go through it.
+- **An `Action` with no key needs no test.** It would be a variant constructed
+  nowhere, and rustc's dead-code lint says so — verified by adding one.
+  Ordering, by contrast, *did* need a test: a lookup has no first-match rule to
+  appeal to, so two entries claiming one chord would make the binding depend on
+  where in the list someone added it.
+- **The strips are still hand-written**, and deliberately. Generating
+  `SHORTCUTS` from the table would mean the table carrying presentation order
+  and a per-pane label — `a` is `sub` in the tree and `save this repo` in the
+  sidebar — which is a worse table for a modest gain. Instead
+  `the_shortcut_strips_only_advertise_keys_that_are_bound` holds each strip
+  against the keymap, so a key that is renamed or dropped cannot go on being
+  advertised. `HELP` is not generable at all: its top eleven lines are a
+  hand-aligned two-column table and the twenty-five below are prose.
 
-There is a floor under how precise this can get, and it is the terminal, not
-the code. On the legacy encoding `Ctrl-Shift-D` is indistinguishable from
+There is a floor under how precise any of this can be, and it is the terminal,
+not the code. On the legacy encoding `Ctrl-Shift-D` is indistinguishable from
 `Ctrl-D` (both arrive as `0x04`), and `Ctrl-1` or `Shift-Enter` are not
 representable at all. Reaching those needs the kitty keyboard protocol
 (`PushKeyboardEnhancementFlags`), which Ghostty and kitty support and
@@ -1500,12 +1521,14 @@ that issues `Clear(ClearType::All)` every frame cannot get stuck this way at
 all, so it can look perfect in a terminal where this app looks broken — which
 is not evidence that the coordinates are at fault.
 
-The binding **must stay above the unguarded `KeyCode::Char('l')`** that means
-expand / cross to the detail: match arms are tried in order and that one does
-not inspect modifiers. `ctrl_l_forces_a_redraw_and_is_not_swallowed_by_the_plain_l`
-pins it, because the layout of a `match` is not something anything else checks
-— the compiler warns here only by luck, and would say nothing if the shadowing
-arm were reachable-but-wrong.
+`^L` and the plain `l` are **two entries in `BINDINGS`**, distinguished by
+their modifiers rather than by their order. This used to be an ordering rule —
+the guarded arm worked only because it was *written above* the unguarded
+`Char('l')` — which is a property of the file's layout that nothing but a test
+could check, and the compiler warned about only by luck.
+`ctrl_l_forces_a_redraw_and_is_not_swallowed_by_the_plain_l` is kept anyway:
+it now pins the SHIFT normalisation in `chord` instead, which is the remaining
+way the two could collapse into one.
 
 **Check the binary is actually fresh before believing a capture.** `cargo build`
 has twice reported `Finished` while leaving `target/debug/dextui` hours stale:

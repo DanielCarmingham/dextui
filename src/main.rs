@@ -1249,66 +1249,239 @@ fn close_modal(app: &mut App, dex: &Arc<Dex>, tx: &Sender<Msg>) {
     }
 }
 
-/// The only three chords this app binds: `^C` quit, `^L` redraw, `^R` refresh.
+/// What a key *means*, once the chord that produced it has been resolved.
 ///
-/// Kept as a list rather than asked of the match, because the match cannot
-/// answer it -- `handle_normal`'s arms are tried in order and the plain
-/// `Char` arms do not look at modifiers at all, so "is this chord bound?" has
-/// no expression there. See `reject_unbound_chords`.
-fn is_a_bound_chord(key: &KeyEvent) -> bool {
-    key.modifiers.difference(KeyModifiers::SHIFT) == KeyModifiers::CONTROL
-        && matches!(key.code, KeyCode::Char('c' | 'l' | 'r'))
+/// Deliberately coarse. Eleven of these depend on which pane has focus --
+/// `MoveDown` walks the tree, scrolls the detail, or moves the sidebar cursor;
+/// `Add` makes a subtask in the tree and registers a repo in the sidebar --
+/// and that stays the *handler's* business rather than the table's. Per-focus
+/// keymaps would be a different design, and a much larger one, for a keymap
+/// where the same key genuinely means the same verb in every pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    Quit,
+    Redraw,
+    Refresh,
+    NextPane,
+    PrevPane,
+    FocusRepos,
+    FocusTree,
+    FocusDetail,
+    MoveDown,
+    MoveUp,
+    PageDown,
+    PageUp,
+    /// `enter` -- the detail pane, or the worktree under the sidebar cursor.
+    Open,
+    /// `l` / `→` -- expand, scroll right, or step across to the detail.
+    StepIn,
+    /// `h` / `←` -- collapse, scroll left, or step back.
+    StepOut,
+    First,
+    Last,
+    CollapseAll,
+    ExpandAll,
+    ToggleZoom,
+    ToggleWrap,
+    ToggleSidebar,
+    CycleSort,
+    ReverseSort,
+    FilterNext,
+    FilterPrev,
+    Search,
+    Help,
+    EditConfig,
+    NewTask,
+    /// `a` -- a subtask of the selection, or the current repo into `saved`.
+    Add,
+    /// `D` -- forget a saved repo. Sidebar only.
+    Forget,
+    SaveRepoByPath,
+    StartTask,
+    CompleteTask,
+    RenameTask,
+    EditDescription,
+    DeleteTask,
 }
 
-/// A chord is not a key, and before this the app could not tell the two apart.
+/// One key, and what it does.
+struct Binding {
+    code: KeyCode,
+    mods: KeyModifiers,
+    action: Action,
+}
+
+/// The keymap: the single answer to "is this bound, and to what".
 ///
-/// `handle_normal` matches on `key.code` alone -- only `^C`, `^L` and `^R`
-/// inspect the modifiers -- and the text-entry modes insert `Char(c)`
-/// verbatim. Crossterm decodes the wire byte `0x04` back into `Char('d')` plus
-/// CONTROL, so the code by itself cannot distinguish `Ctrl-D` from `d`, and
-/// every unguarded arm answered to both. `Ctrl-D` opened the delete
-/// confirmation, `Alt-D` and `Ctrl-Alt-D` with it; `Ctrl-Q` quit, `Ctrl-W`
-/// toggled wrapping, `Ctrl-J`/`Ctrl-K` walked the tree, and `Ctrl-A` in the
-/// rename box typed an `a` into the task name. `d` is only the one that got
-/// noticed, because it is the one with a dialog attached.
+/// This replaced a 40-arm `match key.code`, and the reason is not tidiness.
+/// That match could not *express* the difference between a key and a chord:
+/// crossterm decodes the wire byte `0x04` back into `Char('d')` plus CONTROL,
+/// so an arm matching on the code alone answered to `Ctrl-D` exactly as it
+/// answered to `d` -- and only three of the forty inspected the modifiers.
+/// `Ctrl-D` opened the delete confirmation, `Alt-D` and `Ctrl-Alt-D` with it,
+/// `Ctrl-Q` quit, `Ctrl-W` toggled wrapping, `Ctrl-A` made a subtask. `d` was
+/// simply the one that got noticed, being the one with a dialog attached.
 ///
-/// Three rules, and each is load-bearing:
+/// A lookup answers it by construction: `Ctrl-D` is not in this table, so it
+/// resolves to nothing. There is no ordering to get right and no arm that can
+/// be added without stating its modifiers, which is what the previous shape
+/// got wrong -- the `^L` binding worked only because it was *written above*
+/// the plain `l`, a property of the file's layout that nothing checked.
 ///
-/// - **SHIFT is not a chord.** `O`, `G`, `F`, `D`, `A` and `+` are all shifted
-///   keys carrying bindings of their own, so "drop anything modified" would
-///   delete a sixth of the keymap. Anything *other* than SHIFT is a chord --
-///   stated as a difference rather than by naming CONTROL and ALT, so SUPER,
-///   META and HYPER are covered without this having to enumerate crossterm's
-///   set and stay in step with it.
-/// - **The three bound chords are let through only in `Mode::Normal`**, which
-///   is the one mode that binds them. Passed on unconditionally they would
-///   reach `handle_search`/`handle_prompt`, whose `Char(c)` arm would type a
-///   literal `l` or `r` into the field -- the same defect this exists to stop.
-/// - **One place, not forty.** Per-arm modifier guards would leave the next
-///   binding someone adds exposed by default, which is exactly how this got
-///   here: the `^L` arm's own comment already noted that a guarded arm works
-///   only by being written above the plain one.
+/// A linear scan of ~40 entries per keypress is not worth indexing: a keypress
+/// already costs a repaint, and the table has to stay readable more than it
+/// has to stay fast.
+const BINDINGS: &[Binding] = &[
+    // Leaving.
+    Binding { code: KeyCode::Char('q'), mods: KeyModifiers::NONE, action: Action::Quit },
+    Binding { code: KeyCode::Esc, mods: KeyModifiers::NONE, action: Action::Quit },
+    Binding { code: KeyCode::Char('c'), mods: KeyModifiers::CONTROL, action: Action::Quit },
+
+    // Ctrl-L, the universal "redraw the screen".
+    //
+    // `terminal.draw` writes only the cells that changed since the frame
+    // ratatui itself last drew, so corruption from *outside* the app is
+    // invisible to it: those cells are already right as far as its buffer
+    // knows, so they are never rewritten -- and the app draws nothing at all
+    // until something it knows about changes. A wrong screen therefore
+    // persists instead of healing. Worth having even once a particular cause
+    // is found, because the cause is by definition somewhere this app does
+    // not control.
+    Binding { code: KeyCode::Char('l'), mods: KeyModifiers::CONTROL, action: Action::Redraw },
+    // Ctrl-R, because `r` is worth more as rename. The store is watched and a
+    // 10s safety poll backstops it, so this is an escape hatch for the events
+    // macOS drops rather than something you should need.
+    Binding { code: KeyCode::Char('r'), mods: KeyModifiers::CONTROL, action: Action::Refresh },
+
+    // Panes. Tab walks them left to right, Shift-Tab back; the sidebar is in
+    // the cycle exactly when it is on screen -- see `focus_cycle`.
+    Binding { code: KeyCode::Tab, mods: KeyModifiers::NONE, action: Action::NextPane },
+    Binding { code: KeyCode::BackTab, mods: KeyModifiers::NONE, action: Action::PrevPane },
+    // Straight to a pane by number, the way LazyGit and gitui do it. The
+    // numbers are only *drawn* in zoom mode, where there is a hidden pane to
+    // reach, but the keys work at any width -- they were unbound, and refusing
+    // them when every pane is visible would be a rule to remember for no
+    // benefit. Numbered left to right as the panes are drawn: see `ui::TABS`,
+    // the one list the tabs, the click zones and each pane's `[n]` marker all
+    // read.
+    Binding { code: KeyCode::Char('1'), mods: KeyModifiers::NONE, action: Action::FocusRepos },
+    Binding { code: KeyCode::Char('2'), mods: KeyModifiers::NONE, action: Action::FocusTree },
+    Binding { code: KeyCode::Char('3'), mods: KeyModifiers::NONE, action: Action::FocusDetail },
+
+    // Movement, in whichever pane has focus.
+    Binding { code: KeyCode::Down, mods: KeyModifiers::NONE, action: Action::MoveDown },
+    Binding { code: KeyCode::Char('j'), mods: KeyModifiers::NONE, action: Action::MoveDown },
+    Binding { code: KeyCode::Up, mods: KeyModifiers::NONE, action: Action::MoveUp },
+    Binding { code: KeyCode::Char('k'), mods: KeyModifiers::NONE, action: Action::MoveUp },
+    Binding { code: KeyCode::PageDown, mods: KeyModifiers::NONE, action: Action::PageDown },
+    Binding { code: KeyCode::PageUp, mods: KeyModifiers::NONE, action: Action::PageUp },
+    Binding { code: KeyCode::Enter, mods: KeyModifiers::NONE, action: Action::Open },
+    Binding { code: KeyCode::Right, mods: KeyModifiers::NONE, action: Action::StepIn },
+    Binding { code: KeyCode::Char('l'), mods: KeyModifiers::NONE, action: Action::StepIn },
+    Binding { code: KeyCode::Left, mods: KeyModifiers::NONE, action: Action::StepOut },
+    Binding { code: KeyCode::Char('h'), mods: KeyModifiers::NONE, action: Action::StepOut },
+    Binding { code: KeyCode::Char('g'), mods: KeyModifiers::NONE, action: Action::First },
+    Binding { code: KeyCode::Char('G'), mods: KeyModifiers::NONE, action: Action::Last },
+
+    // `z` is tmux's zoom-pane, which is where the reflex comes from. That cost
+    // collapse/expand their old keys -- and `-`/`+` is the better mnemonic
+    // anyway: minus closes, plus opens. `=` is accepted for `+` because it is
+    // the same physical key without the shift.
+    Binding { code: KeyCode::Char('z'), mods: KeyModifiers::NONE, action: Action::ToggleZoom },
+    Binding { code: KeyCode::Char('-'), mods: KeyModifiers::NONE, action: Action::CollapseAll },
+    Binding { code: KeyCode::Char('+'), mods: KeyModifiers::NONE, action: Action::ExpandAll },
+    Binding { code: KeyCode::Char('='), mods: KeyModifiers::NONE, action: Action::ExpandAll },
+
+    // View. Wrapping and horizontal scrolling are mutually exclusive, so `w`
+    // is the switch between reading prose and reading a wide table. `b` for
+    // bar shows and hides the sidebar whatever the width would have chosen --
+    // `1` brings it back, so it cannot be a way to lose the pane with no way
+    // to ask for it again.
+    Binding { code: KeyCode::Char('w'), mods: KeyModifiers::NONE, action: Action::ToggleWrap },
+    Binding { code: KeyCode::Char('b'), mods: KeyModifiers::NONE, action: Action::ToggleSidebar },
+    Binding { code: KeyCode::Char('o'), mods: KeyModifiers::NONE, action: Action::CycleSort },
+    Binding { code: KeyCode::Char('O'), mods: KeyModifiers::NONE, action: Action::ReverseSort },
+    Binding { code: KeyCode::Char('f'), mods: KeyModifiers::NONE, action: Action::FilterNext },
+    Binding { code: KeyCode::Char('F'), mods: KeyModifiers::NONE, action: Action::FilterPrev },
+    Binding { code: KeyCode::Char('/'), mods: KeyModifiers::NONE, action: Action::Search },
+    Binding { code: KeyCode::Char('?'), mods: KeyModifiers::NONE, action: Action::Help },
+    // Reuses the $EDITOR machinery rather than building a settings form.
+    Binding { code: KeyCode::Char(','), mods: KeyModifiers::NONE, action: Action::EditConfig },
+
+    // Acting on a task.
+    Binding { code: KeyCode::Char('n'), mods: KeyModifiers::NONE, action: Action::NewTask },
+    Binding { code: KeyCode::Char('a'), mods: KeyModifiers::NONE, action: Action::Add },
+    Binding { code: KeyCode::Char('s'), mods: KeyModifiers::NONE, action: Action::StartTask },
+    Binding { code: KeyCode::Char('c'), mods: KeyModifiers::NONE, action: Action::CompleteTask },
+    // `r` for rename and `e` for edit, rather than `e`/`E` for both. The app's
+    // other case pairs are one action and its variant -- `o`/`O` sorts and
+    // reverses -- whereas these were two different editors sharing a letter,
+    // and which case did which was something you had to remember rather than
+    // work out.
+    Binding { code: KeyCode::Char('r'), mods: KeyModifiers::NONE, action: Action::RenameTask },
+    Binding { code: KeyCode::Char('e'), mods: KeyModifiers::NONE, action: Action::EditDescription },
+    Binding { code: KeyCode::Char('d'), mods: KeyModifiers::NONE, action: Action::DeleteTask },
+
+    // Acting on a repo. `A` saves one you are *not* in, by path; `a` saves the
+    // one you are, which is the common case and worth the unshifted key. `D`
+    // (shift) rather than a second use of `d`: unregistering is a sidebar-only,
+    // no-dex action, and sharing a key with task deletion would suggest it
+    // also deletes something.
+    Binding { code: KeyCode::Char('A'), mods: KeyModifiers::NONE, action: Action::SaveRepoByPath },
+    Binding { code: KeyCode::Char('D'), mods: KeyModifiers::NONE, action: Action::Forget },
+];
+
+/// SHIFT is not part of a chord, and dropping it here is what keeps `G` one
+/// binding rather than two.
 ///
-/// Returns `true` when the key was a chord and has been swallowed.
-fn reject_unbound_chords(app: &App, key: &KeyEvent) -> bool {
-    if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
-        return false;
+/// For a `Char` the shift is already carried in the character's *case* -- `G`
+/// is not `g` -- and terminals disagree about whether to report the modifier
+/// as well: crossterm sets it for uppercase ASCII, and the kitty protocol
+/// reports it on keys the legacy encoding cannot express at all. Matching on
+/// it would make a binding depend on which terminal the app is running in.
+/// `BackTab` arrives carrying SHIFT for the same reason and is normalised the
+/// same way.
+fn chord(key: &KeyEvent) -> (KeyCode, KeyModifiers) {
+    (key.code, key.modifiers.difference(KeyModifiers::SHIFT))
+}
+
+fn action_for(key: &KeyEvent) -> Option<Action> {
+    let (code, mods) = chord(key);
+    BINDINGS
+        .iter()
+        .find(|b| b.code == code && b.mods == mods)
+        .map(|b| b.action)
+}
+
+/// The character a key event *types*, if it types one.
+///
+/// The text-entry modes are the other half of the chord problem, and the
+/// keymap above cannot help them: there `Char(c)` is data, not a binding, so
+/// they inserted whatever character arrived. `Ctrl-A` in the rename box -- the
+/// reflex for "go to the start of the line" -- typed an `a` into the task
+/// name, and `Ctrl-W` typed a `w` instead of deleting a word. Nothing here
+/// binds those, and doing nothing is the honest outcome; silently corrupting
+/// the field being edited is the worst of the options.
+fn typed_char(key: &KeyEvent) -> Option<char> {
+    match key.code {
+        KeyCode::Char(c) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => Some(c),
+        _ => None,
     }
-    !(matches!(app.mode, Mode::Normal) && is_a_bound_chord(key))
+}
+
+/// `enter`, or a `y` that was actually typed rather than chorded.
+fn confirms(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Enter || typed_char(key) == Some('y')
 }
 
 fn handle_key(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>) {
-    if reject_unbound_chords(app, &key) {
-        return;
-    }
-
     match app.mode.clone() {
         Mode::Normal => handle_normal(app, key, dex, tx),
         Mode::Search => handle_search(app, key),
         Mode::Prompt(p) => handle_prompt(app, key, p, dex, tx),
 
         Mode::Confirm { id, .. } => {
-            if matches!(key.code, KeyCode::Enter | KeyCode::Char('y')) {
+            if confirms(&key) {
                 // `id` is overloaded: a `repo:` prefix means `D` queued an
                 // unregister rather than `d` queuing a task delete. Unlike a
                 // task id (a short slug with no colon), a repo path can never
@@ -1345,7 +1518,7 @@ fn handle_key(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>) {
         }
 
         Mode::ForceComplete { id, result, .. } => {
-            if matches!(key.code, KeyCode::Enter | KeyCode::Char('y')) {
+            if confirms(&key) {
                 act(dex, tx, "completed".to_string(), move |d| {
                     d.complete(&id, &result, true)
                 });
@@ -1379,104 +1552,59 @@ fn handle_help(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>) {
 }
 
 fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>) {
+    let Some(action) = action_for(&key) else {
+        return;
+    };
+
     let selected = app.selected_task().cloned();
 
     // Clear any transient status as soon as the user does something else.
     app.status.clear();
 
-    match key.code {
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.should_quit = true
-        }
-
-        // Ctrl-L, the universal "redraw the screen", and unbound before this.
-        //
-        // `terminal.draw` writes only the cells that changed since the frame
-        // ratatui itself last drew, so corruption from *outside* the app is
-        // invisible to it: those cells are already right as far as its buffer
-        // knows, so they are never rewritten -- and the app draws nothing at
-        // all until something it knows about changes. A wrong screen therefore
-        // persists instead of healing. Worth having even once a particular
-        // cause is found, because the cause is by definition somewhere this
-        // app does not control.
-        //
-        // **Must stay above the unguarded `Char('l')`** that means expand /
-        // cross to the detail: match arms are tried in order and that one does
-        // not look at modifiers, so it would swallow this. The compiler says
-        // so (`unreachable pattern`), which is the only reason this is not a
-        // silently dead key -- `Char('r')`'s guarded arm is correct today only
-        // because it happens to be written above the plain `r`.
-        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+    match action {
+        Action::Quit => app.should_quit = true,
+        Action::Redraw => {
             app.force_redraw = true;
             app.status = "redrew the screen".into();
         }
-        KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+        Action::Refresh => refresh(dex, tx, app),
 
-        // Tab walks the panes left to right, Shift-Tab back. The sidebar is
-        // in the cycle exactly when it is on screen -- see `focus_cycle`.
-        KeyCode::Tab => app.cycle_focus(true),
-        KeyCode::BackTab => app.cycle_focus(false),
-        // Wrapping and horizontal scrolling are mutually exclusive, so this is
-        // the switch between reading prose and reading a wide table.
-        KeyCode::Char('w') => app.toggle_wrap(),
-        // Show or hide the sidebar, whatever the width would have chosen.
-        // `b` for bar, and unbound before this. `1` brings it back, so this
-        // cannot be a way to lose the pane with no way to ask for it again.
-        KeyCode::Char('b') => app.toggle_repos(),
-        KeyCode::Char('o') => app.cycle_sort(),
-        KeyCode::Char('O') => app.toggle_sort_direction(),
+        Action::NextPane => app.cycle_focus(true),
+        Action::PrevPane => app.cycle_focus(false),
+        Action::FocusRepos => app.show_repos(),
+        Action::FocusTree => app.show_tree(),
+        Action::FocusDetail => app.show_detail(),
 
-        // Movement drives whichever pane has focus. Action keys below stay
+        // Movement drives whichever pane has focus. The action keys below stay
         // global, because they always act on the selected task.
-        KeyCode::Down | KeyCode::Char('j') => match app.focus {
+        Action::MoveDown => match app.focus {
             Focus::Tree => app.move_selection(1),
             Focus::Detail => app.scroll_detail(1, 0),
             Focus::Repos => move_repo_cursor(app, 1),
         },
-        KeyCode::Up | KeyCode::Char('k') => match app.focus {
+        Action::MoveUp => match app.focus {
             Focus::Tree => app.move_selection(-1),
             Focus::Detail => app.scroll_detail(-1, 0),
             Focus::Repos => move_repo_cursor(app, -1),
         },
-        KeyCode::PageDown => match app.focus {
+        Action::PageDown => match app.focus {
             Focus::Tree => app.move_selection(10),
             Focus::Detail => app.scroll_detail(10, 0),
             Focus::Repos => move_repo_cursor(app, 10),
         },
-        KeyCode::PageUp => match app.focus {
+        Action::PageUp => match app.focus {
             Focus::Tree => app.move_selection(-10),
             Focus::Detail => app.scroll_detail(-10, 0),
             Focus::Repos => move_repo_cursor(app, -10),
         },
+
         // Enter always opens the detail -- except from the repo pane, where it
-        // instead picks the worktree under the cursor. It was unbound in
-        // Normal mode before the detail case existed, so neither meaning was
-        // ever taken from something else.
-        KeyCode::Enter => match app.focus {
+        // instead picks the worktree under the cursor.
+        Action::Open => match app.focus {
             Focus::Repos => select_worktree_under_cursor(app),
             _ => app.show_detail(),
         },
-
-        // Straight to a pane by number, the way LazyGit and gitui do it. The
-        // numbers are only *drawn* in zoom mode, where there is a hidden pane to
-        // reach, but the keys work at any width -- they were unbound, and
-        // refusing them when both panes are visible would be a rule to remember
-        // for no benefit.
-        //
-        // Numbered left to right as the panes are drawn -- see `ui::TABS`,
-        // which is the one list the tabs, the click zones and each pane's own
-        // `[n]` marker all read.
-        //
-        // Whether the sidebar actually has anywhere to draw is a render-time
-        // question, not a key-time one -- `App::single_pane` treats a
-        // repo-focused pane at a width with no room reserved for it as a
-        // single pane in its own right, so this needs no special casing
-        // here and nothing to undo when focus or width changes back.
-        KeyCode::Char('1') => app.show_repos(),
-        KeyCode::Char('2') => app.show_tree(),
-        KeyCode::Char('3') => app.show_detail(),
-
-        KeyCode::Right | KeyCode::Char('l') => match app.focus {
+        Action::StepIn => match app.focus {
             // Falls through to the detail only when there was nothing to open --
             // a leaf, where this key did nothing at all before. Gated on
             // single-pane: with both panes visible, a focus jump while walking
@@ -1489,7 +1617,7 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
             Focus::Detail => app.scroll_detail(0, 4),
             Focus::Repos => select_worktree_under_cursor(app),
         },
-        KeyCode::Left | KeyCode::Char('h') => match app.focus {
+        Action::StepOut => match app.focus {
             Focus::Tree => app.collapse_selected(),
             // Sideways first while there is anywhere to go -- a wide table with
             // wrap off -- and back only when there is not. The same
@@ -1508,7 +1636,7 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
             // pane would be a surprise.
             Focus::Repos => {}
         },
-        KeyCode::Char('g') => match app.focus {
+        Action::First => match app.focus {
             Focus::Tree => app.select_first(),
             Focus::Detail => app.detail_to_top(),
             Focus::Repos => {
@@ -1516,7 +1644,7 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
                 follow_repo_cursor(app);
             }
         },
-        KeyCode::Char('G') => match app.focus {
+        Action::Last => match app.focus {
             Focus::Tree => app.select_last(),
             Focus::Detail => app.detail_to_bottom(),
             Focus::Repos => {
@@ -1524,46 +1652,27 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
                 follow_repo_cursor(app);
             }
         },
-        // `z` is tmux's zoom-pane, which is where the reflex comes from. That
-        // cost collapse/expand their old keys -- and `-`/`+` is the better
-        // mnemonic anyway: minus closes, plus opens. `=` is accepted for `+`
-        // because it is the same physical key without the shift.
-        KeyCode::Char('z') => app.toggle_zoom(),
-        KeyCode::Char('-') => app.collapse_all(),
-        KeyCode::Char('+') | KeyCode::Char('=') => app.expand_all(),
 
-        KeyCode::Char('/') => app.mode = Mode::Search,
-        KeyCode::Char('f') => {
+        Action::ToggleZoom => app.toggle_zoom(),
+        Action::CollapseAll => app.collapse_all(),
+        Action::ExpandAll => app.expand_all(),
+        Action::ToggleWrap => app.toggle_wrap(),
+        Action::ToggleSidebar => app.toggle_repos(),
+        Action::CycleSort => app.cycle_sort(),
+        Action::ReverseSort => app.toggle_sort_direction(),
+        Action::FilterNext => {
             app.filter = app.filter.next();
             app.rebuild();
         }
-        KeyCode::Char('F') => {
+        Action::FilterPrev => {
             app.filter = app.filter.prev();
             app.rebuild();
         }
-        // Ctrl-R, because `r` is worth more as rename. The store is watched and
-        // a 10s safety poll backstops it, so this is an escape hatch for the
-        // events macOS drops rather than something you should need.
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            refresh(dex, tx, app)
-        }
+        Action::Search => app.mode = Mode::Search,
+        Action::Help => app.open_help(),
+        Action::EditConfig => app.pending_config_edit = true,
 
-        // `A` saves a repo you are *not* in, by path. `a` still saves the one
-        // you are, which is the common case and worth the unshifted key.
-        KeyCode::Char('A') => {
-            app.mode = Mode::Prompt(Prompt {
-                title: "Save a repo".into(),
-                label: "Path".into(),
-                input: app::TextInput::default(),
-                pending: Pending::SaveRepo,
-            });
-        }
-
-        KeyCode::Char('?') => app.open_help(),
-        // Reuses the $EDITOR machinery rather than building a settings form.
-        KeyCode::Char(',') => app.pending_config_edit = true,
-
-        KeyCode::Char('n') => {
+        Action::NewTask => {
             app.mode = Mode::Prompt(Prompt {
                 title: "New task".into(),
                 label: "Name".into(),
@@ -1572,27 +1681,33 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
             })
         }
 
-        KeyCode::Char('s') => {
-            if let Some(t) = selected {
-                let id = t.id.clone();
-                act(dex, tx, format!("started {}", t.name), move |d| {
-                    d.start(&id)
-                });
+        // `a` is the one key whose *verb* changes with the pane rather than
+        // just its target: a subtask in the tree, a registration in the
+        // sidebar. The old match expressed this by ordering a guarded arm
+        // above an unguarded one -- correct, but only as long as nobody moved
+        // them, and the strip has to say something different here too (see
+        // `ui::REPO_SHORTCUTS`).
+        Action::Add => match app.focus {
+            Focus::Repos => app.status = register_current_repo(app),
+            _ => {
+                if let Some(t) = selected {
+                    app.mode = Mode::Prompt(Prompt {
+                        title: format!("New subtask of: {}", t.name),
+                        label: "Name".into(),
+                        input: TextInput::default(),
+                        pending: Pending::CreateName {
+                            parent: Some(t.id.clone()),
+                        },
+                    });
+                }
             }
-        }
-        // Guarded, and placed ahead of the unguarded `a` below on purpose:
-        // match arms are tried top to bottom, so without this ordering every
-        // `a` press in the repo pane would fall through and silently open a
-        // "new subtask" prompt instead of registering anything.
-        KeyCode::Char('a') if app.focus == Focus::Repos => {
-            app.status = register_current_repo(app);
-        }
-        // `D` (shift) rather than a bare second use of `d`: unregistering is a
-        // sidebar-only, no-dex action, and sharing a key with task deletion
-        // would suggest it also deletes something. Confirms via the existing
-        // dialog rather than a second one -- see the `Mode::Confirm` handler.
-        KeyCode::Char('D') if app.focus == Focus::Repos => {
-            if let Some(r) = app.selected_repo() {
+        },
+        // Confirms via the existing dialog rather than a second one -- see the
+        // `Mode::Confirm` handler for the `repo:` prefix that keeps them apart.
+        Action::Forget => {
+            if app.focus == Focus::Repos
+                && let Some(r) = app.selected_repo()
+            {
                 app.mode = Mode::Confirm {
                     id: format!("repo:{}", r.path),
                     message: format!(
@@ -1602,19 +1717,24 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
                 };
             }
         }
-        KeyCode::Char('a') => {
+        Action::SaveRepoByPath => {
+            app.mode = Mode::Prompt(Prompt {
+                title: "Save a repo".into(),
+                label: "Path".into(),
+                input: app::TextInput::default(),
+                pending: Pending::SaveRepo,
+            });
+        }
+
+        Action::StartTask => {
             if let Some(t) = selected {
-                app.mode = Mode::Prompt(Prompt {
-                    title: format!("New subtask of: {}", t.name),
-                    label: "Name".into(),
-                    input: TextInput::default(),
-                    pending: Pending::CreateName {
-                        parent: Some(t.id.clone()),
-                    },
+                let id = t.id.clone();
+                act(dex, tx, format!("started {}", t.name), move |d| {
+                    d.start(&id)
                 });
             }
         }
-        KeyCode::Char('c') => {
+        Action::CompleteTask => {
             if let Some(t) = selected {
                 app.mode = Mode::Prompt(Prompt {
                     title: format!("Complete: {}", t.name),
@@ -1624,12 +1744,7 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
                 });
             }
         }
-        // `r` for rename and `e` for edit, rather than `e`/`E` for both. The
-        // app's other case pairs are one action and its variant -- `o`/`O` sorts
-        // and reverses, `z`/`Z` collapses and expands -- whereas these were two
-        // different editors sharing a letter, and which case did which was
-        // something you had to remember rather than work out.
-        KeyCode::Char('r') => {
+        Action::RenameTask => {
             if let Some(t) = selected {
                 app.mode = Mode::Prompt(Prompt {
                     title: format!("Rename: {}", t.name),
@@ -1640,12 +1755,12 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
             }
         }
         // A single-line field cannot honestly edit a multi-line description.
-        KeyCode::Char('e') => {
+        Action::EditDescription => {
             if let Some(t) = selected {
                 app.pending_editor = Some(t.id.clone());
             }
         }
-        KeyCode::Char('d') => {
+        Action::DeleteTask => {
             if let Some(t) = selected {
                 let kids = app
                     .tasks
@@ -1663,7 +1778,6 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
                 };
             }
         }
-        _ => {}
     }
 }
 
@@ -1676,11 +1790,12 @@ fn handle_search(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Left => app.query.left(),
         KeyCode::Right => app.query.right(),
-        KeyCode::Char(c) => {
-            app.query.insert(c);
-            app.rebuild();
+        _ => {
+            if let Some(c) = typed_char(&key) {
+                app.query.insert(c);
+                app.rebuild();
+            }
         }
-        _ => {}
     }
 }
 
@@ -1700,11 +1815,12 @@ fn handle_prompt(app: &mut App, key: KeyEvent, mut p: Prompt, dex: &Arc<Dex>, tx
             p.input.right();
             app.mode = Mode::Prompt(p);
         }
-        KeyCode::Char(c) => {
-            p.input.insert(c);
-            app.mode = Mode::Prompt(p);
+        _ => {
+            if let Some(c) = typed_char(&key) {
+                p.input.insert(c);
+                app.mode = Mode::Prompt(p);
+            }
         }
-        _ => {}
     }
 }
 
@@ -2063,6 +2179,78 @@ mod tests {
             crate::tree::Filter::All,
             "shift-F no longer walks the filter back"
         );
+    }
+
+    /// Two things the table has to be, and neither is checked by anything
+    /// else.
+    ///
+    /// **Unambiguous**: the shape this replaced was an ordered `match`, where
+    /// two arms claiming the same key was legal and the first one silently
+    /// won. A lookup has no order to appeal to, so a duplicate would make the
+    /// binding depend on where in the list someone happened to add it.
+    ///
+    /// **Self-consistent**: every entry must resolve back to its own action
+    /// through `action_for`, which is what pins the SHIFT normalisation in
+    /// `chord` -- an entry written with a modifier the lookup then strips
+    /// would be unreachable, and unreachable is exactly the failure the old
+    /// `^L`-below-`l` ordering produced.
+    ///
+    /// An `Action` with no key at all needs no test: it would be a variant
+    /// constructed nowhere, and rustc's own dead-code lint says so.
+    #[test]
+    fn the_keymap_is_unambiguous_and_every_entry_resolves_to_itself() {
+        for (i, b) in BINDINGS.iter().enumerate() {
+            assert!(
+                BINDINGS[..i]
+                    .iter()
+                    .all(|o| !(o.code == b.code && o.mods == b.mods)),
+                "{:?} + {:?} is bound twice",
+                b.mods,
+                b.code
+            );
+            assert_eq!(
+                action_for(&KeyEvent::new(b.code, b.mods)),
+                Some(b.action),
+                "{:?} + {:?} does not resolve to its own action",
+                b.mods,
+                b.code
+            );
+        }
+    }
+
+    /// The status strip may only advertise keys that are actually bound.
+    ///
+    /// `the_shortcut_strip_and_the_help_dialog_agree` holds the two *documents*
+    /// against each other, which catches them drifting apart and not one of
+    /// them drifting away from the code. Now that there is a single table to
+    /// ask, the strip can be held against the keymap itself -- so a key that
+    /// is renamed or dropped cannot go on being advertised.
+    ///
+    /// It deliberately checks the key rather than the wording: `a` is `sub` in
+    /// the tree and `save this repo` in the sidebar, so the label is a
+    /// per-pane question the table does not answer and should not.
+    #[test]
+    fn the_shortcut_strips_only_advertise_keys_that_are_bound() {
+        for strip in [crate::ui::SHORTCUTS, crate::ui::REPO_SHORTCUTS] {
+            for entry in strip.trim().split("  ") {
+                let Some(spec) = entry.split_whitespace().next() else {
+                    continue;
+                };
+                for token in spec.split('/') {
+                    let code = match token {
+                        "enter" => KeyCode::Enter,
+                        t if t.chars().count() == 1 => {
+                            KeyCode::Char(t.chars().next().expect("one char"))
+                        }
+                        other => panic!("{strip}: cannot read the key `{other}`"),
+                    };
+                    assert!(
+                        action_for(&KeyEvent::new(code, KeyModifiers::NONE)).is_some(),
+                        "the strip advertises `{token}`, which is not bound: {strip}"
+                    );
+                }
+            }
+        }
     }
 
     /// The same defect, in the modes where `Char(c)` is *text* rather than a

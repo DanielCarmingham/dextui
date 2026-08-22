@@ -25,7 +25,7 @@ use crate::dex::{self, Status, Task, age, local_time};
 use crate::icons::Icons;
 use crate::tree::{self, Progress};
 
-const SHORTCUTS: &str = " s start  c done  r rename  e edit  n new  a sub  d del  f/F filter  o/O sort  1 repos  , config  ? help";
+pub(crate) const SHORTCUTS: &str = " s start  c done  r rename  e edit  n new  a sub  d del  f/F filter  o/O sort  1 repos  , config  ? help";
 
 /// What the strip says while the sidebar has focus.
 ///
@@ -33,7 +33,7 @@ const SHORTCUTS: &str = " s start  c done  r rename  e edit  n new  a sub  d del
 /// a subtask, `D` unregisters one, and none of `s`/`c`/`e`/`d` apply to a row
 /// that is not a task. A single strip advertising `a sub` beside a focused
 /// sidebar was not a shorter truth, it was a wrong one.
-const REPO_SHORTCUTS: &str =
+pub(crate) const REPO_SHORTCUTS: &str =
     " enter tasks  a save this repo  A save by path  D unsave  b hide  ? help";
 
 /// Width of the inline progress meter, in cells.
