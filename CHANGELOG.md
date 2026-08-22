@@ -1,0 +1,53 @@
+# Changelog
+
+Notable changes to dextui, in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+format. Versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html),
+applied the ordinary way despite the crate still being 0.x: a feature is a minor
+bump, a fix-only release is a patch.
+
+`dist` reads the section matching the version in `Cargo.toml` and uses it as the
+body of the GitHub Release, so this file is also what a release *says*. See the
+Releasing section of `CLAUDE.md` for where in the sequence it gets renamed.
+
+Releases before 0.5.1 predate this file. Their history is in the git tags
+(`git log v0.4.0..v0.5.0`), which is where it will have to stay: writing those
+entries now would mean reconstructing intent from diffs months later, and a
+changelog that guesses is worse than one that starts honestly.
+
+Link definitions live here, above the first version rather than at the foot of
+the file where the convention puts them. `dist` takes a section to be
+everything between its heading and the next one, so anything trailing the
+oldest entry is swallowed into that entry's release body — which is exactly
+what happened the first time this was checked.
+
+[Unreleased]: https://github.com/DanielCarmingham/dextui/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/DanielCarmingham/dextui/releases/tag/v0.5.1
+
+## [Unreleased]
+
+### Fixed
+
+- Modifier chords no longer fire the plain key's binding. `Ctrl-D` opened the
+  delete confirmation, and so did `Alt-D` and `Ctrl-Alt-D`; `Ctrl-Q` quit,
+  `Ctrl-W` toggled wrapping, `Ctrl-J`/`Ctrl-K` walked the tree, and `Ctrl-A`
+  made a subtask. In the search and rename fields a chord typed its bare letter
+  into the text — `Ctrl-A`, the reflex for "go to the start of the line", put an
+  `a` into the task name. `Ctrl-Y` could confirm a delete.
+
+### Changed
+
+- Keys now resolve through a binding table to an action, rather than an ordered
+  `match` on the key code. Chords are matched exactly, so an unbound one
+  resolves to nothing by construction. No key changed meaning.
+
+## [0.5.1] - 2026-08-15
+
+### Added
+
+- Matching sort and filter controls in the header, with `f`/`F` cycling the
+  filter forward and back.
+- The package version is shown in the help dialog.
+
+### Fixed
+
+- Two watcher tests raced the events macOS replays, and are now stable.

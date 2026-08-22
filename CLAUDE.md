@@ -1606,16 +1606,20 @@ carrying prebuilt binaries for four targets, and a Homebrew formula pushed to
 `DanielCarmingham/homebrew-tap`. Only the first is still manual.
 
 ```bash
-# 1. Bump the version in Cargo.toml, then commit it. Cargo enforces this
-#    ordering itself -- even `--dry-run` refuses outright on a dirty tree
-#    ("N files ... not yet committed into git"), so the bump has to be
-#    committed before anything below will so much as dry-run.
+# 1. Bump the version in Cargo.toml, and rename CHANGELOG.md's `[Unreleased]`
+#    heading to `[<version>] - <YYYY-MM-DD>`, then commit both together. Cargo
+#    enforces the ordering itself -- even `--dry-run` refuses outright on a
+#    dirty tree ("N files ... not yet committed into git"), so the bump has to
+#    be committed before anything below will so much as dry-run -- and the
+#    changelog has to ride the *same* commit, because that is the one the tag
+#    will point at.
 git commit -am "chore: bump version to <version>"
 
 # 2. Verify, in this order -- each is cheap and catches a different failure:
 cargo test
 cargo clippy --all-targets
-dist plan                   # what the tag would build, no network, no builds
+dist plan                   # what the tag would build, no network, no builds;
+                            # also whether it found the release notes -- see below
 dist generate --check       # release.yml still matches dist-workspace.toml
 cargo publish --dry-run     # packages, compiles the package in isolation, uploads nothing
 
@@ -1631,6 +1635,52 @@ git push origin main v<version>
 # 5. Watch it, rather than assuming it. ~10 minutes for four targets.
 gh run watch --repo DanielCarmingham/dextui
 ```
+
+**`CHANGELOG.md` is what the GitHub Release *says*.** `dist` reads the section
+whose heading matches the version in `Cargo.toml` and uses it verbatim as the
+release body, under a `## Release Notes` heading ahead of the install
+instructions. That is the whole reason the rename is step 1 rather than an
+afterthought: the notes have to be in the commit the tag points at, since that
+commit is what the binaries and the Homebrew formula are built from. Notes
+landing *after* the tag are notes the release was not built with — the same
+three-channels-disagree failure the tagging rule below exists to prevent.
+
+**Forgetting the rename fails silently, and `dist plan`'s ordinary output will
+not tell you.** With no matching section dist does not warn, error, or fall
+back to the commit log — it emits an empty changelog and a release with nothing
+but download links, which is exactly what `v0.5.1` and everything before it
+look like. And the human-readable output is *identical either way*: both print
+`announcing v<version>`, so the step that is supposed to catch this catches
+nothing. Measured, having first written the opposite here on the strength of
+the JSON field being different.
+
+Only the JSON says. Ask it directly, before tagging:
+
+```bash
+dist plan --output-format=json \
+  | python3 -c "import json,sys; print(json.load(sys.stdin).get('announcement_changelog') or 'NO RELEASE NOTES FOUND')"
+```
+
+Worth the extra command, because after the tag the only fix is editing the
+GitHub Release by hand, and the Homebrew formula has already gone out without
+them.
+
+**The link-reference definitions sit above `[Unreleased]`, not at the foot of
+the file** where Keep a Changelog puts them. A section, to dist, is everything
+between its heading and the next one — so anything trailing the oldest entry
+gets swallowed into that entry's release body. Verified by watching it happen:
+the first version of the file put them at the bottom and they came out inside
+0.5.1's notes.
+
+**The changelog rides along in every binary archive**, which is not something
+this repo asked for: dist bundles it as `[misc]` beside `LICENSE` and
+`README.md` in each of the four `.tar.xz` files, the moment the file exists. So
+someone who installed by downloading a tarball has the notes locally, with no
+extra configuration.
+
+**Releases before 0.5.1 have no entries and will not get any.** Reconstructing
+intent from months-old diffs produces a changelog that guesses, which is worse
+than one that starts honestly and says where the older history lives.
 
 **Picking the number** follows ordinary semver, applied the normal way even
 though the crate is still 0.x: a feature bump (the repo sidebar, say) is a
