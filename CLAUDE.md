@@ -5,8 +5,66 @@ how to install it and what the keys do, see [README.md](README.md) — user-faci
 documentation belongs there, not here.
 
 A terminal UI for browsing and triaging [dex](https://dex.rip/) tasks. Rust,
-with [ratatui](https://ratatui.rs) + crossterm. Two panes: task tree on the left,
-full task detail on the right, with a search/filter bar on top.
+with [ratatui](https://ratatui.rs) + crossterm. Three panes — a repo sidebar,
+the task tree, and the full detail of the selected task — with a search/filter
+bar on top. The sidebar starts hidden and narrow terminals show one pane at a
+time, so two is what you usually see.
+
+## Contributing: the short version
+
+The app is small. This file is not, and the reason is worth stating plainly:
+almost all of it is *why*, not *what* — traps that cost real time to find and
+would cost it again. **Read the section for the area you are touching and skip
+the rest.** Nobody needs the whole thing, and treating it as required reading
+is the wrong way to use it.
+
+- **Toolchain**: Rust 1.88 (the `rust-version` floor, checked in CI), edition
+  2024. The floor is real: ratatui 0.30.2 and tui-markdown 0.3.9 both require
+  1.88, and it was understated for four releases, so `cargo install` on 1.85
+  failed with a dependency error rather than a clear one.
+- **Before you submit**: `cargo test` and `cargo clippy --all-targets`. If you
+  touched `ui.rs` or the key handling, also `scripts/render-check.sh` — every
+  UI bug this project has had was invisible to both of the above and obvious
+  the moment a pane was captured. See [Verifying the UI](#verifying-the-ui),
+  including the stale-binary trap that has twice produced a confident wrong
+  conclusion.
+- **CI** runs on every push and pull request: tests + `clippy -D warnings` on
+  Linux, tests on macOS, and a build on the declared MSRV. macOS is not
+  redundant — `watch.rs` is the core mechanism and its backend differs per
+  platform.
+- **Commits** are [Conventional Commits](https://www.conventionalcommits.org/)
+  (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `perf:`, `test:`). The
+  whole history follows it. Bodies here tend to explain *why* and what was
+  ruled out, because that is what the next person needs.
+- **User-visible changes get a `CHANGELOG.md` entry** under `## [Unreleased]`.
+  That file is what the GitHub Release says, so an entry missing at release
+  time is a change nobody is told about. See [Releasing](#releasing).
+- **Tests live beside the code** in `#[cfg(test)]` modules, and most of this
+  codebase is tests. Nearly every one of them exists because something went
+  wrong once; the doc comments say which thing, and that is usually the
+  fastest way to understand a rule.
+
+Where to look, by what you are changing:
+
+| changing | read |
+| --- | --- |
+| anything calling the dex CLI | [Things about dex that will bite you](#things-about-dex-that-will-bite-you) |
+| refresh, watchers, staleness | [Architecture: reads vs writes](#architecture-reads-vs-writes), [The sync log](#the-sync-log) |
+| the repo sidebar, worktrees | [Repos, worktrees and the registry](#repos-worktrees-and-the-registry) |
+| anything that could move the cursor | [The invariant: refresh must never disturb the user](#the-invariant-refresh-must-never-disturb-the-user) |
+| keys | [Three panes, one set of movement keys](#three-panes-one-set-of-movement-keys) |
+| mouse, scrolling | [Mouse](#mouse) |
+| colour | [Colour policy: the terminal owns it](#colour-policy-the-terminal-owns-it) |
+| glyphs or icons | [Glyphs: verify, never assume](#glyphs-verify-never-assume) |
+| layout at narrow widths | [Zoom](#zoom-one-pane-when-there-is-no-room-for-two), [Display conventions](#display-conventions) |
+| settings | [Preferences](#preferences) |
+| cutting a release | [Releasing](#releasing) |
+
+Two rules carry more weight than the rest, and breaking either is a bug even
+when the tests pass: **a refresh must never disturb the user** (it may not move
+the selection, collapse a node, or interrupt typing), and **the terminal owns
+the colours** — only `Color::Reset` and the ANSI-16 names, because this
+machine's terminal flips light/dark under the running app.
 
 ## Build, test, run
 

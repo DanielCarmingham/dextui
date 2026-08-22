@@ -409,7 +409,13 @@ cargo run -- selftest       # the whole data pipeline as text, no TUI
 
 scripts/seed-demo.sh        # a throwaway store with a realistic task tree
 scripts/render-check.sh     # render in tmux and print the pane
+scripts/screenshot.sh       # regenerate the README images from real output
+scripts/glyph-check.py      # check candidate glyphs against the actual font
 ```
+
+Rust 1.88 or newer, edition 2024. CI runs the tests and `clippy -D warnings`
+on Linux, the tests again on macOS — `watch.rs`'s backend differs per platform —
+and a build on the declared minimum.
 
 `cargo run` preserves your working directory, which matters here: dex resolves
 its store from the cwd, so running it from another project browses that project's
@@ -417,6 +423,10 @@ tasks. `cargo install` copies the binary, so re-run it to pick up changes.
 
 [CLAUDE.md](CLAUDE.md) documents the conventions and the traps worth knowing
 before changing anything — several are non-obvious and were expensive to find.
+It is long because it is mostly *why*; start with **Contributing: the short
+version** at the top, which says what to run before submitting and points at
+the one section covering whatever you are touching. Changes people can notice
+get an entry in [CHANGELOG.md](CHANGELOG.md) under `Unreleased`.
 
 ## License
 
