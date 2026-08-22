@@ -312,6 +312,18 @@ pub struct App {
     /// Registered repos with their worktrees, and whether each is expanded.
     pub repos: Vec<crate::repos::Repo>,
     pub selected_repo_row: usize,
+
+    /// The sidebar's half of `needs_tree_reveal`, and it exists for exactly
+    /// the same reason -- see that field for the full account of why `List`
+    /// force-revealing a selection is what makes a wheel scroll snap back.
+    ///
+    /// The sidebar went without one for longer, and paid for it differently:
+    /// `scroll_repos` dragged the cursor along with the content so the offset
+    /// would survive the reveal. That looked like a design decision and was
+    /// documented as one, but the cursor here *chooses the store the other
+    /// two panes read* -- so the workaround meant a trackpad or touch scroll
+    /// silently switched repo and repainted both panes.
+    pub needs_repos_reveal: bool,
     /// The repo pane's own scroll offset, carried across frames the same way
     /// `tree_offset` is -- without it, `G`/`PageDown` could select a row
     /// below the visible area with nothing on screen ever moving to show it.
@@ -408,6 +420,7 @@ impl App {
             task_memory: HashMap::new(),
             repos: Vec::new(),
             selected_repo_row: 0,
+            needs_repos_reveal: true,
             repos_offset: 0,
             force_redraw: false,
             registry: crate::registry::Registry::default(),
@@ -1456,6 +1469,17 @@ impl App {
 
     /// Moves the sidebar cursor, clamped the same way `move_selection` clamps
     /// the tree's -- a no-op on an empty list rather than a panic.
+    /// The single choke point every sidebar cursor change goes through, so
+    /// `needs_repos_reveal` covers all of them for free -- exactly what
+    /// `App::select` does for the tree, and for the same reason: the flag is
+    /// set where the thing it needs to know about is already being decided.
+    fn select_repo_row(&mut self, index: usize) {
+        if index != self.selected_repo_row {
+            self.needs_repos_reveal = true;
+        }
+        self.selected_repo_row = index;
+    }
+
     pub fn move_repo_row(&mut self, delta: isize) {
         let len = self.repo_rows().len();
         if len == 0 {
@@ -1463,7 +1487,7 @@ impl App {
         }
         let target = (self.selected_repo_row as isize + delta).clamp(0, len as isize - 1) as usize;
         if let Some(i) = self.nearest_selectable(target, delta >= 0) {
-            self.selected_repo_row = i;
+            self.select_repo_row(i);
         }
     }
 
@@ -1472,9 +1496,11 @@ impl App {
     /// tree, down to the `+1` that skips the pane's top border and the use of
     /// the offset the renderer last published.
     ///
-    /// Selecting only. Switching store stays on `enter`/`l`, so a stray click
-    /// in the sidebar cannot cost a ~180ms dex call and replace both other
-    /// panes.
+    /// Selecting only, as far as this method goes -- but the sidebar cursor
+    /// chooses the store, so `handle_mouse` follows it over, and a click here
+    /// does switch what the other two panes show. That is deliberate and
+    /// matches the tree, where a click also selects. The *wheel* is the one
+    /// that must not: see `scroll_repos`.
     pub fn select_repo_at_row(&mut self, row: u16) {
         let Some(index) = self.list_row_index(row, self.repos_offset) else {
             return;
@@ -1484,13 +1510,23 @@ impl App {
         // clicking a label should no more move the cursor than clicking below
         // the list does.
         if self.repo_rows().get(index).is_some_and(|r| r.selectable()) {
-            self.selected_repo_row = index;
+            self.select_repo_row(index);
         }
     }
 
-    /// A wheel over the sidebar. Slides the content and holds the cursor on
-    /// its screen row, exactly as `scroll_tree` does and for the same reason --
-    /// two panes an inch apart must not answer one gesture in two directions.
+    /// A wheel over the sidebar. Slides the content and nothing else, exactly
+    /// as `scroll_tree` does and for the same reason -- two panes an inch
+    /// apart must not answer one gesture in two directions.
+    ///
+    /// It used to call `move_repo_row` as well. That was never about what a
+    /// scroll should *mean*: without it the renderer's force-reveal pulled
+    /// `repos_offset` straight back and the sidebar would not scroll at all.
+    /// `needs_repos_reveal` removes the need, and with it the surprise that a
+    /// trackpad gesture changed which repo the other two panes were showing.
+    ///
+    /// The offset clamps against the row count, not the viewport height, which
+    /// this type does not know -- as in `scroll_tree`, overshooting merely
+    /// runs up to the last row.
     pub fn scroll_repos(&mut self, delta: isize) {
         let len = self.repo_rows().len();
         if len == 0 {
@@ -1498,19 +1534,18 @@ impl App {
         }
         let last = len as isize - 1;
         self.repos_offset = (self.repos_offset as isize + delta).clamp(0, last) as usize;
-        self.move_repo_row(delta);
     }
 
     pub fn select_first_repo_row(&mut self) {
         if let Some(i) = self.nearest_selectable(0, true) {
-            self.selected_repo_row = i;
+            self.select_repo_row(i);
         }
     }
 
     pub fn select_last_repo_row(&mut self) {
         let last = self.repo_rows().len().saturating_sub(1);
         if let Some(i) = self.nearest_selectable(last, false) {
-            self.selected_repo_row = i;
+            self.select_repo_row(i);
         }
     }
 
@@ -1594,7 +1629,7 @@ impl App {
             }
         });
         if let Some(i) = found {
-            self.selected_repo_row = i;
+            self.select_repo_row(i);
         }
     }
 
@@ -2503,26 +2538,62 @@ mod tests {
         assert_eq!(app.selected_repo_row, 2);
     }
 
-    /// The wheel slides the sidebar's content and the cursor keeps its screen
-    /// row -- the same gesture `scroll_tree` gives the tree, so two panes an
+    /// The wheel slides the sidebar's content and leaves the cursor where it
+    /// is -- the same gesture `scroll_tree` gives the tree, so two panes an
     /// inch apart cannot answer one drag in two directions.
+    ///
+    /// This used to drag the cursor along, and that was not a choice: the
+    /// renderer handed `List` the real selected row every frame, so ratatui
+    /// force-revealed it and pulled `repos_offset` straight back. Moving the
+    /// cursor was the only way the scroll stuck. Since the sidebar cursor
+    /// drives the other two panes, the cost was that a trackpad or touch
+    /// gesture switched which repo you were reading and repainted both of
+    /// them -- reported as scrolling being awkward on mobile.
     #[test]
-    fn the_sidebar_wheel_moves_the_content_and_the_cursor_together() {
+    fn the_sidebar_wheel_moves_the_content_and_leaves_the_cursor_alone() {
         let mut app = app_with_repos();
 
         let start = app.selected_repo_row;
 
         app.scroll_repos(2);
         assert_eq!(app.repos_offset, 2);
-        assert!(
-            app.selected_repo_row > start,
-            "the cursor should travel with the content"
+        assert_eq!(
+            app.selected_repo_row, start,
+            "the wheel moved the cursor, and with it the store the other panes read"
         );
-        assert!(app.repo_rows()[app.selected_repo_row].selectable());
 
         app.scroll_repos(-2);
         assert_eq!(app.repos_offset, 0);
-        assert!(app.repo_rows()[app.selected_repo_row].selectable());
+        assert_eq!(app.selected_repo_row, start);
+    }
+
+    /// `scroll_repos` must never ask `draw_repos` to reveal the cursor: doing
+    /// it even once hands `List` the real (unmoved) index and lets it pull
+    /// `repos_offset` back, which is exactly the force-reveal that made the
+    /// cursor-dragging necessary in the first place. The tree's own
+    /// `scroll_tree_does_not_ask_for_a_reveal` is the same assertion.
+    #[test]
+    fn scrolling_the_sidebar_does_not_ask_for_a_reveal() {
+        let mut app = app_with_repos();
+        app.needs_repos_reveal = false; // as on every frame after the first
+        app.scroll_repos(2);
+        assert!(
+            !app.needs_repos_reveal,
+            "a wheel scroll must not ask for a reveal"
+        );
+    }
+
+    /// And the other half: a real cursor move *must* ask, or `G` onto a row
+    /// below the fold would leave the cursor drawn nowhere.
+    #[test]
+    fn a_real_sidebar_cursor_move_asks_for_a_reveal() {
+        let mut app = app_with_repos();
+        app.needs_repos_reveal = false;
+        app.move_repo_row(1);
+        assert!(
+            app.needs_repos_reveal,
+            "a moved sidebar cursor must ask for a reveal"
+        );
     }
 
     /// An empty sidebar has nothing to slide, and must not underflow trying.

@@ -1072,6 +1072,36 @@ fn draw_scrollbar(frame: &mut Frame, area: Rect, thumb: Color, state: &mut Scrol
 /// Colour carries only what the task tree's already does -- a worktree with a
 /// store is `PLAIN`, one without is `DIM` -- so the sidebar introduces no new
 /// palette and `theme::ALL` stays the whole story.
+/// The `ListState` a scrolling pane needs, and the single place the reveal
+/// rule is written down.
+///
+/// `ratatui::List` forces the offset to include whatever `ListState` calls
+/// selected, the instant that row would fall outside the render window. That
+/// is exactly what scrolls a keyboard-driven cursor into view -- and exactly
+/// what must *not* happen after a wheel scroll deliberately carried the cursor
+/// out of sight. So the real selection is handed over only on the frame after
+/// it actually changed; `reveal` is that frame.
+///
+/// The frames in between select the row *already at the offset* rather than
+/// `None`. `ListState::select(None)` unconditionally resets the offset to 0
+/// (its own doc says so), which would undo the scroll rather than merely
+/// decline to correct it. A row at the offset is by construction inside the
+/// window, so the force-reveal has nothing to correct.
+///
+/// This is shared rather than written per pane because it was written twice
+/// and the second copy had already drifted -- the tree clamped the fallback
+/// index against the row count and the sidebar did not. Both panes answer the
+/// same gesture, so they must answer it with the same code.
+fn scroll_state(offset: usize, rows: usize, selected: Option<usize>, reveal: bool) -> ListState {
+    let mut state = ListState::default().with_offset(offset);
+    state.select(if reveal {
+        selected
+    } else {
+        (rows > 0).then(|| offset.min(rows - 1))
+    });
+    state
+}
+
 fn draw_repos(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
     let block = pane_block("repos", Focus::Repos, app.focus);
 
@@ -1163,14 +1193,18 @@ fn draw_repos(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
         .collect();
 
     // Without a `ListState`, `render_widget` always draws from the top of the
-    // list -- so `G`/`PageDown` could select a row below the visible area
-    // with nothing on screen ever scrolling to show it, and `enter` would
-    // then switch to a store the user could not see was selected. Mirrors
-    // `draw_tree`'s use of `tree_offset` exactly, down to writing the
-    // corrected offset back so the next frame does not jump.
+    // list -- so `G`/`PageDown` could select a row below the visible area with
+    // nothing on screen ever scrolling to show it, and `enter` would then
+    // switch to a store the user could not see was selected. The reveal rule
+    // that makes the wheel behave is in `scroll_state`, shared with the tree.
     let selected = (!rows.is_empty()).then_some(app.selected_repo_row);
-    let mut state = ListState::default().with_offset(app.repos_offset);
-    state.select(selected);
+    let mut state = scroll_state(
+        app.repos_offset,
+        rows.len(),
+        selected,
+        app.needs_repos_reveal,
+    );
+    app.needs_repos_reveal = false;
 
     frame.render_stateful_widget(List::new(items).block(block), area, &mut state);
     app.repos_offset = state.offset();
@@ -1311,33 +1345,22 @@ fn draw_tree(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
 
     // The offset is carried across frames rather than recomputed from zero, so
     // the list does not jump and a click maps to the row actually on screen.
-    let mut state = ListState::default().with_offset(app.tree_offset);
-    // Still selected even though the highlight draws nothing: this is what
-    // scrolls the selection into view, and what keeps `tree_offset` truthful so
-    // a click lands on the row actually drawn -- but only on the frame after
-    // the selection actually changed. `ratatui::List` forces the offset to
-    // include whatever `ListState` calls selected the instant it would fall
-    // outside the render window; feeding it the real selection on *every*
-    // frame -- including the animation-driven ones a running task causes many
-    // times a second -- would drag the view back to the cursor's row after
-    // every wheel scroll that carried it out of sight, which is exactly the
-    // "selection changed" appearance the wheel must not have. `needs_tree_reveal`
-    // is `true` only for the one frame right after `App::select` last changed
-    // `self.selected` -- see its doc.
     //
-    // The frames in between select the row *already at the offset* rather
-    // than `None`: `ListState::select(None)` unconditionally resets the
-    // offset to 0 (its own doc says so), which would undo any scrolling
-    // immediately rather than merely decline to correct it. A row at the
-    // offset is by construction already inside the render window, so the
-    // force-reveal this avoids has nothing to correct. The manual highlight
-    // above is unaffected either way, since it never reads this `ListState`
-    // at all.
-    state.select(if app.needs_tree_reveal {
-        selected
-    } else {
-        Some(app.tree_offset.min(rows.len().saturating_sub(1)))
-    });
+    // The row stays selected even though the highlight draws nothing: this is
+    // what scrolls the selection into view on a keypress, and what keeps
+    // `tree_offset` truthful so a click lands on the row actually drawn. Why
+    // it is only handed over on the frame *after* a real selection change --
+    // and why the other frames pass the offset rather than `None` -- is in
+    // `scroll_state`, which the sidebar shares. `needs_tree_reveal` is `true`
+    // only for the one frame right after `App::select` last changed
+    // `self.selected`; see its doc. The manual highlight above never reads
+    // this `ListState` at all, so it is unaffected either way.
+    let mut state = scroll_state(
+        app.tree_offset,
+        rows.len(),
+        selected,
+        app.needs_tree_reveal,
+    );
     app.needs_tree_reveal = false;
 
     // No `highlight_style`, and no `highlight_symbol`. The row builds its own
@@ -4678,6 +4701,88 @@ mod tests {
             !scrolled.contains("repo0"),
             "the old top row should have scrolled out of view: {scrolled}"
         );
+    }
+
+    /// The sidebar's counterpart to `a_tree_scroll_survives_repeated_idle_renders`,
+    /// and the test that actually proves this fix.
+    ///
+    /// `App`-level tests of `scroll_repos` cover the bookkeeping, but the bug
+    /// was never in `App`: it was that `draw_repos` fed `ListState` the real
+    /// cursor every frame, so `ratatui::List` force-revealed it and pulled
+    /// `repos_offset` straight back. The old `scroll_repos` dragged the cursor
+    /// along to survive that -- and since the sidebar cursor chooses the store
+    /// the other two panes read, a trackpad or touch scroll silently switched
+    /// repo. Three renders with nothing in between, because a fix that
+    /// survived only the frame right after the scroll would still lose it to
+    /// the next animation frame a running task causes.
+    #[test]
+    fn a_sidebar_scroll_survives_repeated_idle_renders() {
+        let mut app = App::new(
+            vec![task("a", None, "A task")],
+            "demo".into(),
+            crate::config::Config::default(),
+        );
+        app.terminal_width = 140;
+        app.repos_pane_above = 110;
+        app.repos_visible = true;
+        app.repos = (0..20)
+            .map(|i| crate::repos::Repo {
+                name: format!("repo{i}"),
+                path: format!("/x/repo{i}"),
+                worktrees: vec![],
+                open: false,
+                registered: true,
+                is_global: false,
+            })
+            .collect();
+        app.rebuild();
+
+        let mut terminal = Terminal::new(TestBackend::new(140, 14)).unwrap();
+        let frame_text = |app: &mut App, terminal: &mut Terminal<TestBackend>| -> String {
+            terminal
+                .draw(|f| draw(f, app, &crate::icons::UNICODE))
+                .unwrap();
+            let buf = terminal.backend().buffer().clone();
+            (0..buf.area.height)
+                .map(|y| {
+                    (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let before = frame_text(&mut app, &mut terminal);
+        assert!(before.contains("repo0"), "the top row should start visible");
+
+        let cursor_before = app.selected_repo_row;
+        let store_before = app.store_dir.clone();
+
+        app.scroll_repos(5);
+        let offset_after_scroll = app.repos_offset;
+        assert_ne!(offset_after_scroll, 0, "scroll_repos did not move the offset");
+
+        for n in 1..=3 {
+            let drawn = frame_text(&mut app, &mut terminal);
+            assert_eq!(
+                app.repos_offset, offset_after_scroll,
+                "render {n} pulled the offset back to {} from {offset_after_scroll}",
+                app.repos_offset
+            );
+            assert!(
+                !drawn.contains("repo0"),
+                "render {n}: the sidebar never actually scrolled: {drawn}"
+            );
+            assert_eq!(
+                app.selected_repo_row, cursor_before,
+                "render {n}: the wheel must never move the sidebar cursor"
+            );
+            assert_eq!(
+                app.store_dir, store_before,
+                "render {n}: the wheel must never switch the store"
+            );
+        }
     }
 
     /// `Focus::Repos` used to fall through to `draw_tree` as a placeholder --

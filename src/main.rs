@@ -694,18 +694,12 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
         MouseEventKind::ScrollDown => match app.pane_at(m.column) {
             Focus::Tree => app.scroll_tree(1),
             Focus::Detail => app.scroll_detail(1, 0),
-            Focus::Repos => {
-                app.scroll_repos(1);
-                follow_repo_cursor(app);
-            }
+            Focus::Repos => app.scroll_repos(1),
         },
         MouseEventKind::ScrollUp => match app.pane_at(m.column) {
             Focus::Tree => app.scroll_tree(-1),
             Focus::Detail => app.scroll_detail(-1, 0),
-            Focus::Repos => {
-                app.scroll_repos(-1);
-                follow_repo_cursor(app);
-            }
+            Focus::Repos => app.scroll_repos(-1),
         },
         MouseEventKind::ScrollLeft => app.scroll_detail(0, -4),
         MouseEventKind::ScrollRight => app.scroll_detail(0, 4),

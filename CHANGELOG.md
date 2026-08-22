@@ -28,6 +28,9 @@ what happened the first time this was checked.
 
 ### Fixed
 
+- Scrolling the repo sidebar no longer moves the cursor, and so no longer
+  switches which repo the tree and detail panes show. The wheel now moves only
+  the view, matching the task tree. Awkward with a trackpad, worse on touch.
 - Modifier chords no longer fire the plain key's binding. `Ctrl-D` opened the
   delete confirmation, and so did `Alt-D` and `Ctrl-Alt-D`; `Ctrl-Q` quit,
   `Ctrl-W` toggled wrapping, `Ctrl-J`/`Ctrl-K` walked the tree, and `Ctrl-A`

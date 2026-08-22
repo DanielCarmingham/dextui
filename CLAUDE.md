@@ -425,9 +425,26 @@ Three things that follow:
   switch cost a list anyway; with the list gone, restarting a watcher per
   cursor move would have been the only thing left making it expensive. Nothing
   in `switch_store` touches a watcher now.
-- **A click and the wheel follow the cursor too.** The old rule that a click
-  must not switch stores was reasoned entirely from the ~180ms it would spend;
-  that reason is gone, and consistency with the tree is what is left.
+- **A click follows the cursor over; the wheel does not.** The old rule that a
+  click must not switch stores was reasoned entirely from the ~180ms it would
+  spend; that reason is gone, and consistency with the tree — where a click
+  also selects — is what is left.
+
+  That argument was originally made for the wheel as well, and it was exactly
+  backwards: the tree's wheel is the one gesture there that deliberately does
+  *not* touch the selection, so "consistency with the tree" is the reason the
+  sidebar's must not either. Invoking it to justify the opposite is how this
+  shipped. It mattered more here than it would have in the tree, because the
+  sidebar cursor chooses the store the other two panes read — so a trackpad or
+  touch scroll switched repo and repainted both of them. Reported as scrolling
+  being awkward on mobile.
+
+  `scroll_repos` calling `move_repo_row` looked like the design decision and
+  was documented as one. It was a workaround: `draw_repos` handed `ListState`
+  the real cursor every frame, `List` force-revealed it, and `repos_offset`
+  snapped back — so dragging the cursor along was the only way the scroll
+  stuck at all. `needs_repos_reveal` is the sidebar's copy of
+  `needs_tree_reveal` and removes the need for it.
 
 `b` shows and hides the sidebar at any width, the way `z` toggles zoom --
 `App::repos_visible`, flipping the *effective* state so the first press always
@@ -1383,6 +1400,12 @@ its own; the events come from crossterm.
   change at all, so any frame that goes back to feeding `List` the real
   selection, for any reason, drags the view back to the cursor's row before
   the next input arrives.
+
+  **Both panes now go through `ui::scroll_state`**, which is the only place
+  this rule is written down. It was written twice first, and the second copy
+  had already drifted — the tree clamped its fallback index against the row
+  count and the sidebar did not. Two panes answering the same gesture must
+  answer it with the same code.
 
   `App::needs_tree_reveal` is what actually works: `true` for exactly the
   frame after `App::select` last changed `self.selected` (that private setter
