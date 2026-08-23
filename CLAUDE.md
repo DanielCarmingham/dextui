@@ -1746,6 +1746,16 @@ Worth the extra command, because after the tag the only fix is editing the
 GitHub Release by hand, and the Homebrew formula has already gone out without
 them.
 
+**`[Unreleased]` stays empty when there is nothing in it**, with no "nothing
+yet" placeholder. Guidance about how to fill it belongs in the file's preamble,
+above the link definitions, where dist never reads it. Put it *inside* the
+section and the release process quietly breaks: renaming the heading to a
+version is the one step that turns that text into the release body, so a
+placeholder would pass the check above — printing prose instead of
+`NO RELEASE NOTES FOUND` — and ship as the notes. An empty section renamed at
+release time still returns nothing, which is what makes the check work.
+Measured both ways.
+
 **The link-reference definitions sit above `[Unreleased]`, not at the foot of
 the file** where Keep a Changelog puts them. A section, to dist, is everything
 between its heading and the next one — so anything trailing the oldest entry

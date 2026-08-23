@@ -9,6 +9,13 @@ bump, a fix-only release is a patch.
 body of the GitHub Release, so this file is also what a release *says*. See the
 Releasing section of `CLAUDE.md` for where in the sequence it gets renamed.
 
+Add entries under `## [Unreleased]` as changes land — `### Added`, `### Changed`,
+`### Fixed`, `### Removed` — for anything a user could notice. **Leave that
+section empty when there is nothing**, and put no placeholder text in it: dist
+takes whatever sits under the heading as the release body, so a "nothing yet"
+line would sail through the check that is supposed to catch a release with no
+notes. Empty is what makes that check work.
+
 Releases before 0.5.1 predate this file. Their history is in the git tags
 (`git log v0.4.0..v0.5.0`), which is where it will have to stay: writing those
 entries now would mean reconstructing intent from diffs months later, and a
@@ -23,6 +30,8 @@ what happened the first time this was checked.
 [Unreleased]: https://github.com/DanielCarmingham/dextui/compare/v0.5.2...HEAD
 [0.5.2]: https://github.com/DanielCarmingham/dextui/releases/tag/v0.5.2
 [0.5.1]: https://github.com/DanielCarmingham/dextui/releases/tag/v0.5.1
+
+## [Unreleased]
 
 ## [0.5.2] - 2026-08-23
 
