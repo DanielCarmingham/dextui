@@ -24,7 +24,7 @@ what happened the first time this was checked.
 [0.5.2]: https://github.com/DanielCarmingham/dextui/releases/tag/v0.5.2
 [0.5.1]: https://github.com/DanielCarmingham/dextui/releases/tag/v0.5.1
 
-## [0.5.2] - 2026-08-22
+## [0.5.2] - 2026-08-23
 
 ### Fixed
 
