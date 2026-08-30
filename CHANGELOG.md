@@ -37,9 +37,10 @@ what happened the first time this was checked.
 
 - The header names the store in bold yellow when dex has fallen back to its
   shared global store at `~/.config/dex/local`, so the one case where you are
-  not looking at the current project's tasks says so. A project's own store is
-  unchanged. Decided from the store path, not the label, so a project that
-  happens to be named `global` is still a project.
+  not looking at the current project's tasks says so. The sidebar's `global`
+  row is marked the same way. A project's own store is unchanged, and the
+  header's is decided from the store path rather than the label, so a project
+  that happens to be named `global` is still a project.
 
 ## [0.5.2] - 2026-08-23
 

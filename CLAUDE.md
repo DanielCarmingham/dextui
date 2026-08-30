@@ -866,6 +866,12 @@ announced as the global store, which is the wrong-store confusion this app
 treats as its worst failure. `ui::StoreId` carries the label and that flag
 together for the same reason, rather than letting the header re-derive it.
 
+The sidebar's `global` row takes the same mark, off `Repo::is_global`, which it
+already had. Those are the two places on screen that name a store, and the
+global one is the only row you can end up *reading* without having chosen it,
+so they have to agree about how it looks. `draw_repos` still invents no palette
+of its own — the row was already bold, so this only swaps the foreground.
+
 That is not just taste. This machine's Ghostty is configured
 `theme = light:"...",dark:"..."`, so the terminal follows the macOS appearance
 and **flips under the app at runtime**. Any palette with a fixed light-or-dark

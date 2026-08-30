@@ -1108,9 +1108,10 @@ fn draw_scrollbar(frame: &mut Frame, area: Rect, thumb: Color, state: &mut Scrol
 
 /// The repo pane: registered repositories with their worktrees beneath.
 ///
-/// Colour carries only what the task tree's already does -- a worktree with a
-/// store is `PLAIN`, one without is `DIM` -- so the sidebar introduces no new
-/// palette and `theme::ALL` stays the whole story.
+/// Colour carries only what is already meaningful elsewhere -- a worktree with
+/// a store is `PLAIN`, one without is `DIM`, and the global store's row takes
+/// the same bold `GLOBAL` the header gives it -- so the sidebar invents no
+/// palette of its own and `theme::ALL` stays the whole story.
 /// The `ListState` a scrolling pane needs, and the single place the reveal
 /// rule is written down.
 ///
@@ -1184,9 +1185,13 @@ fn draw_repos(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
                 }
                 crate::repos::Row::Repo { index } => {
                     let r = &app.repos[*index];
+                    // The same mark the header gives it, for the same reason:
+                    // `global` is a row you can be *reading* without having
+                    // chosen it, since dex falls back there outside a git repo.
+                    let fg = if r.is_global { GLOBAL } else { PLAIN };
                     spans.push(Span::styled(
                         format!("{} {}", ic.marker(true, r.open), r.name),
-                        Style::default().fg(PLAIN).add_modifier(Modifier::BOLD),
+                        Style::default().fg(fg).add_modifier(Modifier::BOLD),
                     ));
                 }
                 crate::repos::Row::Worktree { repo, index } => {
@@ -4720,6 +4725,76 @@ mod tests {
 
         assert!(text.contains("dextui"), "no repo row: {text}");
         assert!(text.contains("main"), "no worktree row: {text}");
+    }
+
+    /// The global store's row carries the same bold yellow its header label
+    /// does. It is the one sidebar row you can end up reading without having
+    /// picked it -- dex falls back there outside a git repo -- so the two
+    /// places that name it should agree about how it looks.
+    #[test]
+    fn the_global_stores_sidebar_row_is_marked_like_its_header_label() {
+        let repo = |name: &str, path: &str, is_global: bool| crate::repos::Repo {
+            name: name.into(),
+            path: path.into(),
+            worktrees: Vec::new(),
+            open: true,
+            registered: true,
+            is_global,
+        };
+
+        let mut app = App::new(
+            vec![task("a", None, "A task")],
+            "demo".into(),
+            crate::config::Config::default(),
+        );
+        app.terminal_width = 140;
+        app.repos_pane_above = 110;
+        app.repos_visible = true; // App::new's default hides it
+        app.repos = vec![
+            repo("global", "/home/u/.config/dex/local", true),
+            repo("dextui", "/x/dextui", false),
+        ];
+        app.rebuild();
+
+        let mut terminal = Terminal::new(TestBackend::new(140, 14)).unwrap();
+        terminal
+            .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        // The header names a store too, so only the sidebar's own columns count.
+        let style_of = |needle: &str| -> Vec<(Color, Modifier)> {
+            for y in 1..buf.area.height {
+                let cells: Vec<String> = (0..app.repos_right)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect();
+                let n = needle.chars().count();
+                if let Some(at) = (0..cells.len().saturating_sub(n - 1))
+                    .find(|i| cells[*i..*i + n].concat() == needle)
+                {
+                    return (at..at + n)
+                        .map(|x| {
+                            let c = &buf[(x as u16, y)];
+                            (c.fg, c.modifier)
+                        })
+                        .collect();
+                }
+            }
+            panic!("no sidebar row for {needle}");
+        };
+
+        assert!(
+            style_of("global")
+                .iter()
+                .all(|(fg, m)| *fg == GLOBAL && m.contains(Modifier::BOLD)),
+            "the global row is not marked"
+        );
+        assert!(
+            style_of("dextui")
+                .iter()
+                .all(|(fg, _)| *fg == PLAIN),
+            "an ordinary repo row was marked"
+        );
     }
 
     /// The bug this closes: `render_widget` (no `ListState`) always draws the
