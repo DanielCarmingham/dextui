@@ -853,6 +853,17 @@ keeps a mostly-unstarted tree from becoming a wall of yellow, and it is what dex
 itself does (`cc($gcol; $g)` in dex-report wraps the glyph and stops). Tree
 connectors stay dimmed so the coloured marker reads as the row's foreground.
 
+**The one exception is the header's store label**, `theme::GLOBAL`, yellow when
+dex has fallen back to its shared store at `~/.config/dex/local`. It reuses
+`TODO`'s hue deliberately: the states live on status glyphs and sidebar counts,
+this lives in the header identity where no state colour ever appears, so the
+two cannot be read as each other. It is decided from `App::store_dir` via
+`dex::is_global_store`, never from `store_label` — the label is only a
+directory name, so a project at `~/Developer/global` would otherwise be
+announced as the global store, which is the wrong-store confusion this app
+treats as its worst failure. `ui::StoreId` carries the label and that flag
+together for the same reason, rather than letting the header re-derive it.
+
 That is not just taste. This machine's Ghostty is configured
 `theme = light:"...",dark:"..."`, so the terminal follows the macOS appearance
 and **flips under the app at runtime**. Any palette with a fixed light-or-dark

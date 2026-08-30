@@ -39,6 +39,19 @@ pub const BLOCKED: Color = Color::Red;
 /// Inline code and other literal spans in rendered markdown.
 pub const CODE: Color = Color::Cyan;
 
+/// The header's store label when dex has fallen back to its shared global store.
+///
+/// Outside a git repo dex silently writes to `~/.config/dex/local` -- the single
+/// most confusing thing about it, and the header label is the only thing on
+/// screen that answers "which tasks am I looking at". A project's own store is
+/// the ordinary case and stays [`PLAIN`]; the fallback is the one worth
+/// noticing.
+///
+/// Sharing [`TODO`]'s hue is deliberate rather than an oversight. The states
+/// land on status glyphs and sidebar counts; this lands in the header identity,
+/// where no state colour ever appears, so neither can be read as the other.
+pub const GLOBAL: Color = Color::Yellow;
+
 /// The selection gutter: where you are, as opposed to what anything *is*.
 ///
 /// Magenta is the one ANSI hue carrying no meaning here -- the four states take
@@ -54,7 +67,7 @@ pub const ACCENT_DIM: Color = Color::Magenta;
 /// Every colour above, for the policy test. A colour missing from this list is
 /// unguarded, so add new ones here as well.
 #[cfg(test)]
-pub const ALL: [(&str, Color); 9] = [
+pub const ALL: [(&str, Color); 10] = [
     ("PLAIN", PLAIN),
     ("DIM", DIM),
     ("TODO", TODO),
@@ -62,6 +75,7 @@ pub const ALL: [(&str, Color); 9] = [
     ("DONE", DONE),
     ("BLOCKED", BLOCKED),
     ("CODE", CODE),
+    ("GLOBAL", GLOBAL),
     ("ACCENT", ACCENT),
     ("ACCENT_DIM", ACCENT_DIM),
 ];

@@ -19,7 +19,7 @@ use crate::app::{App, Counts, Focus, HeaderZone, Mode, Panes};
 /// terminal, so the app inherits whatever scheme the user runs -- including a
 /// light/dark switch at runtime -- instead of imposing its own. The values live
 /// in `theme`; this module decides where they go.
-use crate::theme::{ACCENT, ACCENT_DIM, ACTIVE, BLOCKED, CODE, DIM, DONE, PLAIN, TODO};
+use crate::theme::{ACCENT, ACCENT_DIM, ACTIVE, BLOCKED, CODE, DIM, DONE, GLOBAL, PLAIN, TODO};
 
 use crate::dex::{self, Status, Task, age, local_time};
 use crate::icons::Icons;
@@ -663,13 +663,44 @@ fn icon_span(glyph: &str) -> Vec<Span<'static>> {
     }
 }
 
+/// The store the header names: how to spell it, and whether it is dex's shared
+/// fallback rather than a project's own.
+///
+/// The two travel together because the label alone cannot answer the second
+/// question -- it is only a directory name, and a project can be named `global`.
+/// `draw_header` decides from the store *directory*.
+#[derive(Clone, Copy)]
+struct StoreId<'a> {
+    label: &'a str,
+    global: bool,
+}
+
+impl StoreId<'_> {
+    /// The label itself, yellow when it is the fallback store. Outside a git
+    /// repo dex writes there silently, so this is the one thing on screen that
+    /// answers which tasks you are looking at.
+    fn span(&self) -> Span<'static> {
+        let fg = if self.global { GLOBAL } else { PLAIN };
+        Span::styled(self.label.to_string(), Style::default().fg(fg))
+    }
+
+    /// The same store under a shortened spelling, for the elided last resort.
+    fn spelled(&self, label: &str) -> Span<'static> {
+        StoreId {
+            label,
+            global: self.global,
+        }
+        .span()
+    }
+}
+
 /// The narrowest identity worth drawing: which store you are in, and nothing
 /// else. The right-hand block yields to this rather than the reverse.
-fn identity_store(store: &str, ic: &Icons) -> Vec<Span<'static>> {
+fn identity_store(store: StoreId, ic: &Icons) -> Vec<Span<'static>> {
     [
         vec![Span::raw(" ")],
         icon_span(ic.project),
-        vec![Span::styled(store.to_string(), Style::default().fg(PLAIN))],
+        vec![store.span()],
     ]
     .concat()
 }
@@ -680,7 +711,7 @@ fn identity_store(store: &str, ic: &Icons) -> Vec<Span<'static>> {
 /// from the working directory and falls back to a global one outside a git repo
 /// -- and this label is the only thing on screen that answers it. The app's own
 /// name goes first: you know what you launched.
-fn header_identity(store: &str, ic: &Icons, room: usize) -> Vec<Span<'static>> {
+fn header_identity(store: StoreId, ic: &Icons, room: usize) -> Vec<Span<'static>> {
     let full = [
         vec![Span::raw(" ")],
         icon_span(ic.app),
@@ -689,7 +720,7 @@ fn header_identity(store: &str, ic: &Icons, room: usize) -> Vec<Span<'static>> {
             Span::styled(SEP, Style::default().fg(DIM)),
         ],
         icon_span(ic.project),
-        vec![Span::styled(store.to_string(), Style::default().fg(PLAIN))],
+        vec![store.span()],
     ]
     .concat();
 
@@ -705,16 +736,13 @@ fn header_identity(store: &str, ic: &Icons, room: usize) -> Vec<Span<'static>> {
     if keep == 0 {
         return Vec::new();
     }
-    let short: String = store.chars().take(keep).collect();
-    let text = if short.chars().count() < store.chars().count() {
+    let short: String = store.label.chars().take(keep).collect();
+    let text = if short.chars().count() < store.label.chars().count() {
         format!("{short}…")
     } else {
         short
     };
-    vec![
-        Span::raw(" "),
-        Span::styled(text, Style::default().fg(PLAIN)),
-    ]
+    vec![Span::raw(" "), store.spelled(&text)]
 }
 
 /// The sort order and filter, hard right, widest first. They shed what carries
@@ -769,7 +797,7 @@ fn right_candidates(
 /// *what you can see*. The app's own name outlives none of them: you know what
 /// you launched.
 fn header_sides(
-    store: &str,
+    store: StoreId,
     ic: &Icons,
     sort: tree::Sort,
     sort_reversed: bool,
@@ -932,7 +960,10 @@ fn draw_header(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
     };
 
     let (mut spans, right) = header_sides(
-        &app.store_label,
+        StoreId {
+            label: &app.store_label,
+            global: dex::is_global_store(&app.store_dir),
+        },
         ic,
         app.sort,
         app.sort_reversed,
@@ -3200,7 +3231,7 @@ mod tests {
             for store in ["demo", "a-rather-long-project-name-here"] {
                 // The row this narrow shows the store label and nothing else,
                 // so it is also the width at which the guarantee below starts.
-                let floor = span_width(&identity_store(store, &ic));
+                let floor = span_width(&identity_store(StoreId { label: store, global: false }, &ic));
 
                 for w in 4u16..=120 {
                     let head = render_header(store, w, &ic);
@@ -3250,7 +3281,7 @@ mod tests {
     fn the_identity_gives_up_its_own_name_before_the_store() {
         let ic = &crate::icons::UNICODE;
         let text = |room: usize| -> String {
-            header_identity("my-project", ic, room)
+            header_identity(StoreId { label: "my-project", global: false }, ic, room)
                 .iter()
                 .map(|s| s.content.to_string())
                 .collect()
@@ -3266,7 +3297,7 @@ mod tests {
 
         let mut seen: Vec<usize> = Vec::new();
         for room in (0..=40).rev() {
-            let w = span_width(&header_identity("my-project", ic, room));
+            let w = span_width(&header_identity(StoreId { label: "my-project", global: false }, ic, room));
             assert!(w <= room, "room={room} produced {w} cells");
             seen.push(w);
         }
@@ -3275,6 +3306,48 @@ mod tests {
             "width must never grow as room shrinks: {seen:?}"
         );
         assert_eq!(*seen.last().unwrap(), 0, "something drawn at zero room");
+    }
+
+    /// Outside a git repo dex silently writes to a shared global store, which is
+    /// the one thing about it people get wrong. The header label says so in
+    /// yellow -- decided from the store *directory*, because the label is only a
+    /// directory name and a project can be spelled `global` too.
+    #[test]
+    fn the_global_stores_label_is_marked_and_a_project_named_global_is_not() {
+        let label_fg = |store_dir: &str| -> Vec<Color> {
+            let mut app = App::new(
+                vec![task("root", None, "Parent task")],
+                store_dir.into(),
+                crate::config::Config::default(),
+            );
+            app.single_pane_below = 0;
+            let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
+            terminal
+                .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+                .unwrap();
+            let buf = terminal.backend().buffer().clone();
+
+            let cells: Vec<String> = (0..buf.area.width)
+                .map(|x| buf[(x, 0)].symbol().to_string())
+                .collect();
+            let at = (0..cells.len().saturating_sub(5))
+                .find(|i| cells[*i..*i + 6].concat() == "global")
+                .unwrap_or_else(|| panic!("no label in {:?}", cells.concat()));
+            (at..at + 6).map(|x| buf[(x as u16, 0)].fg).collect()
+        };
+
+        assert!(
+            label_fg("/Users/x/.config/dex/local")
+                .iter()
+                .all(|c| *c == GLOBAL),
+            "the fallback store's label was not marked"
+        );
+        assert!(
+            label_fg("/Users/x/Developer/global/.dex")
+                .iter()
+                .all(|c| *c == PLAIN),
+            "a project named `global` was mistaken for the fallback store"
+        );
     }
 
     /// A filter silently in force with nothing on screen saying so is the most

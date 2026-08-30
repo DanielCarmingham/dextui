@@ -462,6 +462,17 @@ impl Dex {
     }
 }
 
+/// Whether this is dex's shared fallback store rather than a project's own.
+///
+/// Outside a git repo dex writes to `~/.config/dex/local`, so the two are told
+/// apart by the path alone -- never by the label, which is only a directory
+/// name and would call a project literally named `global` the global store.
+pub fn is_global_store(store_dir: &str) -> bool {
+    let trimmed = store_dir.trim_end_matches('/');
+    let name = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    name != ".dex" && trimmed.contains(".config/dex")
+}
+
 /// A human label for the store: either the project directory that owns the
 /// `.dex` folder, or "global" for the shared fallback store.
 pub fn store_label(store_dir: &str) -> String {
@@ -481,7 +492,7 @@ pub fn store_label(store_dir: &str) -> String {
         return parent.to_string();
     }
 
-    if trimmed.contains(".config/dex") {
+    if is_global_store(trimmed) {
         return "global".to_string();
     }
 
@@ -976,6 +987,10 @@ mod tests {
     fn store_label_names_the_project_or_global() {
         assert_eq!(store_label("/Users/x/Developer/myproj/.dex"), "myproj");
         assert_eq!(store_label("/Users/x/.config/dex/local"), "global");
+        assert!(is_global_store("/Users/x/.config/dex/local"));
+        // A directory name is not evidence: this one is a project's own store.
+        assert!(!is_global_store("/Users/x/Developer/global/.dex"));
+        assert_eq!(store_label("/Users/x/Developer/global/.dex"), "global");
     }
 
     #[test]
