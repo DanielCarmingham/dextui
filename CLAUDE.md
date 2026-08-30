@@ -853,11 +853,13 @@ keeps a mostly-unstarted tree from becoming a wall of yellow, and it is what dex
 itself does (`cc($gcol; $g)` in dex-report wraps the glyph and stops). Tree
 connectors stay dimmed so the coloured marker reads as the row's foreground.
 
-**The one exception is the header's store label**, `theme::GLOBAL`, yellow when
-dex has fallen back to its shared store at `~/.config/dex/local`. It reuses
+**The one exception is the header's store label**, `theme::GLOBAL`, bold yellow
+when dex has fallen back to its shared store at `~/.config/dex/local`. It reuses
 `TODO`'s hue deliberately: the states live on status glyphs and sidebar counts,
 this lives in the header identity where no state colour ever appears, so the
-two cannot be read as each other. It is decided from `App::store_dir` via
+two cannot be read as each other. Bold on top of the hue because the header's
+*own* yellow — the ready count — sits a few cells away, and colour alone left
+the two reading as one run of the same thing. It is decided from `App::store_dir` via
 `dex::is_global_store`, never from `store_label` — the label is only a
 directory name, so a project at `~/Developer/global` would otherwise be
 announced as the global store, which is the wrong-store confusion this app

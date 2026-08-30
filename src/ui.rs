@@ -676,12 +676,20 @@ struct StoreId<'a> {
 }
 
 impl StoreId<'_> {
-    /// The label itself, yellow when it is the fallback store. Outside a git
-    /// repo dex writes there silently, so this is the one thing on screen that
-    /// answers which tasks you are looking at.
+    /// The label itself, bold yellow when it is the fallback store. Outside a
+    /// git repo dex writes there silently, so this is the one thing on screen
+    /// that answers which tasks you are looking at.
+    ///
+    /// Bold as well as coloured because the header's other yellow -- the ready
+    /// count -- sits four cells away, and hue alone left the two reading as one
+    /// run of the same thing.
     fn span(&self) -> Span<'static> {
-        let fg = if self.global { GLOBAL } else { PLAIN };
-        Span::styled(self.label.to_string(), Style::default().fg(fg))
+        let style = if self.global {
+            Style::default().fg(GLOBAL).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(PLAIN)
+        };
+        Span::styled(self.label.to_string(), style)
     }
 
     /// The same store under a shortened spelling, for the elided last resort.
@@ -3314,7 +3322,7 @@ mod tests {
     /// directory name and a project can be spelled `global` too.
     #[test]
     fn the_global_stores_label_is_marked_and_a_project_named_global_is_not() {
-        let label_fg = |store_dir: &str| -> Vec<Color> {
+        let label = |store_dir: &str| -> Vec<(Color, Modifier)> {
             let mut app = App::new(
                 vec![task("root", None, "Parent task")],
                 store_dir.into(),
@@ -3333,19 +3341,24 @@ mod tests {
             let at = (0..cells.len().saturating_sub(5))
                 .find(|i| cells[*i..*i + 6].concat() == "global")
                 .unwrap_or_else(|| panic!("no label in {:?}", cells.concat()));
-            (at..at + 6).map(|x| buf[(x as u16, 0)].fg).collect()
+            (at..at + 6)
+                .map(|x| {
+                    let cell = &buf[(x as u16, 0)];
+                    (cell.fg, cell.modifier)
+                })
+                .collect()
         };
 
         assert!(
-            label_fg("/Users/x/.config/dex/local")
+            label("/Users/x/.config/dex/local")
                 .iter()
-                .all(|c| *c == GLOBAL),
-            "the fallback store's label was not marked"
+                .all(|(fg, m)| *fg == GLOBAL && m.contains(Modifier::BOLD)),
+            "the fallback store's label was not marked bold yellow"
         );
         assert!(
-            label_fg("/Users/x/Developer/global/.dex")
+            label("/Users/x/Developer/global/.dex")
                 .iter()
-                .all(|c| *c == PLAIN),
+                .all(|(fg, m)| *fg == PLAIN && !m.contains(Modifier::BOLD)),
             "a project named `global` was mistaken for the fallback store"
         );
     }
