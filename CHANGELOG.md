@@ -35,6 +35,9 @@ what happened the first time this was checked.
 
 ### Changed
 
+- The help dialog keeps a blank row and two cells of space between its
+  border and the text, at every scroll position, instead of pressing the
+  text against the frame.
 - The header names the store in bold yellow when dex has fallen back to its
   shared global store at `~/.config/dex/local`, so the one case where you are
   not looking at the current project's tasks says so. The sidebar's `global`

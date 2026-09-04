@@ -9,7 +9,7 @@ use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+    Block, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Wrap,
 };
 
@@ -1890,6 +1890,10 @@ The view refreshes itself whenever the dex store changes, including when
 another process or agent edits it. Your selection, expansion and any open
 dialog are never disturbed.";
 
+/// Text flush against a border reads as a wall; the bottom is left to the
+/// blank row the layout puts above the hint.
+const HELP_PAD: Padding = Padding::new(2, 2, 1, 0);
+
 fn draw_help(frame: &mut Frame, app: &mut App) {
     // Sized to the text rather than to a constant that was quietly two thirds
     // of it: at 74x16 the dialog cut off mid-sentence, so most of what `?`
@@ -1897,10 +1901,15 @@ fn draw_help(frame: &mut Frame, app: &mut App) {
     // could not be read at any terminal size. `centered` still clamps to the
     // frame, but what does not fit now scrolls rather than vanishing.
     let widest = HELP.lines().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
-    let area = centered(frame.area(), widest + 2, HELP.lines().count() as u16 + 3);
+    let area = centered(
+        frame.area(),
+        widest + 2 + HELP_PAD.left + HELP_PAD.right,
+        HELP.lines().count() as u16 + 4 + HELP_PAD.top,
+    );
     frame.render_widget(Clear, area);
 
     let block = Block::bordered()
+        .padding(HELP_PAD)
         .title(" dextui ")
         .title_top(
             Line::styled(
@@ -1913,7 +1922,12 @@ fn draw_help(frame: &mut Frame, app: &mut App) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [body, hint] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+    let [body, _gap, hint] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
 
     // Folded here rather than handed to `Paragraph::wrap`, because the markers
     // below have to be exactly right: they are the only thing on screen saying
@@ -2683,6 +2697,55 @@ mod tests {
         );
     }
 
+    /// Text flush against the border reads as a wall. One blank row above and
+    /// below the text and two cells either side, at every scroll position --
+    /// which is also what keeps the hint row from being wedged into the corner.
+    #[test]
+    fn the_help_text_is_padded_away_from_the_border() {
+        for scrolled in [false, true] {
+            let screen = help_screen(100, 24, scrolled);
+            let lines: Vec<&str> = screen.lines().collect();
+            // The dialog's own corners, not the panes' underneath it: the
+            // top border row carries three `┌`s and three `┐`s.
+            let top = lines.iter().position(|l| l.contains("┌ dextui")).unwrap();
+            let left = lines[top].find("┌ dextui").unwrap();
+            let right = left + lines[top][left..].find('┐').unwrap();
+            let bottom = top
+                + lines[top..]
+                    .iter()
+                    .position(|l| l.chars().nth(lines[top][..left].chars().count()) == Some('└'))
+                    .unwrap();
+
+            let inside = |row: usize| {
+                let chars: Vec<char> = lines[row].chars().collect();
+                let l = lines[top][..left].chars().count();
+                let r = lines[top][..right].chars().count();
+                chars[l + 1..r].iter().collect::<String>()
+            };
+
+            assert!(
+                inside(top + 1).trim().is_empty(),
+                "scrolled={scrolled}: no blank row under the top border:\n{screen}"
+            );
+            let hint = bottom - 1;
+            assert!(
+                inside(hint).contains("dismiss") || inside(hint).contains("scroll"),
+                "scrolled={scrolled}: the hint is not on the last row:\n{screen}"
+            );
+            assert!(
+                inside(hint - 1).trim().is_empty(),
+                "scrolled={scrolled}: no blank row above the hint:\n{screen}"
+            );
+            for row in top + 1..bottom {
+                let text = inside(row);
+                assert!(
+                    text.starts_with("  ") && text.ends_with("  "),
+                    "scrolled={scrolled}: row {row} touches the border: {text:?}\n{screen}"
+                );
+            }
+        }
+    }
+
     /// `fold` exists to give an exact row count, so the cases that matter are
     /// the ones where an off-by-one would put a `↓` under the last line.
     #[test]
@@ -2810,8 +2873,11 @@ mod tests {
         // Sized from `HELP` itself rather than a constant that goes stale the
         // next time a key is documented -- which is exactly what happened to
         // the 120x40 this used to hard-code.
-        let fits_h = HELP.lines().count() as u16 + 6;
-        let fits_w = HELP.lines().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 8;
+        let fits_h = HELP.lines().count() as u16 + 7 + HELP_PAD.top;
+        let fits_w = HELP.lines().map(|l| l.chars().count()).max().unwrap_or(0) as u16
+            + 4
+            + HELP_PAD.left
+            + HELP_PAD.right;
         let whole = help_screen(fits_w, fits_h, false);
         let hint = help_hint(&whole);
         assert!(
