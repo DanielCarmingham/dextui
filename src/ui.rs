@@ -13,7 +13,7 @@ use ratatui::widgets::{
     ScrollbarState, Wrap,
 };
 
-use crate::app::{App, Counts, Focus, HeaderZone, Mode, Panes};
+use crate::app::{App, CopyField, Counts, Focus, HeaderZone, Mode, Panes};
 
 /// Colour is used only where it carries meaning. Everything else is left to the
 /// terminal, so the app inherits whatever scheme the user runs -- including a
@@ -25,7 +25,7 @@ use crate::dex::{self, Status, Task, age, local_time};
 use crate::icons::Icons;
 use crate::tree::{self, Progress};
 
-pub(crate) const SHORTCUTS: &str = " s start  c done  r rename  e edit  n new  a sub  d del  f/F filter  o/O sort  1 repos  , config  ? help";
+pub(crate) const SHORTCUTS: &str = " s start  c done  r rename  e edit  n new  a sub  d del  y copy  f/F filter  o/O sort  1 repos  , config  ? help";
 
 /// What the strip says while the sidebar has focus.
 ///
@@ -59,6 +59,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, ic: &Icons) {
     app.terminal_width = frame.area().width;
     app.body_top = body.y;
     app.body_bottom = body.y + body.height;
+    // Republished by `draw_detail` when it draws a task; every other layout
+    // leaves it empty.
+    app.detail_zones.clear();
 
     draw_header(frame, app, ic, top);
 
@@ -177,6 +180,14 @@ fn draw_overlays(frame: &mut Frame, app: &mut App) {
             ACTIVE,
         ),
         Mode::Error(e) => draw_message(frame, "dex error", e, "any key to dismiss", BLOCKED),
+        Mode::CopyPicker => {
+            let choices = CopyField::ALL
+                .iter()
+                .map(|f| format!("{}  {}", f.key(), f.label()))
+                .collect::<Vec<_>>()
+                .join("    ");
+            draw_message_rows(frame, "Copy to clipboard", &choices, "esc cancel", ACTIVE, 5)
+        }
         _ => {}
     }
 }
@@ -1551,19 +1562,21 @@ fn draw_detail(frame: &mut Frame, app: &mut App, ic: &Icons, area: Rect) {
 
     // Rendered inside its own scope: the lines borrow `app`, and the measured
     // heights cannot be written back until that borrow ends.
-    let content_h = {
-        let lines = detail_lines(&task, app, ic);
-        let widths: Vec<u16> = lines.iter().map(|l| l.width() as u16).collect();
+    let (content_h, zones) = {
+        let detail = detail_layout(&task, app, ic);
+        let widths: Vec<u16> = detail.lines.iter().map(|l| l.width() as u16).collect();
         let height = wrapped_height(&widths, inner_w, wrap);
+        let zones = detail_zones(&detail, &widths, area, scroll.0, wrap);
 
-        let mut paragraph = Paragraph::new(lines).scroll(scroll);
+        let mut paragraph = Paragraph::new(detail.lines).scroll(scroll);
         if wrap {
             paragraph = paragraph.wrap(Wrap { trim: false });
         }
         frame.render_widget(paragraph.block(block), area);
-        height
+        (height, zones)
     };
 
+    app.detail_zones = zones;
     app.detail_content_height = content_h;
     app.detail_viewport_height = inner_h;
 
@@ -1589,10 +1602,78 @@ fn since(age: &str) -> String {
     }
 }
 
+/// The detail pane's lines, plus where the copyable fields start in them.
+struct Detail<'a> {
+    lines: Vec<Line<'a>>,
+    /// Index of the `id` row. The title is always line 0.
+    id: usize,
+    /// Index of the description's first line, when there is one.
+    description: Option<usize>,
+}
+
+/// Screen rows of the title, the `id` row and the description, for a click
+/// to copy from. Walks the lines with the same per-line arithmetic as
+/// [`wrapped_height`] -- an estimate that can be a row off on a long wrapped
+/// title, which is why the fields before the description are all short: a
+/// miss there lands on a blank row or a label and does nothing, never on the
+/// wrong field. The description runs to the end of the content, so its start
+/// is the only edge that matters.
+fn detail_zones(
+    detail: &Detail<'_>,
+    widths: &[u16],
+    area: Rect,
+    scroll: u16,
+    wrap: bool,
+) -> Vec<(u16, u16, CopyField)> {
+    let inner_w = area.width.saturating_sub(2);
+    let inner_h = area.height.saturating_sub(2);
+    let rows = |w: u16| -> u16 {
+        if wrap && inner_w > 0 {
+            w.div_ceil(inner_w).max(1)
+        } else {
+            1
+        }
+    };
+
+    // Content row at which each line starts, plus the total after the last.
+    let mut starts = Vec::with_capacity(widths.len() + 1);
+    let mut at = 0u16;
+    for w in widths {
+        starts.push(at);
+        at = at.saturating_add(rows(*w));
+    }
+    starts.push(at);
+
+    let top = area.y + 1;
+    let on_screen = |from: u16, to: u16| -> Option<(u16, u16)> {
+        // `to` is exclusive in content rows; the viewport is `scroll..scroll+inner_h`.
+        let first = from.max(scroll);
+        let last = to.min(scroll.saturating_add(inner_h));
+        (first < last).then(|| (top + first - scroll, top + last - scroll - 1))
+    };
+
+    let mut zones = Vec::new();
+    let mut push = |line: usize, to: usize, field: CopyField| {
+        if let Some((a, b)) = on_screen(starts[line], starts[to]) {
+            zones.push((a, b, field));
+        }
+    };
+    push(0, 1, CopyField::Title);
+    push(detail.id, detail.id + 1, CopyField::Id);
+    if let Some(d) = detail.description {
+        push(d, widths.len(), CopyField::Description);
+    }
+    zones
+}
+
 /// Built entirely from the already-fetched list. `dex show` is never called,
 /// because selection changes on every arrow key and a ~180ms process spawn per
 /// keypress would make navigation unusable.
 fn detail_lines<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Vec<Line<'a>> {
+    detail_layout(t, app, ic).lines
+}
+
+fn detail_layout<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Detail<'a> {
     let mut lines = vec![
         Line::from(Span::styled(
             t.name.clone(),
@@ -1652,6 +1733,7 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Vec<Line<'a>> {
 
     lines.push(Line::from(""));
 
+    let id_line = lines.len();
     let mut field = |k: &str, v: String, style: Style| {
         lines.push(Line::from(vec![
             Span::styled(format!("{k:<10}"), Style::default().fg(DIM)),
@@ -1732,8 +1814,10 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Vec<Line<'a>> {
         lines.push(Line::from(parts));
     }
 
+    let mut description = None;
     if let Some(d) = t.description.as_ref().filter(|d| !d.trim().is_empty()) {
         lines.push(Line::from(""));
+        description = Some(lines.len());
         lines.extend(markdown_lines(d));
     }
 
@@ -1748,7 +1832,11 @@ fn detail_lines<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Vec<Line<'a>> {
         }
     }
 
-    lines
+    Detail {
+        lines,
+        id: id_line,
+        description,
+    }
 }
 
 /// Renders a description as markdown.
@@ -1816,7 +1904,20 @@ fn draw_prompt(frame: &mut Frame, prompt: &crate::app::Prompt) {
 }
 
 fn draw_message(frame: &mut Frame, title: &str, body: &str, hint: &str, accent: Color) {
-    let area = centered(frame.area(), 66, 9);
+    draw_message_rows(frame, title, body, hint, accent, 9);
+}
+
+/// `draw_message` at a chosen height, for a body that is one line and would
+/// otherwise sit at the top of six blank rows.
+fn draw_message_rows(
+    frame: &mut Frame,
+    title: &str,
+    body: &str,
+    hint: &str,
+    accent: Color,
+    rows: u16,
+) {
+    let area = centered(frame.area(), 66, rows);
     frame.render_widget(Clear, area);
 
     let block = Block::bordered()
@@ -1857,6 +1958,7 @@ f / F      filter fwd / back ^R  refresh now
 ,          edit config       q   quit
 - / +      collapse / expand all
 ^L         redraw the screen (if the terminal has corrupted it)
+y          copy to the clipboard: i id, t title, d description, a all
 
 In the repo sidebar these keys act on repos, not on tasks:
 1          focus repos       b   show / hide the sidebar
@@ -2004,6 +2106,45 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
+/// The text `field` stands for on the selected task, or `None` with nothing
+/// selected. `id` and `title` come out bare -- no label, no trailing newline
+/// -- because they are pasted into commit messages and chat, where either
+/// would have to be unpicked.
+///
+/// `All` is `detail_lines` flattened, so it says exactly what the pane says.
+/// Except in the nerd tier, whose glyphs live in the Private Use Area: the
+/// right font on screen, tofu in a paste. That tier copies the unicode tier's
+/// text instead; ascii keeps its own, which is plain already.
+pub fn copy_text(app: &App, field: CopyField, ic: &Icons) -> Option<String> {
+    let t = app.selected_task()?;
+    Some(match field {
+        CopyField::Id => t.id.clone(),
+        CopyField::Title => t.name.clone(),
+        CopyField::Description => t.description.clone().unwrap_or_default(),
+        CopyField::All => {
+            let ic = if matches!(ic.tier, crate::icons::Tier::Nerd) {
+                &crate::icons::UNICODE
+            } else {
+                ic
+            };
+            let text = plain_text(&detail_lines(t, app, ic));
+            text.trim_end_matches('\n').to_string() + "\n"
+        }
+    })
+}
+
+/// Lines as text, one per row, styling dropped.
+fn plain_text(lines: &[Line<'_>]) -> String {
+    let mut out = String::new();
+    for line in lines {
+        for span in &line.spans {
+            out.push_str(&span.content);
+        }
+        out.push('\n');
+    }
+    out
+}
+
 /// Plain-text render of the whole pipeline, for `dextui selftest`.
 pub fn selftest(app: &App) -> String {
     use std::fmt::Write;
@@ -2039,16 +2180,7 @@ pub fn selftest(app: &App) -> String {
 
     if let Some(first) = app.tasks.first() {
         let _ = writeln!(out, "--- detail pane for {} ---", first.name);
-        for line in detail_lines(first, app, ic) {
-            let _ = writeln!(
-                out,
-                "{}",
-                line.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            );
-        }
+        out.push_str(&plain_text(&detail_lines(first, app, ic)));
     }
 
     out
@@ -2480,6 +2612,7 @@ mod tests {
             ("n", "new"),
             ("a", "sub"),
             ("d", "del"),
+            ("y", "copy"),
             ("f/F", "filter"),
             ("o/O", "sort"),
         ] {
@@ -2495,6 +2628,10 @@ mod tests {
             "help: -/+"
         );
         assert!(HELP.contains("w / z"), "help: z zooms");
+        assert!(
+            HELP.contains("y          copy to the clipboard: i id, t title, d description, a all"),
+            "help: y copies, and names the chooser keys"
+        );
         assert!(!HELP.contains("z Z"), "the old collapse keys are gone");
 
         // The pair this change exists to remove. `E` must not survive anywhere,
@@ -4142,6 +4279,279 @@ mod tests {
                 "{focus:?}: no detail: {s}"
             );
         }
+    }
+
+    fn copy_app(tasks: Vec<Task>, selected: &str) -> App {
+        let mut app = App::new(tasks, "demo".into(), crate::config::Config::default());
+        app.filter = tree::Filter::All;
+        app.rebuild();
+        app.selected = Some(selected.into());
+        app
+    }
+
+    /// `id` and `title` are the two things most often pasted somewhere else
+    /// -- a commit message, a chat -- so they come out bare, with nothing
+    /// around them and no trailing newline to unpick.
+    #[test]
+    fn copying_the_id_and_the_title_gives_the_bare_value() {
+        let app = copy_app(vec![task("b4d5gfpl", None, "Ship it & tell \"them\"")], "b4d5gfpl");
+        assert_eq!(
+            copy_text(&app, CopyField::Id, &crate::icons::UNICODE).as_deref(),
+            Some("b4d5gfpl")
+        );
+        assert_eq!(
+            copy_text(&app, CopyField::Title, &crate::icons::UNICODE).as_deref(),
+            Some("Ship it & tell \"them\"")
+        );
+    }
+
+    /// The description is what `e` edits, not what the pane shows: the render
+    /// rewrites indentation and lays out markdown, and pasting *that* into
+    /// another task would silently change the text. Byte-for-byte, then.
+    #[test]
+    fn copying_the_description_is_the_stored_text_byte_for_byte() {
+        const RAW: &str = "# Plan\n\n  two leading spaces\n\n- a list\n- with | pipes |\n\ntrailing  \n";
+        let t = Task {
+            description: Some(RAW.into()),
+            ..task("a", None, "A task")
+        };
+        let app = copy_app(vec![t], "a");
+        assert_eq!(
+            copy_text(&app, CopyField::Description, &crate::icons::UNICODE).as_deref(),
+            Some(RAW)
+        );
+
+        let none = Task {
+            description: None,
+            ..task("b", None, "Bare")
+        };
+        let app = copy_app(vec![none], "b");
+        assert_eq!(
+            copy_text(&app, CopyField::Description, &crate::icons::UNICODE).as_deref(),
+            Some("")
+        );
+    }
+
+    /// "All" is the detail pane as text -- the same lines, flattened the way
+    /// `selftest` flattens them -- so it carries the status, the priority, the
+    /// dates and the relationships as well as the description.
+    #[test]
+    fn copying_all_is_the_detail_pane_as_plain_text() {
+        let parent = started("p", "Parent task");
+        let child = Task {
+            completed: true,
+            completed_at: Some("2026-01-02T00:00:00Z".into()),
+            ..task("c", Some("p"), "Child task")
+        };
+        let app = copy_app(vec![parent, child], "p");
+        let text = copy_text(&app, CopyField::All, &crate::icons::UNICODE).unwrap();
+
+        assert!(text.starts_with("Parent task\n"), "title first:\n{text}");
+        assert!(text.contains("in progress"), "status:\n{text}");
+        assert!(text.contains("priority"), "priority:\n{text}");
+        assert!(text.contains("id        p\n"), "id row:\n{text}");
+        assert!(text.contains("created   "), "dates:\n{text}");
+        assert!(text.contains("1/1"), "progress fraction:\n{text}");
+        assert!(text.contains("a description"), "description:\n{text}");
+        assert!(!text.ends_with("\n\n"), "no trailing blank lines:\n{text:?}");
+    }
+
+    /// The nerd tier draws its glyphs from the Private Use Area, which is the
+    /// right font on screen and tofu in a paste. Copying from that tier gives
+    /// the unicode tier's text instead; the other two are already plain.
+    #[test]
+    fn copying_all_never_contains_private_use_glyphs() {
+        let parent = started("p", "Parent task");
+        let child = task("c", Some("p"), "Child task");
+        let app = copy_app(vec![parent, child], "p");
+
+        for ic in [
+            &crate::icons::NERD,
+            &crate::icons::UNICODE,
+            &crate::icons::ASCII,
+        ] {
+            let text = copy_text(&app, CopyField::All, ic).unwrap();
+            let pua = text.chars().find(|c| {
+                matches!(*c as u32, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD)
+            });
+            assert!(
+                pua.is_none(),
+                "{:?}: private-use glyph {pua:?} in the copied text:\n{text}",
+                ic.tier
+            );
+            assert!(text.contains("0/1"), "{:?}: fraction survives:\n{text}", ic.tier);
+        }
+
+        let ascii = copy_text(&app, CopyField::All, &crate::icons::ASCII).unwrap();
+        assert!(ascii.contains('#') || ascii.contains('.'), "ascii keeps its own bar:\n{ascii}");
+    }
+
+    #[test]
+    fn nothing_to_copy_without_a_selection() {
+        let app = App::new(vec![], "demo".into(), crate::config::Config::default());
+        for field in [CopyField::Id, CopyField::Title, CopyField::Description, CopyField::All] {
+            assert_eq!(copy_text(&app, field, &crate::icons::UNICODE), None);
+        }
+    }
+
+    /// The click targets are found in the rendered buffer rather than computed
+    /// twice: the row the `id` label actually landed on is the row a click
+    /// must copy from, in wrap and no-wrap alike.
+    #[test]
+    fn clicking_the_title_the_id_row_or_the_description_copies_that_field() {
+        for wrap in [true, false] {
+            let t = Task {
+                description: Some("Body text here".into()),
+                ..task("b4d5gfpl", None, "Parent task")
+            };
+            let mut app = App::new(vec![t], "demo".into(), crate::config::Config::default());
+            app.filter = tree::Filter::All;
+            app.repos_pane_above = 0;
+            app.wrap = wrap;
+            app.rebuild();
+            app.selected = Some("b4d5gfpl".into());
+
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+            terminal
+                .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+                .unwrap();
+            let buf = terminal.backend().buffer().clone();
+
+            let title = row_of(&buf, "Parent task");
+            let id = row_of(&buf, "id        b4d5gfpl");
+            let body = row_of(&buf, "Body text here");
+            assert!(title < id && id < body, "wrap={wrap}: fixture rows {title} {id} {body}");
+
+            for (row, want) in [
+                (title, Some(CopyField::Title)),
+                (id, Some(CopyField::Id)),
+                (body, Some(CopyField::Description)),
+                (title + 1, None),
+                (id - 1, None),
+            ] {
+                app.pending_copy = None;
+                let acted = app.click_detail(row);
+                assert_eq!(
+                    app.pending_copy, want,
+                    "wrap={wrap}: click on row {row} (title {title}, id {id}, body {body})"
+                );
+                assert_eq!(acted, want.is_some(), "wrap={wrap}: row {row} reported wrongly");
+            }
+        }
+    }
+
+    /// The description zone runs to the end of the content, and a scrolled
+    /// pane moves every zone with it: after scrolling, the row the `id` label
+    /// is drawn on is still the row that copies the id.
+    #[test]
+    fn the_zones_follow_the_scroll_and_the_description_runs_to_the_end() {
+        let long: String = (1..=30).map(|i| format!("line {i}\n")).collect();
+        let t = Task {
+            description: Some(long),
+            ..task("b4d5gfpl", None, "Parent task")
+        };
+        let mut app = App::new(vec![t], "demo".into(), crate::config::Config::default());
+        app.filter = tree::Filter::All;
+        app.repos_pane_above = 0;
+        app.rebuild();
+        app.selected = Some("b4d5gfpl".into());
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        let mut render = |app: &mut App| {
+            terminal
+                .draw(|f| draw(f, app, &crate::icons::UNICODE))
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+
+        let buf = render(&mut app);
+        let last_body_row = app.body_bottom - 2;
+        assert_eq!(
+            app.detail_zone_at(last_body_row),
+            Some(CopyField::Description),
+            "the description reaches the pane's last row"
+        );
+        assert_eq!(app.detail_zone_at(app.body_bottom - 1), None, "not the border");
+
+        app.scroll_detail(3, 0);
+        let scrolled = render(&mut app);
+        let id = row_of(&scrolled, "id        b4d5gfpl");
+        assert!(id < row_of(&buf, "id        b4d5gfpl"), "the id row moved up");
+        assert_eq!(app.detail_zone_at(id), Some(CopyField::Id));
+
+        app.scroll_detail(20, 0);
+        render(&mut app);
+        assert!(
+            app.detail_zones.iter().all(|(_, _, f)| *f == CopyField::Description),
+            "only the description is left once the header rows scroll off: {:?}",
+            app.detail_zones
+        );
+    }
+
+    /// A long title wraps onto several rows, and every one of them is the
+    /// title -- the zone for the rows *after* it has to move down with it.
+    #[test]
+    fn a_wrapped_title_keeps_the_rows_below_it_honest() {
+        let title: String = std::iter::repeat_n("word", 40).collect::<Vec<_>>().join(" ");
+        let t = Task {
+            description: Some("Body text here".into()),
+            ..task("b4d5gfpl", None, &title)
+        };
+        let mut app = App::new(vec![t], "demo".into(), crate::config::Config::default());
+        app.filter = tree::Filter::All;
+        app.repos_pane_above = 0;
+        app.rebuild();
+        app.selected = Some("b4d5gfpl".into());
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        let id = row_of(&buf, "id        b4d5gfpl");
+        assert!(id > app.body_top + 3, "the title did not wrap: id on row {id}");
+        assert_eq!(app.detail_zone_at(id), Some(CopyField::Id), "{:?}", app.detail_zones);
+        assert_eq!(app.detail_zone_at(app.body_top + 1), Some(CopyField::Title));
+        assert_eq!(app.detail_zone_at(app.body_top + 2), Some(CopyField::Title));
+    }
+
+    /// Nothing selected, nothing to click: the zones are cleared, not left
+    /// over from the last task that was drawn.
+    #[test]
+    fn no_zones_without_a_task_on_screen() {
+        let mut app = App::new(
+            vec![task("a", None, "A task")],
+            "demo".into(),
+            crate::config::Config::default(),
+        );
+        app.filter = tree::Filter::All;
+        app.repos_pane_above = 0;
+        app.rebuild();
+        app.selected = Some("a".into());
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal
+            .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+            .unwrap();
+        assert!(!app.detail_zones.is_empty(), "the fixture drew no zones");
+
+        app.selected = None;
+        terminal
+            .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+            .unwrap();
+        assert!(app.detail_zones.is_empty(), "zones survived the task leaving");
+
+        app.selected = Some("a".into());
+        app.single_pane_below = 200;
+        app.focus = Focus::Tree;
+        terminal
+            .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+            .unwrap();
+        assert!(
+            app.detail_zones.is_empty(),
+            "zones survived the detail pane not being drawn"
+        );
     }
 
     /// A dialog has to survive the layout it is drawn over, and the single-pane

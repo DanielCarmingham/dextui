@@ -33,6 +33,17 @@ what happened the first time this was checked.
 
 ## [Unreleased]
 
+### Added
+
+- Copy to the clipboard. `y` opens a chooser for the selected task's id,
+  title, description (as stored) or the whole detail pane as plain text, and
+  clicking the title, the `id` row or the description in the detail pane
+  copies that field directly. The text is sent with the terminal's OSC 52
+  clipboard escape, so it reaches the clipboard of the machine you are
+  looking at over SSH and through tmux, and to `pbcopy`, `wl-copy`, `xclip`
+  or `xsel` as well when one is on `PATH`, for terminals that ignore the
+  escape.
+
 ### Changed
 
 - The help dialog keeps a blank row and two cells of space between its

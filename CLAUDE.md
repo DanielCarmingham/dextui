@@ -1543,6 +1543,64 @@ Two things this requires:
 Capture is disabled around `$EDITOR` and on exit; the child must own the
 terminal completely.
 
+## Clipboard
+
+`y` copies, and the whole mechanism is `src/clipboard.rs`. Two transports,
+**both always attempted**, because neither covers every terminal this runs in:
+
+- **OSC 52**, written straight to stdout as `ESC ] 52 ; c ; <base64> BEL`.
+  The terminal you are *looking at* sets its own clipboard, which is what
+  makes this work over SSH from a phone — the case the 60-column screenshots
+  exist for — and through tmux, whose default `set-clipboard external`
+  forwards it to the outer terminal. Terminal.app ignores it. The base64 is
+  hand-rolled (twenty lines, RFC 4648 vectors in the tests) rather than a
+  crate for one call site.
+- **A native tool** when one is on `PATH`: `pbcopy` on macOS, else the first
+  of `wl-copy`, `xclip -selection clipboard`, `xsel --clipboard --input`.
+  This is what catches Terminal.app locally. Over SSH it lands on the remote
+  machine's clipboard, which is harmless. Its stdout and stderr are nulled,
+  not inherited: `xclip` forks and holds the selection, and an inherited
+  stdout would hand it the TUI's terminal.
+
+**Neither route can report whether the terminal took the text**, so `copy`
+returns nothing and the status line says what was *sent* (`copied id`)
+rather than claiming success. A native spawn that fails is logged under the
+`clip` area and is otherwise silent: the OSC 52 write has already happened,
+and a status-bar complaint about a tool the user may not have is noise.
+
+**`App` never touches stdout.** `App::copy` records a `CopyField` in
+`pending_copy` and sets the status; the event loop drains it between frames,
+resolving the text with the icon tier it draws with and only then calling
+`clipboard::copy`. Two reasons, one for each half: the write goes to the same
+stdout ratatui draws on, so it has to land between frames rather than inside
+one; and a test can press `y` then `i` headless and read the request back,
+where a real write would have set the clipboard of whatever terminal was
+running `cargo test`. That last one is not hypothetical — driving the app in
+tmux to check the transport *does* overwrite the clipboard of the machine it
+runs on, so `scripts` that do it should save and restore `pbpaste` first.
+
+**What each option copies** is `ui::copy_text`, one function for the key and
+the click paths. `id` and `title` come out bare, no label and no trailing
+newline, because they are pasted into commit messages. `description` is the
+stored bytes — what `e` edits — never the rendered pane, which rewrites
+indentation and lays out markdown; a round-trip test pins it. `all` is
+`detail_lines` flattened by the same `plain_text` `selftest` uses, so it says
+exactly what the pane says — **except in the nerd tier**, whose glyphs live
+in the Private Use Area and paste as tofu. That tier copies the unicode
+tier's rendering instead; ascii keeps its own, which is plain already. A
+test walks every tier's output for PUA codepoints.
+
+**The click targets are `detail_zones`**, published by `draw_detail` each
+frame the way the header publishes `header_zones`: the visual rows of the
+title, the `id` row, and the description, the last running to the end of the
+content. They are computed by walking the lines the pane draws with the same
+wrapped-height arithmetic, which over-estimates on purpose (see
+`wrapped_height`), so on a long wrapped title a click can be a row off. The
+rows before the description are all short, so a miss lands on a blank row or
+a label and does nothing — never on the wrong field. Cleared whenever the
+detail pane is not drawn or has no task, since a stale zone is an invisible
+click target.
+
 ## Sorting
 
 `o` cycles the order, `O` reverses it, and the current one shows in the header.

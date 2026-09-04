@@ -1,6 +1,7 @@
 //! dextui — a two-pane terminal browser for dex tasks.
 
 mod app;
+mod clipboard;
 mod config;
 mod dex;
 mod editor;
@@ -28,7 +29,7 @@ use crossterm::event::{
 };
 use crossterm::execute;
 
-use app::{App, Focus, Mode, Pending, Prompt, TextInput};
+use app::{App, CopyField, Focus, Mode, Pending, Prompt, TextInput};
 use dex::{Dex, Task};
 
 /// Everything the main loop reacts to, from every thread, on one channel.
@@ -603,6 +604,14 @@ fn main() -> std::io::Result<()> {
             dirty = true;
         }
 
+        // Between frames on purpose: the OSC 52 write goes to the same stdout
+        // ratatui draws on, and mid-draw it would land inside a frame.
+        if let Some(field) = app.pending_copy.take()
+            && let Some(text) = ui::copy_text(&app, field, &glyphs)
+        {
+            clipboard::copy(&text);
+        }
+
         // Requested by `enter`/`l` in the repo pane. Synchronous, like the
         // preflight `dex list` above: a discrete action rather than something
         // that runs on every keystroke, so the ~180ms dex call is the same
@@ -663,7 +672,13 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
                         app.focus = Focus::Tree;
                         app.click_tree(m.column, m.row);
                     }
-                    Focus::Detail => app.focus = Focus::Detail,
+                    // Focuses, and copies the field under the pointer if the
+                    // click landed on one -- the title, the `id` row, or the
+                    // description. Anywhere else it only focuses.
+                    Focus::Detail => {
+                        app.focus = Focus::Detail;
+                        app.click_detail(m.row);
+                    }
                     // Selects, like the tree -- which is what the help
                     // already promises ("click selects"). Switching store
                     // stays on `enter`/`l`: a click is how you *look* at a
@@ -1296,6 +1311,8 @@ enum Action {
     RenameTask,
     EditDescription,
     DeleteTask,
+    /// `y` -- open the clipboard chooser for the selection.
+    Copy,
 }
 
 /// One key, and what it does.
@@ -1415,6 +1432,7 @@ const BINDINGS: &[Binding] = &[
     Binding { code: KeyCode::Char('r'), mods: KeyModifiers::NONE, action: Action::RenameTask },
     Binding { code: KeyCode::Char('e'), mods: KeyModifiers::NONE, action: Action::EditDescription },
     Binding { code: KeyCode::Char('d'), mods: KeyModifiers::NONE, action: Action::DeleteTask },
+    Binding { code: KeyCode::Char('y'), mods: KeyModifiers::NONE, action: Action::Copy },
 
     // Acting on a repo. `A` saves one you are *not* in, by path; `a` saves the
     // one you are, which is the common case and worth the unshifted key. `D`
@@ -1523,6 +1541,22 @@ fn handle_key(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>) {
         Mode::Help => handle_help(app, key, dex, tx),
 
         Mode::Error(_) => close_modal(app, dex, tx),
+
+        Mode::CopyPicker => handle_copy_picker(app, key, dex, tx),
+    }
+}
+
+/// One of the chooser's letters copies and closes; `esc` closes; anything
+/// else is ignored, like the confirmation dialogs, so a mistyped letter
+/// cannot dismiss a chooser you were still reading.
+fn handle_copy_picker(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>) {
+    if key.code == KeyCode::Esc {
+        close_modal(app, dex, tx);
+        return;
+    }
+    if let Some(field) = typed_char(&key).and_then(CopyField::from_key) {
+        app.copy(field);
+        close_modal(app, dex, tx);
     }
 }
 
@@ -1665,6 +1699,7 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         Action::Search => app.mode = Mode::Search,
         Action::Help => app.open_help(),
         Action::EditConfig => app.pending_config_edit = true,
+        Action::Copy => app.open_copy_picker(),
 
         Action::NewTask => {
             app.mode = Mode::Prompt(Prompt {
@@ -2210,6 +2245,125 @@ mod tests {
                 b.code
             );
         }
+    }
+
+    fn copy_app() -> App {
+        let task = Task {
+            id: "b4d5gfpl".into(),
+            name: "A task".into(),
+            description: Some("body".into()),
+            ..Default::default()
+        };
+        let mut app = App::new(vec![task], "demo".into(), crate::config::Config::default());
+        app.rebuild();
+        app.selected = Some("b4d5gfpl".into());
+        app
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let dex = Arc::new(Dex::real());
+        handle_key(app, KeyEvent::new(code, KeyModifiers::NONE), &dex, &tx);
+    }
+
+    /// `y` opens the chooser, a chooser letter copies and closes it, and the
+    /// request reaches the event loop as a *field* rather than text: `App`
+    /// never touches stdout, which is also what lets this run headless.
+    #[test]
+    fn y_then_a_chooser_letter_requests_the_copy_and_closes() {
+        let mut app = copy_app();
+        press(&mut app, KeyCode::Char('y'));
+        assert!(matches!(app.mode, Mode::CopyPicker), "y opens the chooser");
+        assert_eq!(app.pending_copy, None, "nothing is copied until a field is picked");
+
+        press(&mut app, KeyCode::Char('i'));
+        assert!(matches!(app.mode, Mode::Normal), "picking closes the chooser");
+        assert_eq!(app.pending_copy, Some(CopyField::Id));
+        assert_eq!(app.status, "copied id");
+
+        for (key, field) in [
+            ('t', CopyField::Title),
+            ('d', CopyField::Description),
+            ('a', CopyField::All),
+        ] {
+            let mut app = copy_app();
+            press(&mut app, KeyCode::Char('y'));
+            press(&mut app, KeyCode::Char(key));
+            assert_eq!(app.pending_copy, Some(field), "{key}");
+            assert_eq!(app.status, format!("copied {}", field.label()), "{key}");
+        }
+    }
+
+    /// `esc` cancels; a letter that is not a choice is ignored rather than
+    /// dismissing, like the confirmation dialogs, so a mistyped key cannot
+    /// close a chooser you were still reading. A modifier chord decoding to a
+    /// chooser letter is not that letter either.
+    #[test]
+    fn the_chooser_cancels_on_esc_and_ignores_everything_else() {
+        let mut app = copy_app();
+        press(&mut app, KeyCode::Char('y'));
+        press(&mut app, KeyCode::Char('x'));
+        assert!(matches!(app.mode, Mode::CopyPicker), "an unbound letter is ignored");
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(app.mode, Mode::CopyPicker), "enter picks nothing");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let dex = Arc::new(Dex::real());
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL),
+            &dex,
+            &tx,
+        );
+        assert!(matches!(app.mode, Mode::CopyPicker), "ctrl-i is not i");
+        assert_eq!(app.pending_copy, None);
+
+        press(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal), "esc cancels");
+        assert_eq!(app.pending_copy, None, "cancelling copies nothing");
+        assert_eq!(app.status, "", "cancelling says nothing");
+    }
+
+    /// With nothing selected every answer would be empty, so `y` says so
+    /// instead of opening the chooser.
+    #[test]
+    fn y_with_nothing_selected_says_so_instead_of_opening_the_chooser() {
+        let mut app = App::new(vec![], "demo".into(), crate::config::Config::default());
+        press(&mut app, KeyCode::Char('y'));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(app.status, "nothing selected to copy");
+        assert_eq!(app.pending_copy, None);
+    }
+
+    /// The chooser is a dialog like any other: a refresh that lands while it
+    /// is open waits for it to close rather than repainting underneath it.
+    #[test]
+    fn a_refresh_waits_for_the_chooser_to_close() {
+        let mut app = copy_app();
+        press(&mut app, KeyCode::Char('y'));
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let dex = Arc::new(Dex::real());
+        let store = app.store_dir.clone();
+        let renamed = Task {
+            id: "b4d5gfpl".into(),
+            name: "Renamed".into(),
+            ..Default::default()
+        };
+        handle_msg(
+            &mut app,
+            Msg::StoreLoaded {
+                dir: store,
+                result: Ok(vec![renamed]),
+            },
+            &dex,
+            &tx,
+        );
+        assert!(app.pending_refresh, "deferred while the chooser is open");
+        assert_eq!(app.by_id["b4d5gfpl"].name, "A task", "not applied underneath");
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.pending_refresh, "applied on close");
     }
 
     /// The status strip may only advertise keys that are actually bound.

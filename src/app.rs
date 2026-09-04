@@ -108,6 +108,52 @@ pub enum Mode {
     },
     Error(String),
     Help,
+    /// `y` -- which part of the selected task to put on the clipboard.
+    CopyPicker,
+}
+
+/// What `y` offers to put on the clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyField {
+    Id,
+    Title,
+    /// The stored text, byte for byte -- what `e` edits, not what the pane
+    /// shows, since the render rewrites indentation and lays out markdown.
+    Description,
+    /// The detail pane as plain text.
+    All,
+}
+
+impl CopyField {
+    pub const ALL: [CopyField; 4] = [
+        CopyField::Id,
+        CopyField::Title,
+        CopyField::Description,
+        CopyField::All,
+    ];
+
+    /// The key that picks it in the chooser.
+    pub fn key(self) -> char {
+        match self {
+            CopyField::Id => 'i',
+            CopyField::Title => 't',
+            CopyField::Description => 'd',
+            CopyField::All => 'a',
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CopyField::Id => "id",
+            CopyField::Title => "title",
+            CopyField::Description => "description",
+            CopyField::All => "all",
+        }
+    }
+
+    pub fn from_key(c: char) -> Option<CopyField> {
+        CopyField::ALL.into_iter().find(|f| f.key() == c)
+    }
 }
 
 /// Which pane the movement keys drive.
@@ -203,6 +249,10 @@ pub struct App {
     pub pending_editor: Option<String>,
     /// Set by `,`; the main loop opens the config file in $EDITOR and reloads.
     pub pending_config_edit: bool,
+    /// Requested by `y` or a click in the detail pane. The event loop turns it
+    /// into text and writes the clipboard between frames -- `App` never
+    /// touches stdout, and a test can read the request without a terminal.
+    pub pending_copy: Option<CopyField>,
     /// Set by `enter`/`l` in the repo pane; the main loop picks it up and
     /// swaps which store the task panes read. Handled the same way as
     /// `pending_editor`: `handle_key` only ever sees `&Arc<Dex>`, so replacing
@@ -304,6 +354,10 @@ pub struct App {
     /// Rewritten every frame; empty while the search box owns the row, so a
     /// click can never act on a menu that is not on screen.
     pub header_zones: Vec<(u16, u16, HeaderZone)>,
+    /// Clickable fields of the detail pane, as `(first_row, last_row, what)`
+    /// in screen rows. Rewritten every frame the pane draws a task and empty
+    /// otherwise, so a stale zone can never be an invisible click target.
+    pub detail_zones: Vec<(u16, u16, CopyField)>,
     /// Which worktree's store the task tree is showing.
     pub selected_worktree: Option<String>,
     /// Task selection per worktree path, so switching back returns the cursor.
@@ -384,6 +438,7 @@ impl App {
             should_quit: false,
             pending_editor: None,
             pending_config_edit: false,
+            pending_copy: None,
             pending_store: None,
             split_percent: cfg.split_percent,
             dragging: None,
@@ -416,6 +471,7 @@ impl App {
             repos_visible: cfg.repos_open,
             zoom: None,
             header_zones: Vec::new(),
+            detail_zones: Vec::new(),
             selected_worktree: None,
             task_memory: HashMap::new(),
             repos: Vec::new(),
@@ -937,6 +993,25 @@ impl App {
             .map(|(_, _, z)| *z)
     }
 
+    /// What field of the detail pane sits on `row`, if any.
+    pub fn detail_zone_at(&self, row: u16) -> Option<CopyField> {
+        self.detail_zones
+            .iter()
+            .find(|(from, to, _)| row >= *from && row <= *to)
+            .map(|(_, _, f)| *f)
+    }
+
+    /// A left-click in the detail pane: copies the field under the pointer.
+    /// Returns whether one was there; a click on a blank row or a label
+    /// changes nothing beyond the focus the caller already moved.
+    pub fn click_detail(&mut self, row: u16) -> bool {
+        let Some(field) = self.detail_zone_at(row) else {
+            return false;
+        };
+        self.copy(field);
+        true
+    }
+
     /// Acts on a header click. `secondary` is the right button, which reverses
     /// the sort rather than cycling it -- mirroring `o` and `O`.
     ///
@@ -1345,6 +1420,28 @@ impl App {
 
     pub fn is_modal(&self) -> bool {
         !matches!(self.mode, Mode::Normal | Mode::Search)
+    }
+
+    /// `y`. With nothing selected there is nothing to choose from, so it says
+    /// so rather than opening a chooser whose every answer would be empty.
+    pub fn open_copy_picker(&mut self) {
+        if self.selected_task().is_none() {
+            self.status = "nothing selected to copy".into();
+            return;
+        }
+        self.mode = Mode::CopyPicker;
+    }
+
+    /// Asks the event loop to put `field` of the selected task on the
+    /// clipboard. The status says what was *sent*: neither transport can
+    /// report whether the terminal accepted it.
+    pub fn copy(&mut self, field: CopyField) {
+        if self.selected_task().is_none() {
+            self.status = "nothing selected to copy".into();
+            return;
+        }
+        self.pending_copy = Some(field);
+        self.status = format!("copied {}", field.label());
     }
 
     /// Switches which store the task panes read, remembering where the cursor

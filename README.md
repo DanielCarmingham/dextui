@@ -238,9 +238,25 @@ Acting on the selected task:
 | `n` | new top-level task |
 | `a` | new subtask of the selection |
 | `d` | delete, with confirmation |
+| `y` | copy to the clipboard — then `i` id, `t` title, `d` description, `a` all |
 
 `a` means something different with the repo sidebar focused — see
 [Multiple repos](#multiple-repos).
+
+**Copying.** `y` asks what you want: the id or the title, bare, ready for a
+commit message; the description as stored, byte for byte, which is what `e`
+edits rather than what the pane shows; or `a`, the whole detail pane as plain
+text — status, priority, dates, relationships and the description together.
+In the detail pane you can also click the title, the `id` row, or anywhere in
+the description to copy that without the chooser.
+
+It works over SSH. The text is sent with the terminal's own clipboard escape
+(OSC 52), so it lands on the clipboard of the machine you are looking at, a
+phone included, and passes through tmux with its default `set-clipboard`
+setting. When a native tool is on `PATH` — `pbcopy`, `wl-copy`, `xclip` or
+`xsel` — the text goes there too, covering Terminal.app, which ignores the
+escape. Neither route can confirm receipt, so the status line says what was
+sent rather than claiming success.
 
 
 
