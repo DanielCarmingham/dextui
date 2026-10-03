@@ -14,6 +14,14 @@ dex is a CLI task tracker. It is excellent at *writing* tasks and at being drive
 by an agent, but reading a tree of them means running `dex list` again and again.
 dextui is the reading half: one screen, always current.
 
+> **Use the faster Rust Dex.** [dexrust](https://github.com/DanielCarmingham/dexrust)
+> is a drop-in Rust reimplementation of the JavaScript CLI, available as the
+> [`dexrust`](https://crates.io/crates/dexrust) Cargo package. It installs both
+> `dexrust` and a `dex` compatibility binary that dextui uses. It starts faster
+> and wraps every mutation in a locked, atomic transaction, so concurrent agents
+> cannot overwrite one another's changes. See [Install](#install) to add it
+> alongside dextui.
+
 It **refreshes itself** whenever the store changes — including when an agent edits
 tasks underneath you — without moving your selection, collapsing the tree, or
 interrupting a dialog you have open. That is the whole point of it, and the rule
@@ -21,12 +29,15 @@ the code is built around.
 
 ## Requirements
 
-- **[dex](https://dex.rip/)** on your `PATH`. Every read and write goes through
-  it, so its validation and any GitHub/Shortcut sync you have configured still
-  run. `dex --version` should print something.
-- **Rust 1.88 or newer**, but *only* if you build from source. The first three
-  install routes below are prebuilt binaries and need no toolchain at all.
-  `rustup` from [rustup.rs](https://rustup.rs) is the usual way in.
+- **A compatible `dex` on your `PATH`.** Use the original
+  [JavaScript CLI](https://dex.rip/) or the faster, concurrency-safe
+  [Rust reimplementation](https://github.com/DanielCarmingham/dexrust), published
+  as `dexrust`. Every read and write goes through it, so its validation and any
+  GitHub/Shortcut sync you have configured still run. `dex --version` should
+  print something.
+- **Rust 1.88 or newer**, but *only* if you build from source. Homebrew, the
+  one-line installer, and `cargo binstall` use prebuilt binaries and need no
+  toolchain. `rustup` from [rustup.rs](https://rustup.rs) is the usual way in.
 - **A real terminal.** Piping it somewhere gets you an explanation and exit 1.
   Use `dextui selftest` to see the data without one.
 - Optional: a [Nerd Font](https://www.nerdfonts.com/) if you want the fancier
@@ -34,15 +45,17 @@ the code is built around.
 
 ## Install
 
-macOS and Linux, on x86-64 and arm64. Every route below puts a `dextui` binary
-in `~/.cargo/bin`, so whichever you pick, that directory needs to be on your
-`PATH`.
+macOS and Linux, on x86-64 and arm64. Cargo and the one-line installer put
+`dextui` in `~/.cargo/bin`, which needs to be on your `PATH`; Homebrew uses its
+own binary directory.
 
 **Homebrew**
 
 ```bash
-brew install DanielCarmingham/tap/dextui
+brew install DanielCarmingham/tap/dextui DanielCarmingham/tap/dexrust
 ```
+
+Omit `dexrust` if you already have the JavaScript Dex installed.
 
 **One line, no package manager** — the shortest way onto a box you have only
 SSH'd into:
@@ -54,9 +67,18 @@ curl -LsSf https://github.com/DanielCarmingham/dextui/releases/latest/download/d
 **Cargo**, if you already have a Rust toolchain:
 
 ```bash
-cargo install dextui              # compiles it, a couple of minutes
-cargo binstall dextui             # or grab the same prebuilt binary, seconds
+cargo install dextui dexrust      # compile dextui and the Rust Dex
+cargo binstall dextui dexrust     # or grab both prebuilt
 ```
+
+Install only `dextui` if you already have a compatible `dex` on your `PATH`.
+Cargo cannot make one package install another package's executable as an optional
+side effect, so the two package names are explicit here.
+
+`dexrust` installs both `dex` (for compatibility) and `dexrust` (an unambiguous
+name for scripts). If the JavaScript CLI is already installed, which `dex` runs
+depends on your `PATH` order; `dex version` reports `dexrust v…` when the Rust
+implementation answered.
 
 **From source**, which is what you want if you are going to change it:
 
@@ -382,9 +404,9 @@ render into a pipe, a file, or a job with no terminal attached. `dextui selftest
 prints the same data as text.
 
 **"dex is required"** — every read and write goes through the dex CLI. If the
-message says dex *is* at a path but could not be started, dex itself is fine and
-its interpreter is not: dex is a Node script, and a node upgrade can move the
-runtime out from under it. Reinstalling dex under the current node fixes it.
+message says the JavaScript dex *is* at a path but could not be started, its Node
+interpreter may have moved during an upgrade. Reinstalling it under the current
+Node fixes that; installing `dexrust` instead avoids the Node runtime dependency.
 
 **Wrong tasks** — dex resolves its store from the working directory, and falls
 back to a *global* store outside a git repo. `dex dir` shows which one is in use.
