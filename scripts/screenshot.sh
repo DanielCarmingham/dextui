@@ -41,6 +41,12 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$REPO/docs/img/dextui-dark.gif}"
 ICONS="${DEXTUI_ICONS:-nerd}"
 SOCK="dextui-shot"
+# A private socket alone is not isolation: a new server still reads
+# ~/.tmux.conf, and tmux-continuum there restores every saved session into
+# it -- real shells, editors and agents -- the moment it starts. `-f
+# /dev/null` keeps the config out, and the unset `TMUX*` variables stop the
+# plugin manager and the parent session from reaching in.
+T=(env -u TMUX -u TMUX_PANE -u TMUX_PLUGIN_MANAGER_PATH tmux -L "$SOCK" -f /dev/null)
 # 116 is comfortably above `single_pane_below`, so the default shot shows the
 # split. Drop below that and the app draws one pane -- which is worth its own
 # picture rather than a paragraph.
@@ -89,7 +95,7 @@ SECOND="$BASE/repoB"
 SECOND_FEATURE="$BASE/repoB-feature"
 
 cleanup() {
-  tmux -L "$SOCK" kill-server 2>/dev/null
+  "${T[@]}" kill-server 2>/dev/null
   rm -rf "$BASE"
 }
 trap cleanup EXIT
@@ -132,7 +138,7 @@ git -C "$SECOND" worktree add -q "$SECOND_FEATURE" -b feature >/dev/null 2>&1 ||
 mkdir -p "$CONFIG_HOME/dextui"
 printf 'repos = ["%s"]\n' "$SECOND" > "$CONFIG_HOME/dextui/repos.toml"
 
-tmux -L "$SOCK" kill-server 2>/dev/null
+"${T[@]}" kill-server 2>/dev/null
 sleep 0.3
 # `env` here, not `tmux -e`: tmux's session environment is set before the pane's
 # shell starts, and this machine's .zshenv unconditionally re-exports
@@ -142,18 +148,18 @@ sleep 0.3
 # rendered the real, current ~/.config/dextui/repos.toml into the picture.
 # `env` sets these immediately adjacent to the exec of dextui itself, which no
 # intervening shell startup file can get between.
-tmux -L "$SOCK" new-session -d -s shot -x "$COLS" -y "$ROWS" -c "$DEMO" \
+"${T[@]}" new-session -d -s shot -x "$COLS" -y "$ROWS" -c "$DEMO" \
   env DEXTUI_ICONS="$ICONS" XDG_CONFIG_HOME="$CONFIG_HOME" XDG_STATE_HOME="$STATE_HOME" \
   "$REPO/target/debug/dextui"
 sleep 3
 
 # Select the root so the detail pane has something substantial to show, and so
 # the selection gutter appears on a row that also carries a meter.
-tmux -L "$SOCK" send-keys -t shot Down
+"${T[@]}" send-keys -t shot Down
 sleep 1
 
 for k in $KEYS; do
-  tmux -L "$SOCK" send-keys -t shot "$k"
+  "${T[@]}" send-keys -t shot "$k"
   sleep 1
 done
 
@@ -163,12 +169,12 @@ case "$OUT" in
     # screenshot.py. printf, not echo, since a pane's own output must not be
     # interpreted on the way through.
     for _ in $(seq "$SHOTS"); do
-      tmux -L "$SOCK" capture-pane -t shot -p -e
+      "${T[@]}" capture-pane -t shot -p -e
       printf '\f'
       sleep "$GAP"
     done | python3 "$REPO/scripts/screenshot.py" "$OUT"
     ;;
   *)
-    tmux -L "$SOCK" capture-pane -t shot -p -e | python3 "$REPO/scripts/screenshot.py" "$OUT"
+    "${T[@]}" capture-pane -t shot -p -e | python3 "$REPO/scripts/screenshot.py" "$OUT"
     ;;
 esac

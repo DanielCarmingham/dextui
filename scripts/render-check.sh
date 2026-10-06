@@ -30,6 +30,12 @@ set -uo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$REPO/target/debug/dextui"
 SOCK="dextui-render"
+# A private socket alone is not isolation: a new server still reads
+# ~/.tmux.conf, and tmux-continuum there restores every saved session into
+# it -- real shells, editors and agents -- the moment it starts. `-f
+# /dev/null` keeps the config out, and the unset `TMUX*` variables stop the
+# plugin manager and the parent session from reaching in.
+T=(env -u TMUX -u TMUX_PANE -u TMUX_PLUGIN_MANAGER_PATH tmux -L "$SOCK" -f /dev/null)
 SESSION="render"
 WORKDIR="${DEXTUI_RENDER_CWD:-$PWD}"
 # The size is worth reaching: most of what this app gets wrong, it gets wrong
@@ -43,20 +49,20 @@ if [ ! -x "$APP" ]; then
   exit 1
 fi
 
-cleanup() { tmux -L "$SOCK" kill-server 2>/dev/null; }
+cleanup() { "${T[@]}" kill-server 2>/dev/null; }
 trap cleanup EXIT
 
-tmux -L "$SOCK" kill-server 2>/dev/null
+"${T[@]}" kill-server 2>/dev/null
 sleep 0.3
 
-tmux -L "$SOCK" new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" -c "$WORKDIR" "$APP"
+"${T[@]}" new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" -c "$WORKDIR" "$APP"
 sleep 3
 
 for k in $KEYS; do
-  tmux -L "$SOCK" send-keys -t "$SESSION" "$k"
+  "${T[@]}" send-keys -t "$SESSION" "$k"
   sleep 1
 done
 
 [ -n "$KEYS" ] && sleep 1
 
-tmux -L "$SOCK" capture-pane -t "$SESSION" -p
+"${T[@]}" capture-pane -t "$SESSION" -p
