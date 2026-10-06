@@ -1313,6 +1313,8 @@ enum Action {
     DeleteTask,
     /// `y` -- open the clipboard chooser for the selection.
     Copy,
+    /// `B` -- select the first task blocking the selection.
+    JumpToBlocker,
 }
 
 /// One key, and what it does.
@@ -1433,6 +1435,7 @@ const BINDINGS: &[Binding] = &[
     Binding { code: KeyCode::Char('e'), mods: KeyModifiers::NONE, action: Action::EditDescription },
     Binding { code: KeyCode::Char('d'), mods: KeyModifiers::NONE, action: Action::DeleteTask },
     Binding { code: KeyCode::Char('y'), mods: KeyModifiers::NONE, action: Action::Copy },
+    Binding { code: KeyCode::Char('B'), mods: KeyModifiers::NONE, action: Action::JumpToBlocker },
 
     // Acting on a repo. `A` saves one you are *not* in, by path; `a` saves the
     // one you are, which is the common case and worth the unshifted key. `D`
@@ -1700,6 +1703,7 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
         Action::Help => app.open_help(),
         Action::EditConfig => app.pending_config_edit = true,
         Action::Copy => app.open_copy_picker(),
+        Action::JumpToBlocker => app.jump_to_blocker(),
 
         Action::NewTask => {
             app.mode = Mode::Prompt(Prompt {
@@ -2322,6 +2326,30 @@ mod tests {
         assert!(matches!(app.mode, Mode::Normal), "esc cancels");
         assert_eq!(app.pending_copy, None, "cancelling copies nothing");
         assert_eq!(app.status, "", "cancelling says nothing");
+    }
+
+    /// `B` reaches the blocker from the keyboard, and `b` is still the
+    /// sidebar toggle it always was: the two differ by case alone.
+    #[test]
+    fn shift_b_jumps_to_the_blocker_and_b_still_toggles_the_sidebar() {
+        let blocker = Task {
+            id: "x1".into(),
+            name: "The blocker".into(),
+            ..Default::default()
+        };
+        let mut app = copy_app();
+        app.by_id.get_mut("b4d5gfpl").unwrap().blocked_by = vec!["x1".into()];
+        app.tasks.push(blocker.clone());
+        app.by_id.insert("x1".into(), blocker);
+        app.rebuild();
+
+        let before = app.repos_visible;
+        press(&mut app, KeyCode::Char('B'));
+        assert_eq!(app.selected.as_deref(), Some("x1"));
+        assert_eq!(app.repos_visible, before, "B must not toggle the sidebar");
+
+        press(&mut app, KeyCode::Char('b'));
+        assert_ne!(app.repos_visible, before, "b still toggles the sidebar");
     }
 
     /// With nothing selected every answer would be empty, so `y` says so

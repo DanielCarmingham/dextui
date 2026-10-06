@@ -1601,6 +1601,22 @@ a label and does nothing — never on the wrong field. Cleared whenever the
 detail pane is not drawn or has no task, since a stale zone is an invisible
 click target.
 
+## Jumping to a related task
+
+The `parent`, `blocked` and `blocks` rows are `push_link` lines -- one task
+per line, name then dimmed id -- and each is a `DetailZone::Jump` in the same
+zone list the copy targets use, so a click there goes to `App::jump_to`
+rather than `copy`. `B` is the keyboard route, to the first blocker only.
+
+**`jump_to` makes the target visible before selecting it**, in increasing
+order of disruption: expand its ancestors; if the search still hides it,
+clear the search; if the status filter still hides it, widen to `all`. Each
+step taken is named in the status (`jumped to X (search cleared, filter →
+all)`). The alternative -- select and let `rebuild` repair it -- silently
+moves the selection to the first visible row, which is the one outcome worse
+than refusing. A blocker id the store no longer has (dex never clears
+`blockedBy`) is reported and nothing moves.
+
 ## Sorting
 
 `o` cycles the order, `O` reverses it, and the current one shows in the header.

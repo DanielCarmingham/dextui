@@ -13,7 +13,7 @@ use ratatui::widgets::{
     ScrollbarState, Wrap,
 };
 
-use crate::app::{App, CopyField, Counts, Focus, HeaderZone, Mode, Panes};
+use crate::app::{App, CopyField, Counts, DetailZone, Focus, HeaderZone, Mode, Panes};
 
 /// Colour is used only where it carries meaning. Everything else is left to the
 /// terminal, so the app inherits whatever scheme the user runs -- including a
@@ -1602,13 +1602,45 @@ fn since(age: &str) -> String {
     }
 }
 
-/// The detail pane's lines, plus where the copyable fields start in them.
+/// The detail pane's lines, plus where the clickable rows are in them.
 struct Detail<'a> {
     lines: Vec<Line<'a>>,
     /// Index of the `id` row. The title is always line 0.
     id: usize,
     /// Index of the description's first line, when there is one.
     description: Option<usize>,
+    /// Lines that name another task, and which one.
+    jumps: Vec<(usize, String)>,
+}
+
+fn push_field(lines: &mut Vec<Line<'_>>, k: &str, v: String, style: Style) {
+    lines.push(Line::from(vec![
+        Span::styled(format!("{k:<10}"), Style::default().fg(DIM)),
+        Span::styled(v, style),
+    ]));
+}
+
+/// A row naming another task: its name, then its id dimmed, so the id is
+/// there to read or copy and the row is a click target for `jump_to`.
+fn push_link<'a>(
+    detail_lines: &mut Vec<Line<'a>>,
+    jumps: &mut Vec<(usize, String)>,
+    label: &str,
+    task: Option<&'a Task>,
+    id: &str,
+    style: Style,
+) {
+    jumps.push((detail_lines.len(), id.to_string()));
+    let mut spans = vec![Span::styled(format!("{label:<10}"), Style::default().fg(DIM))];
+    match task {
+        Some(t) => {
+            spans.push(Span::styled(t.name.clone(), style));
+            spans.push(Span::styled(format!("  {id}"), Style::default().fg(DIM)));
+        }
+        // A blocker the store no longer has: the id is all there is to say.
+        None => spans.push(Span::styled(id.to_string(), style)),
+    }
+    detail_lines.push(Line::from(spans));
 }
 
 /// Screen rows of the title, the `id` row and the description, for a click
@@ -1624,7 +1656,7 @@ fn detail_zones(
     area: Rect,
     scroll: u16,
     wrap: bool,
-) -> Vec<(u16, u16, CopyField)> {
+) -> Vec<(u16, u16, DetailZone)> {
     let inner_w = area.width.saturating_sub(2);
     let inner_h = area.height.saturating_sub(2);
     let rows = |w: u16| -> u16 {
@@ -1653,15 +1685,18 @@ fn detail_zones(
     };
 
     let mut zones = Vec::new();
-    let mut push = |line: usize, to: usize, field: CopyField| {
+    let mut push = |line: usize, to: usize, zone: DetailZone| {
         if let Some((a, b)) = on_screen(starts[line], starts[to]) {
-            zones.push((a, b, field));
+            zones.push((a, b, zone));
         }
     };
-    push(0, 1, CopyField::Title);
-    push(detail.id, detail.id + 1, CopyField::Id);
+    push(0, 1, DetailZone::Copy(CopyField::Title));
+    push(detail.id, detail.id + 1, DetailZone::Copy(CopyField::Id));
+    for (line, id) in &detail.jumps {
+        push(*line, line + 1, DetailZone::Jump(id.clone()));
+    }
     if let Some(d) = detail.description {
-        push(d, widths.len(), CopyField::Description);
+        push(d, widths.len(), DetailZone::Copy(CopyField::Description));
     }
     zones
 }
@@ -1734,47 +1769,33 @@ fn detail_layout<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Detail<'a> {
     lines.push(Line::from(""));
 
     let id_line = lines.len();
-    let mut field = |k: &str, v: String, style: Style| {
-        lines.push(Line::from(vec![
-            Span::styled(format!("{k:<10}"), Style::default().fg(DIM)),
-            Span::styled(v, style),
-        ]));
-    };
+    let mut jumps = Vec::new();
 
-    field("id", t.id.clone(), Style::default().fg(DIM));
+    push_field(&mut lines, "id", t.id.clone(), Style::default().fg(DIM));
 
-    if let Some(parent) = t.parent_id.as_ref().and_then(|id| app.by_id.get(id)) {
-        field("parent", parent.name.clone(), Style::default().fg(PLAIN));
+    if let Some(pid) = t.parent_id.as_ref()
+        && let Some(parent) = app.by_id.get(pid)
+    {
+        push_link(&mut lines, &mut jumps, "parent", Some(parent), pid, Style::default().fg(PLAIN));
     }
 
+    // One task per line, so each is its own click target; the label is on
+    // the first line only, which keeps the column reading as one field.
+    let mut links = |lines: &mut Vec<Line<'a>>, label: &str, ids: &'a [String], style: Style| {
+        for (i, id) in ids.iter().enumerate() {
+            let label = if i == 0 { label } else { "" };
+            push_link(lines, &mut jumps, label, app.by_id.get(id), id, style);
+        }
+    };
+
     if dex::is_blocked(t, &app.by_id) {
-        let names: Vec<String> = t
-            .blocked_by
-            .iter()
-            .map(|id| {
-                app.by_id
-                    .get(id)
-                    .map(|b| b.name.clone())
-                    .unwrap_or_else(|| id.clone())
-            })
-            .collect();
-        field("blocked", names.join(", "), Style::default().fg(BLOCKED));
+        links(&mut lines, "blocked", &t.blocked_by, Style::default().fg(BLOCKED));
     }
 
     // The reverse relationship. A task holding up three others is a priority
     // signal that `blocked by` alone cannot show.
     if !t.blocks.is_empty() {
-        let names: Vec<String> = t
-            .blocks
-            .iter()
-            .map(|id| {
-                app.by_id
-                    .get(id)
-                    .map(|b| b.name.clone())
-                    .unwrap_or_else(|| id.clone())
-            })
-            .collect();
-        field("blocks", names.join(", "), Style::default().fg(ACTIVE));
+        links(&mut lines, "blocks", &t.blocks, Style::default().fg(ACTIVE));
     }
 
     // Absolute date plus relative age: one for the record, one for the feel.
@@ -1783,16 +1804,16 @@ fn detail_layout<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Detail<'a> {
         None => local_time(iso),
     };
 
-    field("created", stamp(&t.created_at), Style::default().fg(PLAIN));
+    push_field(&mut lines, "created", stamp(&t.created_at), Style::default().fg(PLAIN));
     if t.started_at.is_some() {
-        field("started", stamp(&t.started_at), Style::default().fg(ACTIVE));
+        push_field(&mut lines, "started", stamp(&t.started_at), Style::default().fg(ACTIVE));
     }
     if t.completed_at.is_some() {
-        field("done", stamp(&t.completed_at), Style::default().fg(DONE));
+        push_field(&mut lines, "done", stamp(&t.completed_at), Style::default().fg(DONE));
     }
     // Only when it is not just an echo of created/started/done.
     if t.has_distinct_update() {
-        field("updated", stamp(&t.updated_at), Style::default().fg(DIM));
+        push_field(&mut lines, "updated", stamp(&t.updated_at), Style::default().fg(DIM));
     }
 
     // Linked via `dex complete --commit <sha>`. Entirely local -- no sync needed.
@@ -1836,6 +1857,7 @@ fn detail_layout<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Detail<'a> {
         lines,
         id: id_line,
         description,
+        jumps,
     }
 }
 
@@ -1959,6 +1981,8 @@ f / F      filter fwd / back ^R  refresh now
 - / +      collapse / expand all
 ^L         redraw the screen (if the terminal has corrupted it)
 y          copy to the clipboard: i id, t title, d description, a all
+B          jump to the task blocking this one (click a blocked / blocks /
+           parent row in the detail pane to jump to any of them)
 
 In the repo sidebar these keys act on repos, not on tasks:
 1          focus repos       b   show / hide the sidebar
@@ -2631,6 +2655,10 @@ mod tests {
         assert!(
             HELP.contains("y          copy to the clipboard: i id, t title, d description, a all"),
             "help: y copies, and names the chooser keys"
+        );
+        assert!(
+            HELP.contains("B          jump to the task blocking this one"),
+            "help: B jumps to the blocker"
         );
         assert!(!HELP.contains("z Z"), "the old collapse keys are gone");
 
@@ -4423,16 +4451,17 @@ mod tests {
             assert!(title < id && id < body, "wrap={wrap}: fixture rows {title} {id} {body}");
 
             for (row, want) in [
-                (title, Some(CopyField::Title)),
-                (id, Some(CopyField::Id)),
-                (body, Some(CopyField::Description)),
+                (title, Some(DetailZone::Copy(CopyField::Title))),
+                (id, Some(DetailZone::Copy(CopyField::Id))),
+                (body, Some(DetailZone::Copy(CopyField::Description))),
                 (title + 1, None),
                 (id - 1, None),
             ] {
                 app.pending_copy = None;
                 let acted = app.click_detail(row);
                 assert_eq!(
-                    app.pending_copy, want,
+                    app.pending_copy.map(DetailZone::Copy),
+                    want,
                     "wrap={wrap}: click on row {row} (title {title}, id {id}, body {body})"
                 );
                 assert_eq!(acted, want.is_some(), "wrap={wrap}: row {row} reported wrongly");
@@ -4468,7 +4497,7 @@ mod tests {
         let last_body_row = app.body_bottom - 2;
         assert_eq!(
             app.detail_zone_at(last_body_row),
-            Some(CopyField::Description),
+            Some(DetailZone::Copy(CopyField::Description)),
             "the description reaches the pane's last row"
         );
         assert_eq!(app.detail_zone_at(app.body_bottom - 1), None, "not the border");
@@ -4477,12 +4506,12 @@ mod tests {
         let scrolled = render(&mut app);
         let id = row_of(&scrolled, "id        b4d5gfpl");
         assert!(id < row_of(&buf, "id        b4d5gfpl"), "the id row moved up");
-        assert_eq!(app.detail_zone_at(id), Some(CopyField::Id));
+        assert_eq!(app.detail_zone_at(id), Some(DetailZone::Copy(CopyField::Id)));
 
         app.scroll_detail(20, 0);
         render(&mut app);
         assert!(
-            app.detail_zones.iter().all(|(_, _, f)| *f == CopyField::Description),
+            app.detail_zones.iter().all(|(_, _, z)| *z == DetailZone::Copy(CopyField::Description)),
             "only the description is left once the header rows scroll off: {:?}",
             app.detail_zones
         );
@@ -4511,9 +4540,14 @@ mod tests {
 
         let id = row_of(&buf, "id        b4d5gfpl");
         assert!(id > app.body_top + 3, "the title did not wrap: id on row {id}");
-        assert_eq!(app.detail_zone_at(id), Some(CopyField::Id), "{:?}", app.detail_zones);
-        assert_eq!(app.detail_zone_at(app.body_top + 1), Some(CopyField::Title));
-        assert_eq!(app.detail_zone_at(app.body_top + 2), Some(CopyField::Title));
+        assert_eq!(
+            app.detail_zone_at(id),
+            Some(DetailZone::Copy(CopyField::Id)),
+            "{:?}",
+            app.detail_zones
+        );
+        assert_eq!(app.detail_zone_at(app.body_top + 1), Some(DetailZone::Copy(CopyField::Title)));
+        assert_eq!(app.detail_zone_at(app.body_top + 2), Some(DetailZone::Copy(CopyField::Title)));
     }
 
     /// Nothing selected, nothing to click: the zones are cleared, not left
@@ -4552,6 +4586,76 @@ mod tests {
             app.detail_zones.is_empty(),
             "zones survived the detail pane not being drawn"
         );
+    }
+
+    /// Every related task gets a line of its own carrying its name *and* its
+    /// id -- the id is what you paste into `dex`, and one task per line is
+    /// what makes each a click target. A blocker the store no longer has
+    /// shows its bare id rather than vanishing.
+    #[test]
+    fn relationship_rows_name_one_task_per_line_with_its_id() {
+        let mut blocked = task("b1", Some("p1"), "Blocked task");
+        blocked.blocked_by = vec!["x1".into(), "x2".into(), "gone".into()];
+        let mut x1 = task("x1", None, "First blocker");
+        x1.blocks = vec!["b1".into()];
+        let app = copy_app(
+            vec![
+                task("p1", None, "Parent task"),
+                blocked,
+                x1,
+                task("x2", None, "Second blocker"),
+            ],
+            "b1",
+        );
+        let text = copy_text(&app, CopyField::All, &crate::icons::UNICODE).unwrap();
+        for line in [
+            "parent    Parent task  p1",
+            "blocked   First blocker  x1",
+            "          Second blocker  x2",
+            "          gone",
+        ] {
+            assert!(text.contains(&format!("{line}\n")), "missing {line:?} in:\n{text}");
+        }
+
+        let mut app = app;
+        app.selected = Some("x1".into());
+        let text = copy_text(&app, CopyField::All, &crate::icons::UNICODE).unwrap();
+        assert!(text.contains("blocks    Blocked task  b1\n"), "{text}");
+    }
+
+    /// The click lands where the row was actually drawn, and the selection
+    /// moves to the task it names -- through a collapsed parent, which is
+    /// the common case for a blocker you have never looked at.
+    #[test]
+    fn clicking_a_blocker_row_selects_that_task() {
+        let mut blocked = task("b1", None, "Blocked task");
+        blocked.blocked_by = vec!["x1".into()];
+        let mut app = App::new(
+            vec![
+                blocked,
+                task("p1", None, "Parent task"),
+                task("x1", Some("p1"), "The blocker"),
+            ],
+            "demo".into(),
+            crate::config::Config::default(),
+        );
+        app.repos_pane_above = 0;
+        app.collapse_all();
+        app.rebuild();
+        app.selected = Some("b1".into());
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal
+            .draw(|f| draw(f, &mut app, &crate::icons::UNICODE))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let row = row_of(&buf, "blocked   The blocker  x1");
+        assert_eq!(app.detail_zone_at(row), Some(DetailZone::Jump("x1".into())));
+
+        assert!(app.click_detail(row));
+        assert_eq!(app.selected.as_deref(), Some("x1"));
+        assert!(app.row_ids().contains(&"x1".to_string()), "the jump target is drawn");
+        assert_eq!(app.pending_copy, None, "a jump is not a copy");
     }
 
     /// A dialog has to survive the layout it is drawn over, and the single-pane

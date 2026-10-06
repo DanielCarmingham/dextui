@@ -35,6 +35,12 @@ what happened the first time this was checked.
 
 ### Added
 
+- The detail pane's `parent`, `blocked` and `blocks` rows show each related
+  task's id beside its name, one task per line, and clicking a line selects
+  that task. `B` jumps to the first blocker from the keyboard. A target inside
+  a collapsed parent is opened; one hidden by the search or the status filter
+  has the search cleared or the filter widened to `all`, with the status line
+  saying so.
 - Copy to the clipboard. `y` opens a chooser for the selected task's id,
   title, description (as stored) or the whole detail pane as plain text, and
   clicking the title, the `id` row or the description in the detail pane

@@ -261,6 +261,7 @@ Acting on the selected task:
 | `a` | new subtask of the selection |
 | `d` | delete, with confirmation |
 | `y` | copy to the clipboard — then `i` id, `t` title, `d` description, `a` all |
+| `B` | jump to the task blocking this one |
 
 `a` means something different with the repo sidebar focused — see
 [Multiple repos](#multiple-repos).
@@ -271,6 +272,13 @@ edits rather than what the pane shows; or `a`, the whole detail pane as plain
 text — status, priority, dates, relationships and the description together.
 In the detail pane you can also click the title, the `id` row, or anywhere in
 the description to copy that without the chooser.
+
+**Following relationships.** The `parent`, `blocked` and `blocks` rows of the
+detail pane name each related task with its id, one per line. Click a line to
+select that task, or press `B` to go to the first blocker. If the target is
+inside a collapsed parent it is opened; if the search or the status filter
+hides it, the search is cleared or the filter widened to `all`, and the status
+line says which.
 
 It works over SSH. The text is sent with the terminal's own clipboard escape
 (OSC 52), so it lands on the clipboard of the machine you are looking at, a

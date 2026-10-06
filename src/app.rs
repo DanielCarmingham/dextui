@@ -156,6 +156,15 @@ impl CopyField {
     }
 }
 
+/// What a click on a detail-pane row does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetailZone {
+    Copy(CopyField),
+    /// Select the task with this id -- a parent, a blocker, or a task this
+    /// one holds up.
+    Jump(String),
+}
+
 /// Which pane the movement keys drive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -357,7 +366,7 @@ pub struct App {
     /// Clickable fields of the detail pane, as `(first_row, last_row, what)`
     /// in screen rows. Rewritten every frame the pane draws a task and empty
     /// otherwise, so a stale zone can never be an invisible click target.
-    pub detail_zones: Vec<(u16, u16, CopyField)>,
+    pub detail_zones: Vec<(u16, u16, DetailZone)>,
     /// Which worktree's store the task tree is showing.
     pub selected_worktree: Option<String>,
     /// Task selection per worktree path, so switching back returns the cursor.
@@ -994,22 +1003,77 @@ impl App {
     }
 
     /// What field of the detail pane sits on `row`, if any.
-    pub fn detail_zone_at(&self, row: u16) -> Option<CopyField> {
+    pub fn detail_zone_at(&self, row: u16) -> Option<DetailZone> {
         self.detail_zones
             .iter()
             .find(|(from, to, _)| row >= *from && row <= *to)
-            .map(|(_, _, f)| *f)
+            .map(|(_, _, z)| z.clone())
     }
 
-    /// A left-click in the detail pane: copies the field under the pointer.
-    /// Returns whether one was there; a click on a blank row or a label
-    /// changes nothing beyond the focus the caller already moved.
+    /// A left-click in the detail pane: copies the field under the pointer,
+    /// or jumps to the task a relationship row names. Returns whether a zone
+    /// was there; a click on a blank row or a label changes nothing beyond
+    /// the focus the caller already moved.
     pub fn click_detail(&mut self, row: u16) -> bool {
-        let Some(field) = self.detail_zone_at(row) else {
-            return false;
-        };
-        self.copy(field);
+        match self.detail_zone_at(row) {
+            Some(DetailZone::Copy(field)) => self.copy(field),
+            Some(DetailZone::Jump(id)) => self.jump_to(&id),
+            None => return false,
+        }
         true
+    }
+
+    /// Selects `id`, making it visible first: ancestors are expanded, and if
+    /// the search or the status filter still hides it, the search is cleared
+    /// and then the filter widened to `all`, each step reported in the
+    /// status. Moving the selection onto a row that is not drawn is the one
+    /// thing worse than refusing the jump.
+    pub fn jump_to(&mut self, id: &str) {
+        let Some(target) = self.by_id.get(id) else {
+            self.status = format!("{id} is not in this store");
+            return;
+        };
+        let name = target.name.clone();
+
+        let mut parent = target.parent_id.clone();
+        // Bounded by the task count so a cycle in a hand-edited store ends.
+        for _ in 0..self.by_id.len() {
+            let Some(pid) = parent else { break };
+            self.expanded.insert(pid.clone());
+            parent = self.by_id.get(&pid).and_then(|t| t.parent_id.clone());
+        }
+
+        let mut how = Vec::new();
+        if !self.visible_ids().contains(id) && !self.query.value.is_empty() {
+            self.query = TextInput::default();
+            self.rebuild();
+            how.push("search cleared");
+        }
+        if !self.visible_ids().contains(id) {
+            self.filter = Filter::All;
+            self.rebuild();
+            how.push("filter \u{2192} all");
+        }
+
+        self.select(Some(id.to_string()));
+        self.status = if how.is_empty() {
+            format!("jumped to {name}")
+        } else {
+            format!("jumped to {name} ({})", how.join(", "))
+        };
+    }
+
+    /// `B`: the first blocker of the selected task that exists in the store.
+    pub fn jump_to_blocker(&mut self) {
+        let Some(t) = self.selected_task() else {
+            self.status = "nothing selected".into();
+            return;
+        };
+        let blocker = t.blocked_by.iter().find(|b| self.by_id.contains_key(*b)).cloned();
+        match blocker {
+            Some(id) => self.jump_to(&id),
+            None => self.status = format!("{} is not blocked by anything", t.name),
+        }
     }
 
     /// Acts on a header click. `secondary` is the right button, which reverses
@@ -1870,6 +1934,106 @@ mod tests {
 
     fn counted(tasks: Vec<Task>) -> App {
         App::new(tasks, "demo".into(), Config::default())
+    }
+
+    fn jump_fixture() -> App {
+        // `blocked` is held up by `blocker`, a grandchild of `root` two
+        // collapsed levels down; `finished` is done, so only `all` shows it.
+        let mut blocked = task("blocked", None, &[]);
+        blocked.blocked_by = vec!["blocker".into(), "finished".into()];
+        let mut finished = task("finished", None, &[]);
+        finished.completed = true;
+        finished.completed_at = Some("2026-01-02T00:00:00Z".into());
+        let mut app = counted(vec![
+            blocked,
+            task("root", None, &["mid"]),
+            task("mid", Some("root"), &["blocker"]),
+            task("blocker", Some("mid"), &[]),
+            finished,
+        ]);
+        app.collapse_all();
+        app.selected = Some("blocked".into());
+        app
+    }
+
+    /// A blocker two collapsed levels down is reachable in one jump: the
+    /// ancestors open, the selection lands on it, and it is drawn -- a
+    /// selection on a row that is not on screen is the fault this guards.
+    #[test]
+    fn jumping_to_a_collapsed_descendant_opens_the_way_to_it() {
+        let mut app = jump_fixture();
+        assert!(!app.row_ids().contains(&"blocker".to_string()), "fixture: hidden first");
+
+        app.jump_to("blocker");
+        assert_eq!(app.selected.as_deref(), Some("blocker"));
+        assert!(app.row_ids().contains(&"blocker".to_string()), "not drawn after the jump");
+        assert!(app.expanded.contains("root") && app.expanded.contains("mid"));
+        assert_eq!(app.status, "jumped to blocker");
+        assert_eq!(app.filter, Filter::Pending, "the filter was fine and stays");
+    }
+
+    /// The status filter hides a completed blocker; the jump widens it and
+    /// says so rather than failing or selecting an invisible row.
+    #[test]
+    fn jumping_past_the_filter_widens_it_and_says_so() {
+        let mut app = jump_fixture();
+        app.jump_to("finished");
+        assert_eq!(app.selected.as_deref(), Some("finished"));
+        assert_eq!(app.filter, Filter::All);
+        assert!(app.row_ids().contains(&"finished".to_string()));
+        assert_eq!(app.status, "jumped to finished (filter \u{2192} all)");
+    }
+
+    /// A live search narrows the tree too. Clearing it is the smaller
+    /// change, so it is tried first and the filter only widened if that was
+    /// not enough.
+    #[test]
+    fn jumping_past_a_search_clears_it_first() {
+        let mut app = jump_fixture();
+        app.query.value = "zzz".into();
+        app.rebuild();
+        assert!(app.row_ids().is_empty(), "fixture: the search hides everything");
+
+        app.jump_to("blocker");
+        assert_eq!(app.selected.as_deref(), Some("blocker"));
+        assert!(app.query.value.is_empty());
+        assert_eq!(app.filter, Filter::Pending, "clearing the search was enough");
+        assert_eq!(app.status, "jumped to blocker (search cleared)");
+
+        let mut app = jump_fixture();
+        app.query.value = "zzz".into();
+        app.rebuild();
+        app.jump_to("finished");
+        assert_eq!(app.status, "jumped to finished (search cleared, filter \u{2192} all)");
+    }
+
+    /// `blockedBy` is never cleared by dex, so a deleted blocker can linger
+    /// in it. That is a dead link, and it must say so without moving.
+    #[test]
+    fn jumping_to_an_id_the_store_lacks_moves_nothing() {
+        let mut app = jump_fixture();
+        app.jump_to("gone");
+        assert_eq!(app.selected.as_deref(), Some("blocked"));
+        assert_eq!(app.status, "gone is not in this store");
+    }
+
+    /// `B` takes the first blocker that exists; a task with none says so.
+    #[test]
+    fn b_jumps_to_the_first_live_blocker_or_explains() {
+        let mut app = jump_fixture();
+        app.jump_to_blocker();
+        assert_eq!(app.selected.as_deref(), Some("blocker"));
+
+        app.selected = Some("root".into());
+        app.jump_to_blocker();
+        assert_eq!(app.selected.as_deref(), Some("root"));
+        assert_eq!(app.status, "root is not blocked by anything");
+
+        let mut app = jump_fixture();
+        app.by_id.get_mut("blocked").unwrap().blocked_by = vec!["gone".into()];
+        app.jump_to_blocker();
+        assert_eq!(app.selected.as_deref(), Some("blocked"));
+        assert_eq!(app.status, "blocked is not blocked by anything");
     }
 
     /// Cycling through a filter that matches nothing used to strand the app:
