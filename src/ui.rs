@@ -1714,10 +1714,7 @@ fn detail_layout<'a>(t: &'a Task, app: &'a App, ic: &Icons) -> Detail<'a> {
             t.name.clone(),
             Style::default().fg(PLAIN).add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::styled(
-            "─".repeat(t.name.chars().count().clamp(8, 60)),
-            Style::default().fg(DIM),
-        )),
+        Line::default(),
     ];
 
     // One status line reads faster than three separate label/value rows.

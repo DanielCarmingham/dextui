@@ -57,6 +57,9 @@ what happened the first time this was checked.
 
 ### Changed
 
+- The detail pane's title is no longer underlined. The rule was sized to the
+  title rather than the pane, so a long title wrapped it onto a second row of
+  dashes; a blank line separates the title instead.
 - The help dialog keeps a blank row and two cells of space between its
   border and the text, at every scroll position, instead of pressing the
   text against the frame.
