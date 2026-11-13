@@ -1979,6 +1979,7 @@ o / O      sort / reverse    a   new subtask of selection
 f / F      filter fwd / back ^R  refresh now
 ,          edit config       q   quit
 - / +      collapse / expand all
+S          un-start: put an in-progress task back to pending
 ^L         redraw the screen (if the terminal has corrupted it)
 y          copy to the clipboard: i id, t title, d description, a all
 B          jump to the task blocking this one (click a blocked / blocks /

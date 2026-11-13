@@ -1307,6 +1307,7 @@ enum Action {
     Forget,
     SaveRepoByPath,
     StartTask,
+    UnstartTask,
     CompleteTask,
     RenameTask,
     EditDescription,
@@ -1425,6 +1426,9 @@ const BINDINGS: &[Binding] = &[
     Binding { code: KeyCode::Char('n'), mods: KeyModifiers::NONE, action: Action::NewTask },
     Binding { code: KeyCode::Char('a'), mods: KeyModifiers::NONE, action: Action::Add },
     Binding { code: KeyCode::Char('s'), mods: KeyModifiers::NONE, action: Action::StartTask },
+    // A separate key rather than `s` toggling: a second press of `s`, or one on
+    // a task an agent started a moment ago, would silently drop the claim.
+    Binding { code: KeyCode::Char('S'), mods: KeyModifiers::NONE, action: Action::UnstartTask },
     Binding { code: KeyCode::Char('c'), mods: KeyModifiers::NONE, action: Action::CompleteTask },
     // `r` for rename and `e` for edit, rather than `e`/`E` for both. The app's
     // other case pairs are one action and its variant -- `o`/`O` sorts and
@@ -1765,6 +1769,20 @@ fn handle_normal(app: &mut App, key: KeyEvent, dex: &Arc<Dex>, tx: &Sender<Msg>)
                 act(dex, tx, format!("started {}", t.name), move |d| {
                     d.start(&id)
                 });
+            }
+        }
+        Action::UnstartTask => {
+            if let Some(t) = selected {
+                // Clearing `started_at` on a finished task would leave it
+                // completed with no start, which is nothing anyone asked for.
+                if dex::status(&t, &app.by_id) == dex::Status::InProgress {
+                    let id = t.id.clone();
+                    act(dex, tx, format!("un-started {}", t.name), move |d| {
+                        d.unstart(&id)
+                    });
+                } else {
+                    app.status = format!("{} is not in progress", t.name);
+                }
             }
         }
         Action::CompleteTask => {
@@ -2427,6 +2445,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `S` only ever undoes a start. On anything else it must say so and
+    /// spawn nothing -- `Dex::real()` here would run the real CLI if it did.
+    #[test]
+    fn un_start_refuses_a_task_that_is_not_in_progress() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dex = Arc::new(Dex::real());
+        let pending = Task {
+            id: "a".into(),
+            name: "write the docs".into(),
+            ..Default::default()
+        };
+        let mut app = App::new(vec![pending], "demo".into(), crate::config::Config::default());
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT),
+            &dex,
+            &tx,
+        );
+
+        assert_eq!(app.status, "write the docs is not in progress");
+        assert!(rx.try_recv().is_err(), "a write was started anyway");
     }
 
     /// The same defect, in the modes where `Char(c)` is *text* rather than a

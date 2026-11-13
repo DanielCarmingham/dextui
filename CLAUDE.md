@@ -150,6 +150,15 @@ These were all discovered the hard way; do not re-derive them.
 - **`dex complete` requires `--commit` or `--no-commit`** for tasks synced to
   GitHub/Shortcut, and refuses outright when subtasks are incomplete. We always
   send `--no-commit`, and offer a force retry when the error mentions subtasks.
+- **The CLI cannot un-start a task; only `dex mcp` can.** There is no verb or
+  `dex edit` flag that clears `started_at`, in dexrust or the Node dex. The MCP
+  server's `update_task` takes `started_at: null`, so `Dex::unstart` is the one
+  write that pipes JSON-RPC into `dex mcp` (through `Runner::converse`) rather
+  than passing argv. Two things about the reply: a tool failure arrives as a
+  JSON-RPC *success* flagged `isError`, so "got a reply" is not "it worked";
+  and `converse` kills the server once the reply lands instead of waiting for
+  it to exit, because only dexrust's server was ever run — the Node one was
+  read from source, and whether it exits on a closed stdin is unknown.
 - **Task ids are short slugs** (`b4d5gfpl`), not integers. Never assume ordering
   from them — `dex list --json` is sorted by id, which is meaningless to a reader,
   so `tree::build` re-sorts by priority, then creation time, then name.

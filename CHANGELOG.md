@@ -35,6 +35,11 @@ what happened the first time this was checked.
 
 ### Added
 
+- `S` un-starts a task: an in-progress task goes back to pending, for when
+  `s` was pressed on the wrong row. It does nothing to a task that is not in
+  progress. dex has no command for this, so it is sent through dex's own MCP
+  server (`dex mcp`); verified against dexrust 0.2.1, and not yet run against
+  the Node dex.
 - The detail pane's `parent`, `blocked` and `blocks` rows show each related
   task's id beside its name, one task per line, and clicking a line selects
   that task. `B` jumps to the first blocker from the keyboard. A target inside

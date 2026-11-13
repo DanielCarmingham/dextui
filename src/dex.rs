@@ -4,9 +4,14 @@
 //! directly, so dex's own validation and its GitHub/Shortcut sync hooks always run.
 
 use std::collections::HashMap;
-use std::process::Command;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
+use serde_json::{Value, json};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -220,28 +225,103 @@ impl Output {
 /// Seam so the argv built for every verb can be asserted without running dex.
 pub trait Runner: Send + Sync {
     fn run(&self, args: &[String]) -> Result<Output, String>;
+
+    /// Feeds `stdin` to dex and returns its stdout up to and including the
+    /// first line `done` accepts -- or all of it, if no line is accepted.
+    fn converse(
+        &self,
+        args: &[String],
+        stdin: &str,
+        done: fn(&str) -> bool,
+    ) -> Result<Output, String>;
 }
 
 pub struct ProcessRunner;
+
+/// How long `converse` waits for the line it was asked for. Generous because
+/// dex runs its GitHub/Shortcut sync hook before it answers a write.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+
+// Distinguished because the remedies differ: one is "install it", the other is
+// "it is installed and cannot start".
+fn spawn_error(e: std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        why_not_found(&std::env::var("PATH").unwrap_or_default())
+    } else {
+        format!("could not run `dex`: {e}")
+    }
+}
 
 impl Runner for ProcessRunner {
     fn run(&self, args: &[String]) -> Result<Output, String> {
         // `.args()` passes argv straight through with no shell involved, so task
         // names containing quotes, ampersands or newlines survive verbatim.
-        let out = Command::new("dex").args(args).output().map_err(|e| {
-            // Distinguished because the remedies differ: one is "install it",
-            // the other is "it is installed and cannot start".
-            if e.kind() == std::io::ErrorKind::NotFound {
-                why_not_found(&std::env::var("PATH").unwrap_or_default())
-            } else {
-                format!("could not run `dex`: {e}")
-            }
-        })?;
+        let out = Command::new("dex").args(args).output().map_err(spawn_error)?;
 
         Ok(Output {
             code: out.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+
+    fn converse(
+        &self,
+        args: &[String],
+        stdin: &str,
+        done: fn(&str) -> bool,
+    ) -> Result<Output, String> {
+        let mut child = Command::new("dex")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(spawn_error)?;
+
+        // A dex that died before reading leaves a closed pipe. Its stderr says
+        // why, and the caller reports that rather than the EPIPE.
+        if let Some(mut pipe) = child.stdin.take() {
+            let _ = pipe.write_all(stdin.as_bytes());
+        }
+
+        let (tx, rx) = mpsc::channel();
+        if let Some(out) = child.stdout.take() {
+            thread::spawn(move || {
+                for line in BufReader::new(out).lines().map_while(Result::ok) {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+
+        let deadline = Instant::now() + REPLY_TIMEOUT;
+        let mut stdout = String::new();
+        while let Ok(line) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            let answered = done(&line);
+            stdout.push_str(&line);
+            stdout.push('\n');
+            if answered {
+                break;
+            }
+        }
+
+        // Killed rather than waited on. dexrust's server exits when stdin
+        // closes; whether the Node dex's does was never verified, and a server
+        // that stays up would hang this thread and leak a process per call.
+        // The reply is only written after the store is, so nothing is lost.
+        let _ = child.kill();
+        let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+        let mut stderr = Vec::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = pipe.read_to_end(&mut stderr);
+        }
+
+        Ok(Output {
+            code,
+            stdout,
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
         })
     }
 }
@@ -403,6 +483,71 @@ impl Dex {
         self.void(&self.argv(&[s("start"), s(id)]), "dex start")
     }
 
+    /// Puts an in-progress task back to pending.
+    ///
+    /// The dex CLI has no verb or flag that clears `started_at`; only its MCP
+    /// server's `update_task` does. So this is the one write that speaks
+    /// JSON-RPC to `dex mcp` on stdin instead of passing argv -- still dex's
+    /// own code doing the write, never `tasks.jsonl` directly.
+    pub fn unstart(&self, id: &str) -> Result<(), String> {
+        let messages = [
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "dextui", "version": env!("CARGO_PKG_VERSION")},
+                },
+            }),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            json!({
+                "jsonrpc": "2.0",
+                "id": UNSTART_CALL,
+                "method": "tools/call",
+                "params": {
+                    "name": "update_task",
+                    "arguments": {"id": id, "started_at": null},
+                },
+            }),
+        ];
+        let stdin: String = messages.iter().map(|m| format!("{m}\n")).collect();
+
+        let out = self
+            .runner
+            .converse(&self.argv(&[s("mcp")]), &stdin, |line| unstart_reply(line).is_some())?;
+        let Some(reply) = out.stdout.lines().find_map(unstart_reply) else {
+            let err = out.stderr.trim();
+            return Err(if err.is_empty() {
+                s("dex mcp did not answer the un-start request")
+            } else {
+                err.to_string()
+            });
+        };
+
+        if let Some(error) = reply.get("error") {
+            return Err(error["message"]
+                .as_str()
+                .unwrap_or("dex mcp rejected the un-start request")
+                .to_string());
+        }
+
+        // A tool failure is a *successful* JSON-RPC reply flagged `isError`,
+        // whose text is itself a JSON object carrying the message.
+        let result = &reply["result"];
+        if result["isError"] == true {
+            let text = result["content"][0]["text"]
+                .as_str()
+                .unwrap_or("dex refused the un-start");
+            let detail = serde_json::from_str::<Value>(text)
+                .ok()
+                .and_then(|body| body["error"].as_str().map(str::to_string));
+            return Err(detail.unwrap_or_else(|| text.to_string()));
+        }
+        Ok(())
+    }
+
     /// `--no-commit` is always sent: for tasks synced to GitHub, dex refuses to
     /// complete without either `--commit` or `--no-commit`, and a TUI has no way
     /// to answer that prompt. `force` bypasses the incomplete-subtask check.
@@ -460,6 +605,15 @@ impl Dex {
             Err(out.message(label))
         }
     }
+}
+
+/// The JSON-RPC id `Dex::unstart` gives its `tools/call`, and so the id of the
+/// only reply it cares about.
+const UNSTART_CALL: u64 = 2;
+
+fn unstart_reply(line: &str) -> Option<Value> {
+    let reply: Value = serde_json::from_str(line).ok()?;
+    (reply["id"] == UNSTART_CALL).then_some(reply)
 }
 
 /// Whether this is dex's shared fallback store rather than a project's own.
@@ -604,6 +758,7 @@ mod tests {
     #[derive(Clone)]
     struct Fake {
         calls: Arc<Mutex<Vec<Vec<String>>>>,
+        stdin: Arc<Mutex<String>>,
         out: Output,
     }
 
@@ -611,6 +766,7 @@ mod tests {
         fn new(stdout: &str, stderr: &str, code: i32) -> Self {
             Self {
                 calls: Arc::new(Mutex::new(Vec::new())),
+                stdin: Arc::new(Mutex::new(String::new())),
                 out: Output {
                     code,
                     stdout: stdout.to_string(),
@@ -627,6 +783,17 @@ mod tests {
     impl Runner for Fake {
         fn run(&self, args: &[String]) -> Result<Output, String> {
             self.calls.lock().unwrap().push(args.to_vec());
+            Ok(self.out.clone())
+        }
+
+        fn converse(
+            &self,
+            args: &[String],
+            stdin: &str,
+            _done: fn(&str) -> bool,
+        ) -> Result<Output, String> {
+            self.calls.lock().unwrap().push(args.to_vec());
+            *self.stdin.lock().unwrap() = stdin.to_string();
             Ok(self.out.clone())
         }
     }
@@ -1222,5 +1389,78 @@ mod tests {
         let dex = Dex::new(Box::new(fake.clone()));
         let _ = dex.list();
         assert_eq!(fake.last()[0], "list", "unexpected flag: {:?}", fake.last());
+    }
+
+    /// Captured verbatim from `dex mcp` (dexrust 0.2.1), trimmed to the fields
+    /// that matter: the handshake's reply, then the tool call's.
+    const UNSTART_OK: &str = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"dex","version":"1.0.0"}}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\n  \"id\": \"oik4c8wo\",\n  \"started_at\": null\n}"}]}}"#,
+        "\n",
+    );
+
+    /// The CLI has no way to clear `started_at`, so this is the request the
+    /// whole feature rests on: `update_task` with an explicit `null`. An
+    /// *absent* key means "leave it alone", so the null has to be on the wire.
+    #[test]
+    fn unstart_asks_the_mcp_server_to_clear_started_at() {
+        let fake = Fake::new(UNSTART_OK, "", 0);
+        let dex = Dex::for_store_with("/tmp/x/.dex", Box::new(fake.clone())).unwrap();
+
+        dex.unstart("it's \"quoted\"").unwrap();
+
+        assert_eq!(fake.last(), ["--storage-path", "/tmp/x/.dex", "mcp"]);
+
+        let stdin = fake.stdin.lock().unwrap().clone();
+        let sent: Vec<Value> = stdin
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("one JSON message per line"))
+            .collect();
+        assert_eq!(sent[0]["method"], "initialize");
+        assert_eq!(sent[1]["method"], "notifications/initialized");
+
+        let call = &sent[2];
+        assert_eq!(call["method"], "tools/call");
+        assert_eq!(call["params"]["name"], "update_task");
+        let arguments = &call["params"]["arguments"];
+        assert_eq!(arguments["id"], "it's \"quoted\"");
+        assert_eq!(arguments.get("started_at"), Some(&Value::Null));
+    }
+
+    /// The real reply to an unknown id. It is a JSON-RPC *success* whose
+    /// result is flagged `isError`, so checking only for a reply would report
+    /// "un-started" for a task dex never touched.
+    #[test]
+    fn a_tool_error_is_a_failure_and_says_why() {
+        let reply = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\n  \"error\": \"Task \\\"nosuchid\\\" not found\",\n  \"suggestion\": \"Run \\\"dex list --all\\\" to see all available tasks\"\n}"}],"isError":true}}"#,
+            "\n",
+        );
+        let err = dex_with(&Fake::new(reply, "", 0)).unstart("nosuchid").unwrap_err();
+        assert_eq!(err, "Task \"nosuchid\" not found");
+    }
+
+    #[test]
+    fn a_protocol_error_is_a_failure() {
+        let reply = r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Method not found: tools/call"}}"#;
+        let err = dex_with(&Fake::new(reply, "", 0)).unstart("abc").unwrap_err();
+        assert_eq!(err, "Method not found: tools/call");
+    }
+
+    /// A dex too old to have `mcp`, or one that died, answers the handshake at
+    /// most. Silence must not read as success.
+    #[test]
+    fn no_reply_to_the_call_is_a_failure_carrying_stderr() {
+        let handshake_only = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+        let err = dex_with(&Fake::new(handshake_only, "error: unknown command mcp\n", 2))
+            .unstart("abc")
+            .unwrap_err();
+        assert_eq!(err, "error: unknown command mcp");
+
+        let err = dex_with(&Fake::new("", "", 0)).unstart("abc").unwrap_err();
+        assert!(err.contains("did not answer"), "{err}");
     }
 }

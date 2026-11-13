@@ -254,6 +254,7 @@ Acting on the selected task:
 | key | does |
 | --- | --- |
 | `s` | start |
+| `S` | un-start: put an in-progress task back to pending |
 | `c` | complete (prompts for a result) |
 | `r` | rename |
 | `e` | edit the description in `$EDITOR` |
