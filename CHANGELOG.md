@@ -27,11 +27,14 @@ everything between its heading and the next one, so anything trailing the
 oldest entry is swallowed into that entry's release body — which is exactly
 what happened the first time this was checked.
 
-[Unreleased]: https://github.com/DanielCarmingham/dextui/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/DanielCarmingham/dextui/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/DanielCarmingham/dextui/releases/tag/v0.6.0
 [0.5.2]: https://github.com/DanielCarmingham/dextui/releases/tag/v0.5.2
 [0.5.1]: https://github.com/DanielCarmingham/dextui/releases/tag/v0.5.1
 
 ## [Unreleased]
+
+## [0.6.0] - 2026-11-16
 
 ### Added
 
