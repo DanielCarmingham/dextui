@@ -27,12 +27,24 @@ everything between its heading and the next one, so anything trailing the
 oldest entry is swallowed into that entry's release body — which is exactly
 what happened the first time this was checked.
 
-[Unreleased]: https://github.com/DanielCarmingham/dextui/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/DanielCarmingham/dextui/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/DanielCarmingham/dextui/releases/tag/v0.6.1
 [0.6.0]: https://github.com/DanielCarmingham/dextui/releases/tag/v0.6.0
 [0.5.2]: https://github.com/DanielCarmingham/dextui/releases/tag/v0.5.2
 [0.5.1]: https://github.com/DanielCarmingham/dextui/releases/tag/v0.5.1
 
 ## [Unreleased]
+
+## [0.6.1] - 2026-11-16
+
+### Fixed
+
+- Prebuilt binaries and the Homebrew formula for the 0.6.0 changes. 0.6.0
+  reached crates.io, but its release build never finished: the Apple Silicon
+  macOS job was scheduled on a runner GitHub has retired, so no GitHub Release
+  or formula was made. The code is identical to 0.6.0; what it added and
+  changed is in the
+  [0.6.0 notes](https://github.com/DanielCarmingham/dextui/blob/v0.6.1/CHANGELOG.md#060---2026-11-16).
 
 ## [0.6.0] - 2026-11-16
 
